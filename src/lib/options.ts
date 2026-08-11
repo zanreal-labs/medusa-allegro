@@ -69,6 +69,37 @@ export interface ResolvedAllegroOptions {
   backendUrl?: string;
 }
 
+/**
+ * The subset of the resolved options that is safe to hand to a caller.
+ *
+ * `ResolvedAllegroOptions` carries `clientSecret` and `encryptionKey`, so any
+ * accessor that returns it is one careless `res.json()` away from publishing the
+ * plugin's credentials. This shape exists so the module service can answer "how
+ * am I configured?" without that risk: every field here is already visible in
+ * the admin UI or in an outbound Allegro request.
+ *
+ * Deliberately NOT here: `clientId` (half of a credential pair and not needed by
+ * any caller), `clientSecret`, `encryptionKey`, `backendUrl` and `docsUrl`.
+ */
+export interface AllegroPublicOptions {
+  environment: AllegroEnvironment;
+  appName: string;
+  appVersion: string;
+  redirectPath: string;
+  scopes: string;
+  priceSyncDisabled: boolean;
+}
+
+/** Narrow the resolved options to the fields that may leave the service. */
+export const toPublicAllegroOptions = (options: ResolvedAllegroOptions): AllegroPublicOptions => ({
+  appName: options.appName,
+  appVersion: options.appVersion,
+  environment: options.environment,
+  priceSyncDisabled: options.priceSyncDisabled,
+  redirectPath: options.redirectPath,
+  scopes: options.scopes,
+});
+
 export const DEFAULT_REDIRECT_PATH = "/admin/allegro/oauth/callback";
 
 export const DEFAULT_SCOPES =

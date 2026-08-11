@@ -13,6 +13,7 @@ interface Connection {
   connectedAt?: string;
   expired?: boolean;
   refreshTokenMissing?: boolean;
+  credentialsUnreadable?: boolean;
   priceSyncDisabled: boolean;
   scopesRequested: string;
 }
@@ -54,6 +55,25 @@ const formatDate = (value?: string | null): string => {
   }
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "unknown" : date.toLocaleString();
+};
+
+/**
+ * A row whose tokens will not decrypt is not a working connection, so the badge
+ * says so. Reporting a green "Connected" next to an error alert sends the
+ * operator looking at Allegro instead of at their own `encryptionKey`.
+ */
+const connectionColor = (connection: Connection): "green" | "red" | "grey" => {
+  if (!connection.connected) {
+    return "grey";
+  }
+  return connection.credentialsUnreadable ? "red" : "green";
+};
+
+const connectionLabel = (connection: Connection): string => {
+  if (!connection.connected) {
+    return "Not connected";
+  }
+  return connection.credentialsUnreadable ? "Unreadable credentials" : "Connected";
 };
 
 const SYNC_STATUS_COLOR: Record<SyncStateRow["status"], "green" | "orange" | "red" | "grey"> = {
@@ -155,8 +175,8 @@ const AllegroSettingsPage = () => {
         <div className="mb-4 flex items-center justify-between">
           <Heading level="h2">Connection</Heading>
           {connection ? (
-            <StatusBadge color={connection.connected ? "green" : "grey"}>
-              {connection.connected ? "Connected" : "Not connected"}
+            <StatusBadge color={connectionColor(connection)}>
+              {connectionLabel(connection)}
             </StatusBadge>
           ) : null}
         </div>
@@ -185,6 +205,15 @@ const AllegroSettingsPage = () => {
                 requests: <code>{connection.scopesRequested}</code>
               </Text>
             )}
+
+            {connection.connected && connection.credentialsUnreadable ? (
+              <Alert variant="error">
+                The stored tokens cannot be decrypted with the current `encryptionKey`, so every
+                Allegro call will fail. This happens when the key is rotated or mistyped after the
+                account was connected. Restore the original key, or reconnect to store the tokens
+                under the current one.
+              </Alert>
+            ) : null}
 
             {connection.connected && connection.refreshTokenMissing ? (
               <Alert variant="warning">

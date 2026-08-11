@@ -11,7 +11,7 @@ module.exports = {
       "@swc/jest",
       {
         jsc: {
-          parser: { syntax: "typescript", decorators: true },
+          parser: { decorators: true, syntax: "typescript" },
           target: "es2021",
         },
       },
@@ -22,7 +22,12 @@ module.exports = {
 if (process.env.TEST_TYPE === "integration:http") {
   module.exports.testMatch = ["**/integration-tests/http/*.spec.[jt]s"];
 } else if (process.env.TEST_TYPE === "integration:modules") {
-  module.exports.testMatch = ["**/src/modules/*/__tests__/**/*.[jt]s"];
+  // `!(*.unit)` matters: module services have unit specs in the same
+  // `__tests__` directory as their integration specs, and the stock Medusa
+  // pattern (`**/*.[jt]s`) swept them into the integration run too. They would
+  // then execute against a live Postgres they do not need, and every unit spec
+  // would be reported twice.
+  module.exports.testMatch = ["**/src/modules/*/__tests__/**/!(*.unit).spec.[jt]s"];
 } else if (process.env.TEST_TYPE === "unit") {
   module.exports.testMatch = ["**/src/**/__tests__/**/*.unit.spec.[jt]s"];
 }
