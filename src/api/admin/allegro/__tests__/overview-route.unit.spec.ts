@@ -32,10 +32,41 @@ const syncStateRow = {
   status: "idle",
 };
 
+/**
+ * The narrowed option shape, as `getPublicOptions` returns it.
+ *
+ * In the response on purpose: the settings page has to be able to say which two rule
+ * names the account must carry, where the SRP comes from, and which sales channel
+ * scopes the sync - configuration an operator cannot read from anywhere else. None of
+ * it is secret material, which the negative assertions below keep true.
+ */
+const publicOptions = {
+  appName: "MedusaAllegro",
+  appVersion: "0.1.0",
+  automationRules: { promoted: "Store Sale", standard: "Store" },
+  changeCap: 100,
+  environment: "production",
+  marketplaceId: "allegro-pl",
+  ordersSyncDisabled: false,
+  priceSyncDisabled: false,
+  redirectPath: "/admin/allegro/oauth/callback",
+  scopes: "allegro:api:sale:offers:read",
+  stockLocationIds: [],
+  stockSyncDisabled: false,
+};
+
+const killSwitches = {
+  ordersSyncDisabled: false,
+  priceSyncDisabled: false,
+  stockSyncDisabled: false,
+};
+
 const harness = () => {
   const listArgs: unknown[][] = [];
   const service = {
     getConnectionStatus: jest.fn(() => Promise.resolve(connectionStatus)),
+    getKillSwitches: jest.fn(() => Promise.resolve(killSwitches)),
+    getPublicOptions: jest.fn(() => Promise.resolve(publicOptions)),
     listAllegroSyncStates: jest.fn((...args: unknown[]) => {
       listArgs.push(args);
       return Promise.resolve([syncStateRow]);
@@ -59,7 +90,14 @@ describe("GET /admin/allegro", () => {
     await GET(h.req, h.res);
 
     expect(h.bodies).toHaveLength(1);
-    expect(h.bodies[0]).toEqual({ connection: connectionStatus, sync_state: [syncStateRow] });
+    expect(h.bodies[0]).toEqual({
+      connection: connectionStatus,
+      // Three switches, not one: "price sync is off" reads as "nothing is written",
+      // which is wrong while stock sync is on.
+      kill_switches: killSwitches,
+      options: publicOptions,
+      sync_state: [syncStateRow],
+    });
   });
 
   it("returns no key ending in _encrypted, at any depth", async () => {

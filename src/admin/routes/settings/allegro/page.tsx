@@ -1,37 +1,9 @@
 import { defineRouteConfig } from "@medusajs/admin-sdk";
 import { Alert, Badge, Button, Container, Heading, StatusBadge, Table, Text } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
+import { formatDate, SYNC_STATUS_COLOR } from "../../../lib/format";
 import { sdk } from "../../../lib/sdk";
-
-/** Mirrors `AllegroConnectionStatus` from the module service. */
-interface Connection {
-  connected: boolean;
-  environment: string;
-  accountLogin?: string;
-  scope?: string;
-  expiresAt?: string;
-  connectedAt?: string;
-  expired?: boolean;
-  refreshTokenMissing?: boolean;
-  credentialsUnreadable?: boolean;
-  priceSyncDisabled: boolean;
-  scopesRequested: string;
-}
-
-interface SyncStateRow {
-  id: string;
-  provider: string;
-  status: "idle" | "running" | "ok" | "error";
-  last_synced_at?: string | null;
-  last_error?: string | null;
-  cursor?: string | null;
-  write_scope_missing?: boolean;
-}
-
-interface OverviewResponse {
-  connection: Connection;
-  sync_state: SyncStateRow[];
-}
+import type { Connection, OverviewResponse } from "../../../lib/types";
 
 /**
  * The callback route can only pass back a short code, never Allegro's own
@@ -47,14 +19,6 @@ const CALLBACK_ERRORS: Record<string, string> = {
     "The connection succeeded but the tokens could not be stored. Check `encryptionKey` and the server log.",
   state_mismatch:
     "The security check failed. This happens when the flow takes over 10 minutes, or when it was not started from this browser. Start it again.",
-};
-
-const formatDate = (value?: string | null): string => {
-  if (!value) {
-    return "never";
-  }
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "unknown" : date.toLocaleString();
 };
 
 /**
@@ -76,11 +40,39 @@ const connectionLabel = (connection: Connection): string => {
   return connection.credentialsUnreadable ? "Unreadable credentials" : "Connected";
 };
 
-const SYNC_STATUS_COLOR: Record<SyncStateRow["status"], "green" | "orange" | "red" | "grey"> = {
-  error: "red",
-  idle: "grey",
-  ok: "green",
-  running: "orange",
+/** What each provider row is, in one line, so the table needs no legend. */
+const PROVIDER_DESCRIPTION: Record<string, string> = {
+  offers: "Maps SKUs to offers, sweeps promotion state, discovers categories. Read-only.",
+  orders: "Drains the order event journal into Medusa orders.",
+  "price-automation": "Observes each offer's pricing rule and its drift. Read-only.",
+  prices: "Attaches price-automation rules and asserts the break-even/SRP bounds.",
+  stock: "Pushes Medusa available quantity to Allegro.",
+};
+
+/**
+ * The counters worth showing per provider, in order.
+ *
+ * A curated list rather than every key: the summaries carry a dozen counters each and
+ * a wall of numbers is not readable. These are the ones that answer "did this run do
+ * anything, and should I worry?".
+ */
+const PROVIDER_COUNTERS: Record<string, string[]> = {
+  offers: ["offersListed", "matched", "unlinked", "unmatchedVariants"],
+  orders: ["eventsRead", "refreshed", "statusChanged", "failed"],
+  "price-automation": ["scanned", "drift", "transitions"],
+  prices: ["scanned", "synced", "alreadyInSync", "failed"],
+  stock: ["eligible", "synced", "alreadyInSync", "failed"],
+};
+
+const formatCounters = (provider: string, counts?: Record<string, unknown> | null): string => {
+  if (!counts) {
+    return "no run recorded";
+  }
+  const keys = PROVIDER_COUNTERS[provider] ?? Object.keys(counts).slice(0, 4);
+  const parts = keys
+    .filter((key) => typeof counts[key] === "number")
+    .map((key) => `${key}: ${counts[key] as number}`);
+  return parts.length > 0 ? parts.join(", ") : "no counters recorded";
 };
 
 const AllegroSettingsPage = () => {
@@ -142,6 +134,14 @@ const AllegroSettingsPage = () => {
   };
 
   const connection = data?.connection;
+  /**
+   * The persistent reconnect banner.
+   *
+   * Raised from ANY provider row, because the 403 is one condition about the stored
+   * token rather than a fact about a particular loop: whichever loop hit it first, the
+   * remedy is the same reconnect, and the others will hit it too.
+   */
+  const writeScopeMissing = (data?.sync_state ?? []).some((row) => row.write_scope_missing);
 
   return (
     <Container className="divide-y p-0">
@@ -236,10 +236,12 @@ const AllegroSettingsPage = () => {
               </Alert>
             ) : null}
 
-            {connection.priceSyncDisabled ? (
-              <Alert variant="warning">
-                Price sync is disabled (plugin option `priceSyncDisabled`, or
-                `ALLEGRO_PRICE_SYNC_DISABLED`). No price-affecting write will be sent to Allegro.
+            {writeScopeMissing ? (
+              <Alert variant="error">
+                The stored token cannot write offers: Allegro answered 403 on a price or quantity
+                command. No retry fixes this - reconnect Allegro so the grant includes
+                <code> allegro:api:sale:offers:write</code>. Until then the write loops no-op safely
+                and this banner stays up.
               </Alert>
             ) : null}
 
@@ -263,11 +265,67 @@ const AllegroSettingsPage = () => {
 
       <div className="px-6 py-4">
         <Heading className="mb-2" level="h2">
+          Writers
+        </Heading>
+        <Text className="text-ui-fg-subtle mb-3" size="small">
+          Three loops write to Allegro, each with its own switch. They are listed separately because
+          "price sync is off" does not mean nothing is written.
+        </Text>
+        <div className="flex flex-wrap gap-2">
+          <KillSwitch
+            disabled={data?.kill_switches.priceSyncDisabled}
+            envVar="ALLEGRO_PRICE_SYNC_DISABLED"
+            label="Price writes"
+          />
+          <KillSwitch
+            disabled={data?.kill_switches.stockSyncDisabled}
+            envVar="ALLEGRO_STOCK_SYNC_DISABLED"
+            label="Quantity writes"
+          />
+          <KillSwitch
+            disabled={data?.kill_switches.ordersSyncDisabled}
+            envVar="ALLEGRO_ORDERS_SYNC_DISABLED"
+            label="Order drain"
+          />
+        </div>
+        {data && !data.options.automationRules ? (
+          <Alert className="mt-4" variant="warning">
+            The `automationRules` option is not configured, so price sync is inert: there are no
+            rule names to attach and the plugin never invents one. Set the two rule names that
+            already exist on the Allegro account.
+          </Alert>
+        ) : null}
+        {data?.options.automationRules ? (
+          <Text className="text-ui-fg-muted mt-3" size="small">
+            Rules: <code>{data.options.automationRules.standard}</code> for a standard offer,{" "}
+            <code>{data.options.automationRules.promoted}</code> when promoted. Both must exist on
+            the Allegro account; a missing or renamed rule aborts the whole run with nothing
+            written.
+          </Text>
+        ) : null}
+        {data && !(data.options.srpMetadataKey || data.options.srpPriceListId) ? (
+          <Alert className="mt-4" variant="warning">
+            No SRP source is configured (`srpMetadataKey` or `srpPriceListId`), so every offer is
+            skipped with reason `missing-srp`. The SRP is the price-range ceiling, and there is
+            deliberately no fallback to the current selling price - that would let a rule ratchet
+            the price down on every run.
+          </Alert>
+        ) : null}
+        <Text className="text-ui-fg-muted mt-3" size="small">
+          Change cap: {data?.options.changeCap ?? "-"} command(s) per price run. Marketplace:{" "}
+          <code>{data?.options.marketplaceId ?? "-"}</code>. Sales channel:{" "}
+          {data?.options.salesChannelId ?? data?.options.salesChannelName ?? "whole catalogue"}.
+        </Text>
+      </div>
+
+      <div className="overflow-x-auto px-6 py-4">
+        <Heading className="mb-2" level="h2">
           Sync health
         </Heading>
         <Text className="text-ui-fg-subtle mb-4" size="small">
-          One row per sync loop. Wave 1 ships no sync loops yet, so this table is empty until offer
-          discovery lands.
+          One row per loop. A row that has never run has no state yet; a loop that ran and did
+          nothing still records its counters, which is how "nothing to do" stays distinguishable
+          from "quietly broken".
         </Text>
 
         {data?.sync_state?.length ? (
@@ -276,19 +334,32 @@ const AllegroSettingsPage = () => {
               <Table.Row>
                 <Table.HeaderCell>Provider</Table.HeaderCell>
                 <Table.HeaderCell>Status</Table.HeaderCell>
-                <Table.HeaderCell>Last synced</Table.HeaderCell>
+                <Table.HeaderCell>Last run</Table.HeaderCell>
+                <Table.HeaderCell>Counters</Table.HeaderCell>
                 <Table.HeaderCell>Last error</Table.HeaderCell>
               </Table.Row>
             </Table.Header>
             <Table.Body>
               {data.sync_state.map((row) => (
                 <Table.Row key={row.id}>
-                  <Table.Cell>{row.provider}</Table.Cell>
+                  <Table.Cell>
+                    <div className="flex flex-col">
+                      <span className="txt-compact-small-plus">{row.provider}</span>
+                      <span className="text-ui-fg-muted txt-compact-xsmall">
+                        {PROVIDER_DESCRIPTION[row.provider] ?? ""}
+                      </span>
+                    </div>
+                  </Table.Cell>
                   <Table.Cell>
                     <StatusBadge color={SYNC_STATUS_COLOR[row.status]}>{row.status}</StatusBadge>
                   </Table.Cell>
-                  <Table.Cell>{formatDate(row.last_synced_at)}</Table.Cell>
-                  <Table.Cell className="text-ui-fg-subtle">
+                  <Table.Cell className="txt-compact-xsmall">
+                    {formatDate(row.last_synced_at)}
+                  </Table.Cell>
+                  <Table.Cell className="text-ui-fg-subtle txt-compact-xsmall">
+                    {formatCounters(row.provider, row.counts)}
+                  </Table.Cell>
+                  <Table.Cell className="text-ui-fg-subtle txt-compact-xsmall">
                     {row.write_scope_missing
                       ? "Write scope missing: reconnect with offer write access."
                       : (row.last_error ?? "-")}
@@ -299,13 +370,39 @@ const AllegroSettingsPage = () => {
           </Table>
         ) : (
           <Text className="text-ui-fg-muted" size="small">
-            No sync state recorded.
+            No sync state recorded. Each loop creates its row on its first run.
           </Text>
         )}
       </div>
     </Container>
   );
 };
+
+/**
+ * One writer's switch state.
+ *
+ * Named after what it stops rather than after the option, because that is what an
+ * operator is deciding about, and it shows the env var so the remedy is on screen.
+ */
+const KillSwitch = ({
+  label,
+  disabled,
+  envVar,
+}: {
+  label: string;
+  disabled?: boolean;
+  envVar: string;
+}) => (
+  <div className="flex flex-col gap-y-1 rounded-lg border px-3 py-2">
+    <div className="flex items-center gap-x-2">
+      <StatusBadge color={disabled ? "red" : "green"}>
+        {disabled ? "disabled" : "armed"}
+      </StatusBadge>
+      <span className="txt-compact-small-plus">{label}</span>
+    </div>
+    <code className="text-ui-fg-muted txt-compact-xsmall">{envVar}</code>
+  </div>
+);
 
 const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
   <div>
