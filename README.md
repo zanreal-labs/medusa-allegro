@@ -7,26 +7,38 @@
 Medusa v2 plugin for [Allegro](https://allegro.pl), the largest marketplace in
 Poland.
 
-**Status: pre-release.** This is wave 1. It gives you a working, encrypted OAuth
-connection to an Allegro seller account, the data model the later waves write
-into, and a settings page in the Medusa Admin. It does **not** sync anything yet:
-no offer discovery, no stock push, no price writes, no order import. See
-[Roadmap](#roadmap) for what lands when, and treat the schema as settled but the
-API surface as still moving until 1.0.
+**Status: pre-release.** The full sync engine is here: offer discovery, a read-only
+pricing monitor, price-automation writes, the quantity push, and the order event
+drain. Treat the schema as settled and the API surface as still moving until 1.0.
 
-What is here today:
+What is here:
 
 - A zero-dependency, fetch-based Allegro REST client, ported from a production
-  integration and covered by 111 unit tests. Offers, promo options,
-  price-automation rules and commands, order events, checkout forms, categories,
-  fee preview.
+  integration. Offers, promo options, price-automation rules and commands, order
+  events, checkout forms, categories, fee preview.
 - OAuth 2.0 authorization-code flow with a CSRF-protected callback, refresh-token
   rotation, and AES-256-GCM encryption of both tokens at rest.
-- Five data models with generated migrations: the connection, the SKU-to-offer
-  mapping, per-category commission rates, an append-only price-push audit trail,
-  and per-loop sync health.
-- An admin settings page under Settings -> Allegro: connection status, connect,
-  reconnect, disconnect, and a sync-health table.
+- **Offer discovery** matches every seller offer's sygnatura to a Medusa variant
+  SKU, sweeps promotion state in one paginated pass, creates category rate rows,
+  and records conflicts instead of guessing.
+- **A read-only pricing monitor** records each offer's price mode, attached rule
+  and drift, and audits real rule transitions.
+- **Price sync** attaches the rule the promotion state calls for and asserts
+  `[break-even, SRP]` bounds, with a per-run change cap, per-offer quarantine, a
+  circuit breaker, and write-scope detection.
+- **Stock push** reconciles Medusa's available quantity into Allegro through the
+  quantity-change command.
+- **Order sync** drains `GET /order/events` into Medusa orders, with fulfillment
+  write-back and an operator import window for gaps beyond the event retention
+  period.
+- Admin pages for offers (conflict and drift filters, per-offer opt-out, push
+  history), category rates, and orders (quarantine repair, import window), plus a
+  settings page with per-loop health and the three kill switches.
+
+**Nothing writes to Allegro until you configure it to.** Price sync is inert
+without `automationRules`, both write loops honour their own kill switch, and a
+fresh install starts its order cursor at "now" rather than importing history. See
+[Turning the writers on](#turning-the-writers-on).
 
 ## Install
 
@@ -86,15 +98,62 @@ npx medusa db:migrate
 | `priceSyncDisabled` | `boolean`                   | no       | `false`                                                                                | Kill-switch for every price-affecting write. Must be a real boolean: a string throws at boot rather than failing open. Use `ALLEGRO_PRICE_SYNC_DISABLED` for the env-driven case. |
 | `backendUrl`        | `string`                    | no       | derived                                                                                | Absolute base URL of this backend. Set it when a proxy rewrites `Host`. Falls back to `MEDUSA_BACKEND_URL`, then the request.                                                     |
 
+### Sync options
+
+| Option               | Type                                     | Required | Default          | Notes                                                                                                                                                                                                                       |
+| -------------------- | ---------------------------------------- | -------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `automationRules`    | `{ promoted: string; standard: string }` | no       | -                | Names of two price-automation rules that must **already exist** on the Allegro account. Resolved by name every run; missing, renamed or ambiguous aborts the run with nothing written. **Omit it and price sync is inert.** |
+| `changeCap`          | `number`                                 | no       | `100`            | Price-automation commands per run. Positive integer; `0` is rejected - use a kill switch to stop writes, not a zero cap.                                                                                                    |
+| `stockSyncDisabled`  | `boolean`                                | no       | `false`          | Kill-switch for every quantity write. Same boolean-only contract as `priceSyncDisabled`.                                                                                                                                    |
+| `ordersSyncDisabled` | `boolean`                                | no       | `false`          | Kill-switch for the order drain. The journal is not consumed at all, so the cursor holds and nothing is skipped.                                                                                                            |
+| `salesChannelId`     | `string`                                 | no       | -                | Scopes which products are sync-eligible. With neither this nor `salesChannelName`, the whole catalogue is eligible.                                                                                                         |
+| `salesChannelName`   | `string`                                 | no       | -                | Resolved by name at run time. A configured name that does not exist is an **error**, not a fallback to the whole catalogue.                                                                                                 |
+| `stockLocationIds`   | `string[]`                               | no       | every location   | Locations whose available quantity is summed for the push. `ALLEGRO_STOCK_LOCATION_IDS` overrides it.                                                                                                                       |
+| `srpMetadataKey`     | `string`                                 | no       | -                | Reads the SRP (the price-range ceiling) from that key in the variant's `metadata`, falling back to the product's. Mutually exclusive with `srpPriceListId`.                                                                 |
+| `srpPriceListId`     | `string`                                 | no       | -                | Reads the SRP from the variant's price in that price list.                                                                                                                                                                  |
+| `costsModuleKey`     | `string`                                 | no       | `"productCosts"` | Container key of `@zanreal/medusa-product-costs`, resolved lazily and optionally. Without it, every offer is skipped with `missing-break-even`. There is never a default floor.                                             |
+| `marketplaceId`      | `string`                                 | no       | `"allegro-pl"`   | Marketplace the rule assignment targets.                                                                                                                                                                                    |
+| `regionId`           | `string`                                 | no       | derived          | Region Allegro orders are created in. Falls back to the first region matching the order currency, then the first region at all (with a warning).                                                                            |
+
 All options are validated in a module loader, so a misconfiguration fails at boot
-with a specific message instead of surfacing as an opaque Allegro error later.
+with a specific message instead of surfacing as an opaque Allegro error later. The
+validations worth knowing about, because each catches a mistake that would
+otherwise present as a silently inert loop:
+
+- A boolean-looking **string** on any kill switch throws. `priceSyncDisabled:
+process.env.X` yields `"true"`, which a truthiness test honours and a `=== true`
+  test ignores - the switch would read as enabled while you believed it was off.
+- **One rule name used for both promotion states** throws. A promotion flip would
+  then be a no-op switch, so the promoted commission rate would never reach the
+  price floor, and price sync would look healthy while systematically
+  under-flooring every promoted offer.
+- **Both SRP sources set at once** throws. The ceiling is what stops an automation
+  rule ratcheting a price down; two sources means an ambiguous ceiling.
 
 ### Environment variables
 
-| Variable                      | Effect                                                                                                                                                      |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ALLEGRO_PRICE_SYNC_DISABLED` | `1`, `true` or `yes` disables price writes regardless of `priceSyncDisabled`. The env wins on purpose: an operator setting it is responding to an incident. |
-| `MEDUSA_BACKEND_URL`          | Fallback for `backendUrl` when deriving the OAuth redirect URI.                                                                                             |
+| Variable                       | Effect                                                                                                                                                                  |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ALLEGRO_PRICE_SYNC_DISABLED`  | `1`, `true` or `yes` disables price writes regardless of `priceSyncDisabled`. The env wins on purpose: an operator setting it is responding to an incident.             |
+| `ALLEGRO_STOCK_SYNC_DISABLED`  | The same, for quantity writes. **`ALLEGRO_PRICE_SYNC_DISABLED` alone does not stop all writes** - the quantity command is a separate writer.                            |
+| `ALLEGRO_ORDERS_SYNC_DISABLED` | The same, for the order drain. Note that the fulfillment write-back subscriber is deliberately NOT gated by it - see [Fulfillment write-back](#fulfillment-write-back). |
+| `ALLEGRO_OFFER_SYNC_CRON`      | Schedule for the hourly catalogue pass (discovery, monitor, price sync). Default `"15 * * * *"`.                                                                        |
+| `ALLEGRO_STOCK_SYNC_CRON`      | Schedule for the quantity push. Default `"*/15 * * * *"`.                                                                                                               |
+| `ALLEGRO_ORDERS_SYNC_CRON`     | Schedule for the order drain. Default `"* * * * *"`.                                                                                                                    |
+| `ALLEGRO_STOCK_LOCATION_IDS`   | Comma-separated stock location ids, overriding `stockLocationIds`.                                                                                                      |
+| `MEDUSA_BACKEND_URL`           | Fallback for `backendUrl` when deriving the OAuth redirect URI.                                                                                                         |
+
+The three crons are env vars rather than plugin options because Medusa evaluates a
+scheduled job's `schedule` at plugin-load time, before the DI container - and
+therefore this plugin's `options` - exists. There is no way to read a module's
+resolved options from that static export.
+
+**The schedules start firing as soon as the plugin loads.** Installing or upgrading
+this plugin turns the loops on; only the kill switches hold the writers back. The
+read paths are harmless (discovery and the monitor write nothing to Allegro) and
+price sync is inert without `automationRules`, but if you are staging a cutover from
+another system, set all three kill switches BEFORE the version that reads them
+ships. See [Turning the writers on](#turning-the-writers-on).
 
 ## OAuth setup
 
@@ -235,9 +294,10 @@ simply by leaving the field empty.
 | `allegro_offer`         | SKU-to-offer mapping. `sku` unique, `offer_id` a resolved cache. Money as text, verbatim from Allegro.      |
 | `allegro_category_rate` | Sale commission per Allegro category, plain and promoted. Maintained by an operator - see below.            |
 | `allegro_price_push`    | Append-only audit of price-automation decisions, including the pushed `[floor, ceiling]`.                   |
-| `allegro_sync_state`    | Per-loop health: status, cursor, last error, failure streaks, and whether a write scope is missing.         |
+| `allegro_order`         | One row per Allegro checkout form: the Medusa order it produced, the raw and derived statuses, conflicts.   |
+| `allegro_sync_state`    | Per-loop health: status, cursor, counters, last error, failure state, and whether a write scope is missing. |
 
-Two of these carry non-obvious constraints worth knowing before you build on
+Three of these carry non-obvious constraints worth knowing before you build on
 them.
 
 **`allegro_price_push` is append-only, and it is the only record of pushed price
@@ -257,6 +317,368 @@ rather than rates. Until that changes, an operator enters rates from the publish
 fee table. Both rate columns are nullable so "unknown" stays distinguishable from
 "zero commission": a margin calculation that reads a missing rate as 0% quietly
 turns a loss-making price into an acceptable one.
+
+**`allegro_order` is separate from the Medusa order on purpose.** A checkout form
+can exist without an order (creation failed, so the form stays visible with its
+error rather than vanishing), Allegro's status ladder is richer than Medusa's enum,
+and `derived_status` has to be the comparison basis for "did Allegro move?" - see
+[Status mapping](#status-mapping).
+
+## The sync architecture
+
+Five loops, each with its own row in `allegro_sync_state`, its own single-flight
+claim, and - for the two that write - its own kill switch. They are independently
+observable and independently runnable from the admin.
+
+| Loop            | Provider           | Schedule                                | Writes to Allegro?                   |
+| --------------- | ------------------ | --------------------------------------- | ------------------------------------ |
+| Offer discovery | `offers`           | `ALLEGRO_OFFER_SYNC_CRON`, `15 * * * *` | No                                   |
+| Pricing monitor | `price-automation` | chained after discovery                 | No                                   |
+| Price sync      | `prices`           | chained after the monitor               | Yes - price-automation command       |
+| Stock push      | `stock`            | `ALLEGRO_STOCK_SYNC_CRON`, `*/15 * * *` | Yes - quantity-change command        |
+| Order drain     | `orders`           | `ALLEGRO_ORDERS_SYNC_CRON`, `* * * * *` | Only fulfillment status, on an event |
+
+The first three are chained into one job rather than scheduled separately because
+they all need the same input - a complete listing of the seller's offers - and
+paging a full catalogue three times an hour is how a well-behaved integration earns
+a rate limit. The order matters: discovery establishes which offer owns which SKU
+and which mappings are conflicted, and price sync refuses to write to anything
+conflicted, so running price sync against a stale mapping is exactly the case where
+a command lands on the wrong offer.
+
+Stock has its own cadence because stock moves on every order and an hour-stale
+marketplace quantity is how a sold-out item stays purchasable. Orders runs per
+minute because an unapplied `BOUGHT` event is an order nobody has been told about.
+
+### Reconciliation first, events almost never
+
+Every loop except fulfillment write-back is a **reconciliation**: it reads the whole
+relevant state on each run and computes the difference. None of them depends on a
+Medusa event firing.
+
+That is deliberate. Medusa's inventory events are not a reliable trigger
+([medusa#11691](https://github.com/medusajs/medusa/issues/11691)), and a design that
+depended on them would leave a permanently wrong marketplace quantity behind every
+missed event. With reconciliation, a missed event costs at most one cycle of
+staleness.
+
+The one exception is fulfillment write-back, and it is an exception for a structural
+reason rather than a convenient one: a fulfillment is a point-in-time act, not
+reconcilable state. There is no "current fulfillment status" in Medusa for a sweep
+to compare against Allegro's, so the event is the only signal there is.
+
+### Medusa inventory is the source of truth for stock
+
+The quantity pushed to Allegro is `retrieveAvailableQuantity` - stocked minus
+reserved, so units already promised to unfulfilled Medusa orders are not advertised
+again.
+
+**Keeping Medusa inventory honest is explicitly not this plugin's job.** In this
+stack that belongs to [`@zanreal/medusa-marken`](https://github.com/zanreal-labs/medusa-marken),
+which owns the supplier snapshot and the `stockArmed` gate that refuses to propagate
+an untrustworthy one into Medusa inventory. That guard lives one layer up, where the
+supplier response is actually visible; a second one here would be a guess about data
+this plugin has no source for.
+
+What this loop does refuse on is its own uncertainty. An ambiguous SKU match or an
+unreadable quantity on either side refuses the **whole plan**, because a partial
+quantity push leaves some offers fresh and others stale with nothing recording which
+is which - so the next run cannot tell either.
+
+### Conflicts are recorded, never resolved
+
+Discovery records four mapping conflicts on `allegro_offer.conflict`, and a
+conflicted row is stripped of its `offer_id` so no write path can act on it:
+
+| Conflict              | Meaning                                                      | What to do                                                               |
+| --------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `duplicate-sku`       | Two live offers claim one sygnatura, or two variants one SKU | Decide which one keeps it. The message names the competing ids.          |
+| `missing-external-id` | A previously mapped offer no longer carries a sygnatura      | Set the sygnatura back on Allegro.                                       |
+| `no-variant`          | A sygnatura matches no variant in the Allegro sales channel  | Fix the sygnatura, or publish the product to the channel.                |
+| `no-offer`            | A stored mapping's offer is gone from the listing            | Usually nothing: the link was cleared and discovery re-links on re-list. |
+
+Picking a winner for a contested SKU would push a price or a quantity to the wrong
+offer, which is a real mispricing or a real oversell. So the plugin refuses, and the
+Offers admin page has a conflicts filter for exactly this.
+
+### The empty-response guard
+
+Discovery unlinks a stored mapping whose offer is no longer in the listing. That is
+only sound when the listing is trustworthy, so unlinking requires a listing that is
+both **non-empty** and **verified complete** against Allegro's own `totalCount`. A
+transient failure yielding zero offers would otherwise clear every mapping the store
+has, leaving the next run nothing to rebuild from.
+
+The listing itself is fail-closed for the same reason: a short page is an error
+rather than a smaller array, because every consumer draws a conclusion from an
+offer's absence.
+
+### Price sync: the bounds
+
+Bounds are `[ceil(break-even), SRP]`.
+
+- **The floor** is `grossCost / (1 - commissionRate)`, the smallest gross price at
+  which net income reaches zero. `grossCost` comes from
+  `@zanreal/medusa-product-costs` (a **soft** dependency, resolved lazily), and the
+  commission rate from `allegro_category_rate` selected by the offer's category
+  **and its promotion state**. Ceiled to a whole unit, because the managed rules
+  require it.
+- **The ceiling** is the SRP, from `srpMetadataKey` or `srpPriceListId`.
+
+**Any missing input skips the offer with a counted reason. Neither bound is ever
+defaulted.** A defaulted floor is a licence to sell at a loss; a ceiling guessed
+from the current selling price lets a rule ratchet the price down on every run,
+since each run's price becomes the next run's ceiling. The skip reasons, in the
+order the ladder reports them:
+
+`not-linked`, `sync-disabled`, `status-unknown`, `offer-not-active`,
+`promotion-unresolved`, `missing-break-even`, `missing-srp`, `invalid-bounds`.
+
+The order IS the reported reason, deliberately: an unlinked SKU reports
+`not-linked` even when it is also missing an SRP, and the per-offer opt-out
+short-circuits before any data check so a disabled offer never surfaces a spurious
+"missing break-even" for somebody to chase.
+
+Two subtleties worth knowing. A promoted offer whose category has a standard rate
+filled in but a **blank promoted rate** is skipped - flooring it on the standard
+rate would under-floor it. And `status-unknown` is its own reason rather than a
+pass-through: a write is only safe against an offer positively observed as ACTIVE.
+
+### Price sync: bounds memory
+
+Allegro accepts a `[min, max]` range when you attach a rule and returns it nowhere.
+It is write-only. So `allegro_price_push` is the only bounds memory there is, and the
+scan that reads it has two rules:
+
+- Rows newest-first, **first success per offer wins**. A newer success that carries
+  no bounds deliberately claims the slot, so it reads as "no bounds on record" and
+  triggers a re-push rather than letting an older row's stale range look current.
+- Only `result: "success"` counts. An `observed` row is the monitor recording state
+  it did not write; a `failed` row's bounds never landed.
+
+An offer with no recorded bounds is re-pushed, which is idempotent.
+
+### Price sync: the safety machinery
+
+- **Fail-loud rule resolution.** Both rule names are resolved against the live rules
+  list every run. Missing, renamed or ambiguous aborts the whole run with nothing
+  written. The plugin never guesses which rule you meant and never creates one.
+- **Change cap** (`changeCap`, default 100). A bug that mislabels the whole catalogue
+  as drifting can reprice at most that many offers before a human sees the run and
+  can flip the switch. The remainder waits for the next tick.
+- **Per-offer quarantine** after 5 consecutive failures, so one permanently bad offer
+  cannot burn the run's budget every tick. Never silent: named in `last_error` and in
+  the admin, with a manual push as the remedy.
+- **Circuit breaker.** A tick where every command failed, or where any command hit
+  429 / 5xx / an auth error / a 403, is SYSTEMIC: nothing is quarantined, the run
+  holds, the next tick retries. Quarantine is only safe on the evidence that the rest
+  of the pipeline works - without that gate, a five-minute outage would quarantine
+  the whole working set at once. Stuck-and-self-healing beats skipped.
+- **Write-scope detection.** A 403 on a command is the signature of a token granted
+  without `allegro:api:sale:offers:write`. It is one systemic condition, not a
+  hundred bad offers, so it sets `write_scope_missing`, raises a persistent admin
+  banner, and no-ops safely. The first run that reaches the endpoint without a 403
+  clears it.
+- **Single-flight claim** on the provider row, so a scheduled run and an operator's
+  manual push cannot interleave on the same offer. A `running` claim older than six
+  minutes is taken over as crashed, so one killed process cannot wedge the loop.
+
+### Orders: the event journal drain
+
+`GET /order/events` is the only scheduled input. Polling
+`checkout-forms?updatedAt.gte=` cannot replace it: Allegro does not reliably bump a
+form's `updatedAt` when only its fulfillment status changed, so a window sweep cannot
+see the most common status change there is.
+
+**Cursor discipline.** Events are consumed in order and the cursor advances only over
+the leading run of events whose order landed. The first event belonging to a failed
+or deferred order stops the advance, so it and everything after it replay next tick.
+Applying an order twice is harmless - the upsert is idempotent - and no status change
+can be lost to a transient failure.
+
+Three failure modes a single-input sync has to answer for, and how:
+
+- **One bad order must not wedge the tick.** After 5 consecutive failures the form is
+  quarantined and the cursor is allowed past it. Without that escape, one permanently
+  broken order pins the cursor forever and eventually no order imports at all.
+- **An outage must not be mistaken for a hundred bad orders.** A tick where every
+  refresh failed and none succeeded is systemic: no streak grows, nothing is
+  quarantined, the cursor holds.
+- **A backlog must not starve new orders.** The per-run cap is spent oldest-first,
+  because that is the only order in which the backlog shrinks - but 20 of the 100 are
+  reserved for the newest candidates, applied out of cursor order. Pure newest-first
+  was rejected because it deadlocks: deferring the oldest blocks the cursor at the
+  first event, so the same page replays forever.
+
+**Bootstrap.** With no cursor, the newest event id is recorded and nothing is
+consumed. Replaying the 60 days Allegro retains would be thousands of calls, so a
+fresh install starts tracking from "now" and importing history is an operator action -
+the import window below.
+
+### Status mapping
+
+Allegro reports a checkout status and a seller-managed fulfillment status. Their
+product is the ladder on `allegro_order.derived_status`:
+
+| Allegro                                    | Derived              |
+| ------------------------------------------ | -------------------- |
+| checkout `CANCELLED` (wins over anything)  | `cancelled`          |
+| fulfillment `NEW` + checkout `BOUGHT`      | `pending`            |
+| fulfillment `NEW` + `READY_FOR_PROCESSING` | `new`                |
+| `PROCESSING`, `SUSPENDED`                  | `processing`         |
+| `READY_FOR_SHIPMENT`, `READY_FOR_PICKUP`   | `ready_for_shipment` |
+| `SENT`                                     | `sent`               |
+| `PICKED_UP`                                | `delivered`          |
+| `RETURNED`                                 | `returned`           |
+| an unmodelled fulfillment status           | nothing is written   |
+
+Medusa's `order.status` enum has no `sent` or `ready_for_shipment`, so only the two
+ends Medusa genuinely models are pushed onto the order, through their own workflows:
+`cancelled` cancels it, `delivered` completes it. Writing the column directly would
+fight the dashboard and the order-edit flows.
+
+**`derived_status` is the comparison basis, not the raw status columns.** The raw
+columns are rewritten on every pass, so re-deriving from them made a single
+suppressed status write permanent - the guard saw "no transition" forever after and
+the order froze at whatever status it happened to carry. `derived_status` is written
+in the same operation as any action, so a lost write simply retries, and a staff edit
+survives because staff change the order and leave the derived status where Allegro
+put it.
+
+**Crash-safe ordering.** The bookkeeping row goes in first without `synced_at`, then
+the Medusa order, then the status action, then the watermark LAST. A crash anywhere
+earlier leaves the row unfinished so the next pass repairs it.
+
+**Unmatched lines do not lose the sale.** A line whose sygnatura matches no Medusa
+variant is carried as a title-only custom item and recorded in `line_conflicts`. The
+sale happened on Allegro whatever Medusa's catalogue says, and an order nobody can see
+is not safer than one that is visibly half-mapped. Totals and line prices come from
+Allegro verbatim, never recomputed.
+
+### Fulfillment write-back
+
+A subscriber on `order.fulfillment_created` and `shipment.created` sets Allegro's
+seller-managed status - `READY_FOR_SHIPMENT` and `SENT` respectively - for
+Allegro-sourced orders. It is a no-op for any other order.
+
+It **never throws**. The Medusa fulfillment already exists by the time it runs, so
+failing the subscriber would not undo it and would bury the reason; the error is
+recorded on `allegro_order.last_error` instead, and an operator can set the status by
+hand on Allegro.
+
+`ordersSyncDisabled` deliberately does not gate it. That switch stops the drain from
+CONSUMING the journal; a store that has shipped an order still wants the buyer to see
+it shipped, and suppressing that would leave a real shipment invisible on the
+marketplace with nothing to correct it later.
+
+## Turning the writers on
+
+The safe order, and why each step comes where it does:
+
+1. **Connect** the account with the write scope in `scopes` (the default includes
+   it). Without it, every command answers 403 and the admin raises the reconnect
+   banner.
+2. **Set all three kill switches** if you are cutting over from another system that
+   currently writes to Allegro. Two systems writing prices to one catalogue is the
+   worst possible state, and `ALLEGRO_PRICE_SYNC_DISABLED` alone is not enough - the
+   quantity command is a separate writer.
+3. **Let discovery and the monitor run.** Both are read-only. Watch the Offers page:
+   resolve every conflict, and look at what `price_mode` and drift actually say about
+   the catalogue. This is the step that turns arming the writers into a decision
+   rather than a leap.
+4. **Fill in the category rates.** Until a category has both rates, every offer in it
+   is skipped with `missing-break-even`.
+5. **Configure the SRP source**, and check that variants actually carry a value.
+   Without it every offer is skipped with `missing-srp`.
+6. **Create the two price-automation rules** on the Allegro account and set
+   `automationRules` to their names. Until then price sync is inert by construction.
+7. **Arm stock first, then prices.** A wrong quantity is recoverable in one run; a
+   wrong price may already have sold something. Start with a low `changeCap` and watch
+   the push history in the Offers drawer.
+
+## Operator runbook
+
+### A conflicted mapping
+
+Offers page, "Conflicts only" filter. Each row names what is wrong and what to do
+(see the conflict table above). Nothing about that SKU is synced until it is
+resolved - deliberately. After fixing it on Allegro or in Medusa, press "Rediscover
+offers"; you do not need to clear the conflict by hand.
+
+### A quarantined offer
+
+Symptom: `last_error` on the `prices` row names offer ids, and the loop is no longer
+retrying them.
+
+Fix the underlying cause, then press **Push** on that offer in the Offers table. A
+successful push clears the offer from both failure maps, so the loop resumes
+correcting it from the next tick. The push also overrides the per-offer opt-out - the
+operator asked for that specific offer - but not the kill switch or the eligibility
+checks.
+
+### A quarantined order
+
+Symptom: the Orders page quarantine list, and `last_error` on the `orders` row.
+
+Each entry carries its error and how long it has been failing. Fix the cause, then
+press **Repair**. A success clears both failure maps and hands the form back to the
+drain. A failed repair does NOT grow the streak, so retrying while you work on it
+cannot make things worse.
+
+If the order is older than Allegro's event retention (roughly 60 days), Repair still
+works - it fetches the form directly rather than through the journal.
+
+### The write-scope banner
+
+Symptom: a persistent error banner on the settings page, and `write_scope_missing` on
+a provider row.
+
+Allegro answered 403 on a price or quantity command. No retry fixes it: the stored
+grant does not include `allegro:api:sale:offers:write`. Press **Reconnect** and
+approve the consent screen again. The first run afterwards that reaches the endpoint
+without a 403 clears the flag on its own.
+
+### Importing orders the journal never named
+
+Orders page, **Import window**. Needed when the drain was disabled longer than the
+event retention window, after restoring a database, if the cursor was lost, or to
+bring in history on a new install (the drain starts at "now" by design).
+
+It never moves the event cursor - an import fills a gap behind it - and it holds the
+orders claim while it runs, so the per-minute drain cannot import anything new in the
+meantime. One run covers at most 3,000 orders; for a larger backfill, run several
+windows with a moving `since`.
+
+### Stopping the writers, now
+
+Set the relevant env var to `1` and restart, or redeploy the process environment:
+
+```bash
+ALLEGRO_PRICE_SYNC_DISABLED=1   # price-automation commands
+ALLEGRO_STOCK_SYNC_DISABLED=1   # quantity-change commands
+ALLEGRO_ORDERS_SYNC_DISABLED=1  # the order drain
+```
+
+The env var wins over the plugin option on purpose: an operator reaching for it is
+responding to an incident, and a stale `false` in config must not undo that. A
+disabled loop RECORDS that it was disabled on its state row, so "disabled" stays
+distinguishable from "broken" - both look like "nothing happened" from outside.
+
+Note that `ordersSyncDisabled` does not stop the fulfillment write-back subscriber.
+To stop every write to Allegro, disconnect the account.
+
+### A loop that looks stuck
+
+Check the state row's `status` on the settings page:
+
+- **`running` and not moving.** A crashed run holds the claim for up to six minutes,
+  after which the next tick takes it over as stale and logs that it did. If it
+  persists longer than that, something is holding it live.
+- **`error` with `SYSTEMIC` in the message.** The loop is waiting on Allegro. Nothing
+  was skipped and nothing quarantined; it retries on its own.
+- **`ok` with zero counters.** Nothing to do, which is different from broken - the
+  counters are on the health table precisely so those two are distinguishable.
+- **`idle` with a message about a kill switch.** Working as configured.
 
 ## Using the module from your own code
 
@@ -292,20 +714,59 @@ deliberate divergences from the reference Allegro SDK, marked as such in
 `src/lib/allegro/`: without them a black-holed Allegro hangs a Medusa request or a
 sync loop for as long as the platform's socket default allows.
 
-`getPublicOptions()` answers "how is this configured?" - environment, app
-identity, callback path, requested scopes, and the effective price-sync
-kill-switch. The fully resolved options are protected on purpose, because they
-carry `clientSecret` and `encryptionKey` and nothing outside the service needs
-them.
+`getPublicOptions()` answers "how is this configured?" - environment, app identity,
+callback path, requested scopes, the sync configuration, and all three effective
+kill switches. The fully resolved options are protected on purpose, because they
+carry `clientSecret` and `encryptionKey` and nothing outside the service needs them.
+
+### Running a loop from your own code
+
+Every loop is exported as both a workflow and a plain function through
+`@zanreal/medusa-allegro/workflows`:
+
+```ts
+import {
+  discoverAllegroOffersWorkflow,
+  runOfferDiscovery,
+  runPriceAutomationMonitor,
+  syncAllegroPrices,
+} from "@zanreal/medusa-allegro/workflows";
+
+// As a workflow, e.g. from your own admin route:
+const { result } = await discoverAllegroOffersWorkflow(container).run();
+
+// As plain functions, when you want to chain several loops off ONE offer listing -
+// which is what the bundled hourly job does, because paging a full catalogue is the
+// expensive part of all three:
+const discovery = await runOfferDiscovery(container);
+if (!discovery.result.skipped) {
+  await runPriceAutomationMonitor(container, discovery.listing);
+  await syncAllegroPrices(container, discovery.listing);
+}
+```
+
+Each takes its own single-flight claim and honours its own kill switch, so calling
+one directly is as safe as letting the schedule call it. A collision with a scheduled
+run comes back as a `skipped` summary rather than an error, because it is retryable.
+
+None of the workflows is compensated, and that is deliberate rather than an omission:
+every write they make is an idempotent re-assertion of state Allegro owns, so the
+repair for a partial run is another run. "Undoing" a price push would mean restoring
+a range Allegro will not tell us, and "undoing" an order import would mean deleting
+orders that really were placed.
 
 ### Known limitation: refresh de-duplication is per process
 
 The SDK collapses concurrent refreshes into one in-flight promise, and the module
 service keeps one client per instance so that promise is actually shared. Neither
 coordinates across processes. Allegro rotates the refresh token on every use, so a
-server and a worker refreshing at the same moment can invalidate each other's
-token and force a reconnect. Until a cross-process lock lands (wave 3, alongside
-worker-mode support), run the sync loops in exactly one instance.
+server and a worker refreshing at the same moment can invalidate each other's token
+and force a reconnect.
+
+The single-flight claims on `allegro_sync_state` DO work across processes - they are a
+compare-and-set on the row - so two instances cannot run the same loop concurrently.
+It is only the token refresh that is uncovered. Until a cross-process lock lands, run
+the scheduled jobs in exactly one instance.
 
 ## Allegro API quirks encoded in this plugin
 
@@ -344,49 +805,112 @@ These are all load-bearing. Each one cost a production incident somewhere.
   only reliable feed for order state changes, because a fulfillment update does
   not necessarily bump the parent checkout form's `updatedAt`. Lose the cursor for
   longer than the retention window and you need the checkout-forms backfill.
+- **A checkout form carries up to three different people.** `buyer` is the account
+  holder's registration data, which no Allegro seller ever sees in their own UI;
+  `delivery.address` is the buyer-entered shipping recipient, and it IS what the
+  seller sees against the order; `invoice.address` is the invoice recipient, which
+  can legitimately name someone else again. Reading only the first is how an
+  integration ends up displaying a name the Allegro seller panel contradicts. This
+  plugin puts `delivery.address` on the Medusa shipping address and `invoice.address`
+  on the billing address, falling back to shipping rather than to the account holder.
+- **The buyer block spells the postal code `postCode`**, not `zipCode` - alone among
+  the addresses in a checkout form. Typing it as the common address shape silently
+  drops it.
+- **An invoice company's tax id lives in a typed array now.** `company.ids` with a
+  `PL_NIP` entry is the current source; the flat `company.taxId` is deprecated but
+  still populated, so it stays as the fallback. The other id types Allegro can return
+  are foreign registration numbers of similar length to a NIP, so this plugin
+  deliberately does NOT read them: a wrong pairing is worse than no pairing.
+- **`RETURNED` is Allegro-managed.** It appears once every unit is returned and
+  refunded, and `PUT /order/checkout-forms/{id}/fulfillment` rejects it, so it is
+  readable but never settable.
 
 ## Roadmap
 
-Wave 1 is the foundation. The sync loops follow, read paths before write paths, so
-each wave can be run in production and observed before the next one is allowed to
-change anything.
+Shipped, read paths before write paths, so each stage could be run in production and
+observed before the next was allowed to change anything:
 
-- **Wave 1 - foundation (this release).** Ported SDK, module and migrations,
-  encrypted OAuth, admin settings page.
-- **Wave 2 - read-only discovery.** Offer discovery by sygnatura/SKU, promotion
-  sweep via the bulk promo-options resource, and a read-only price-automation
-  monitor that records observations into `allegro_price_push` without writing to
-  Allegro.
-- **Wave 3 - writes.** Stock push through the quantity-change command, price
-  sync through the price-automation command with `[floor, ceiling]` bounds, the
-  kill-switch wired to real writes, per-SKU failure quarantine, and a
-  cross-process refresh lock for worker mode.
-- **Wave 4 - orders.** Draining `GET /order/events` into Medusa orders, with
-  fulfillment status write-back and a checkout-forms backfill for gaps beyond the
-  event retention window.
+- **Wave 1 - foundation.** Ported SDK, module and migrations, encrypted OAuth, admin
+  settings page.
+- **Wave 2 - read-only discovery.** Offer discovery by sygnatura/SKU, the bulk
+  promo-options sweep, category discovery, and the read-only price-automation monitor.
+- **Wave 3 - writes.** Price sync with `[break-even, SRP]` bounds and the stock push,
+  both behind kill switches, with per-item quarantine, the circuit breaker, and
+  write-scope detection.
+- **Wave 4 - orders.** The event journal drain into Medusa orders, fulfillment
+  write-back, and the operator import window.
+
+Known gaps, in rough priority order:
+
+- **Refresh de-duplication is per process.** Two Medusa instances can each hold a
+  memoized client and race on a refresh-token rotation. The single-flight claims
+  protect the LOOPS across processes; the token refresh is not yet covered. Until it
+  is, run the scheduled jobs in one instance. See
+  [the note below](#known-limitation-refresh-de-duplication-is-per-process).
+- **No taxes on imported orders.** Line prices are taken from Allegro verbatim, which
+  is right for reconciliation, but no tax lines are computed - so an Allegro order's
+  tax breakdown in Medusa is empty.
+- **`paused` price mode is never emitted.** The bulk offer read cannot distinguish a
+  paused rule from an active one. The column and the drift matrix already handle it
+  for the day a paused signal becomes available.
+- **Fulfillment write-back is one-directional per event.** A store that creates a
+  fulfillment and a shipment in one action sends two updates; the second wins, which
+  is correct but wasteful.
 
 ## Development
 
 ```bash
 npm install
-npm test                       # typecheck + 235 unit tests
+npm test                       # typecheck (both configs) + 640 unit tests
 npx medusa plugin:build        # compile to .medusa/server
 npx medusa plugin:db:generate  # regenerate migrations after a model change
 npx medusa lint
 ```
 
-`plugin:db:generate` needs a reachable Postgres to diff against. It reads
-`DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, and `DATABASE_URL`, and the
-individual variables take precedence over the URL:
+### How the tests are organised
+
+The split is deliberate, and it is what keeps the sync logic testable without a
+database:
+
+- **`src/lib/**`** is framework-agnostic and pure. `src/lib/allegro`is the REST
+client with no Medusa imports at all;`src/lib/sync` is every decision the loops
+  make - the eligibility ladder, the attach/switch/bounds decision, the quarantine
+  machinery, the stock planner, the status ladder, the cursor discipline. All of it is
+  I/O-free, so it is tested exhaustively and directly.
+- **`src/workflows/**`** owns the side effects, and is tested against in-memory fakes
+of the module service and the Allegro client (`src/workflows/**tests**/fixtures.ts`).
+  A live Postgres would prove nothing these assertions do not - what is under test is
+  which rows get written, in what order, and what the loop reports.
+- **`src/api/**`\*\* routes are tested for their filter translation and validation,
+  which is where their decisions live.
+
+The one test to read first if you are changing anything here is
+`src/lib/sync/__tests__/failure-state.unit.spec.ts`: it pins the eviction rules whose
+rationale is easy to lose, notably why streaks and quarantines need SEPARATE caps.
+
+### Regenerating migrations
+
+`plugin:db:generate` needs a reachable Postgres to diff against. It reads `DB_HOST`,
+`DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, and `DATABASE_URL`, and the individual
+variables take precedence over the URL. A throwaway database is enough - the diff is
+against the committed snapshot, not against live data:
 
 ```bash
+docker run -d --name allegro-gen -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
+docker exec allegro-gen psql -U postgres -c "CREATE DATABASE medusa_allegro_gen;"
+
 DB_HOST=127.0.0.1 DB_PORT=5432 DB_USERNAME=postgres DB_PASSWORD=postgres \
   DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/medusa_allegro_gen" \
   npx medusa plugin:db:generate
+
+docker rm -f allegro-gen
 ```
 
-Commit both the migration and the updated `.snapshot-*.json` next to it; the
-snapshot is what makes the next generation an incremental diff.
+Commit both the migration and the updated `.snapshot-*.json` next to it; the snapshot
+is what makes the next generation an incremental diff. Read the generated SQL before
+committing: every migration this plugin has shipped is additive and nullable, and a
+generated `NOT NULL` or a dropped column on a table that is already carrying
+production sync state is a bug in the model change, not in the generator.
 
 To develop against a real Medusa app, run `npx medusa plugin:publish` once here,
 then `npx medusa plugin:add @zanreal/medusa-allegro` in the app, and keep
