@@ -295,7 +295,7 @@ simply by leaving the field empty.
 | `allegro_category_rate` | Sale commission per Allegro category, plain and promoted. Maintained by an operator - see below.            |
 | `allegro_price_push`    | Append-only audit of price-automation decisions, including the pushed `[floor, ceiling]`.                   |
 | `allegro_order`         | One row per Allegro checkout form: the Medusa order it produced, the raw and derived statuses, conflicts.   |
-| `allegro_sync_state`    | Per-loop health: status, cursor, counters, last error, failure state, and whether a write scope is missing. |
+| `allegro_sync_state`    | Per-loop health: status, cursor, counters, last error, failure state, the write-scope flag, and the claim's fencing token plus its heartbeat. |
 
 Three of these carry non-obvious constraints worth knowing before you build on
 them.
@@ -380,22 +380,52 @@ an untrustworthy one into Medusa inventory. That guard lives one layer up, where
 supplier response is actually visible; a second one here would be a guess about data
 this plugin has no source for.
 
-What this loop does refuse on is its own uncertainty. An ambiguous SKU match or an
-unreadable quantity on either side refuses the **whole plan**, because a partial
-quantity push leaves some offers fresh and others stale with nothing recording which
-is which - so the next run cannot tell either.
+What this loop does refuse on is its own uncertainty, and the line is drawn at UNKNOWNS
+rather than at gaps. An ambiguous SKU match, or a quantity that could not be READ on
+either side, refuses the **whole plan**: a partial push in that state leaves some offers
+fresh and others stale with nothing recording which is which, so the next run cannot tell
+either.
+
+A KNOWN, bounded exclusion does not refuse anything. Each is counted, reported in
+`last_error`, and leaves exactly one offer alone: an inactive offer, a variant that does
+not manage inventory (so Medusa has no quantity to publish - a digital product, say), an
+offer that contradicts its mapping row, a mapped offer absent from the listing, and an
+eligible variant no mapped offer claims. Treating "this variant has no inventory" as an
+unknown is what previously let a single digital product with an Allegro offer refuse the
+entire catalogue's stock sync indefinitely.
+
+**A store with no stock locations aborts the run.** Medusa's `retrieveAvailableQuantity`
+answers `0` for an empty location list rather than failing, so every variant would read
+as out of stock, the plan would look perfectly safe, and the run would push a quantity of
+0 across the whole catalogue and report itself complete - a full marketplace delisting
+presented as a healthy sync. Create a stock location, or set `stockLocationIds`.
+
+**The offer listing is read before quantities.** Paging a full catalogue is the slowest
+step in the run, so reading quantities first left every figure ageing across the whole
+pagination window before it was compared and written.
 
 ### Conflicts are recorded, never resolved
 
-Discovery records four mapping conflicts on `allegro_offer.conflict`, and a
-conflicted row is stripped of its `offer_id` so no write path can act on it:
+Five mapping conflicts are recorded on `allegro_offer.conflict`, and a conflicted row is
+stripped of its `offer_id` and its `promoted` flag so no write path can act on it:
 
-| Conflict              | Meaning                                                      | What to do                                                               |
-| --------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| `duplicate-sku`       | Two live offers claim one sygnatura, or two variants one SKU | Decide which one keeps it. The message names the competing ids.          |
-| `missing-external-id` | A previously mapped offer no longer carries a sygnatura      | Set the sygnatura back on Allegro.                                       |
-| `no-variant`          | A sygnatura matches no variant in the Allegro sales channel  | Fix the sygnatura, or publish the product to the channel.                |
-| `no-offer`            | A stored mapping's offer is gone from the listing            | Usually nothing: the link was cleared and discovery re-links on re-list. |
+| Conflict              | Meaning                                                       | What to do                                                               |
+| --------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `duplicate-sku`       | Two live offers claim one SKU, or two variants share one      | Decide which one keeps it. The message names the competing ids.           |
+| `missing-external-id` | A previously mapped offer no longer carries a sygnatura       | Set the sygnatura back on Allegro.                                       |
+| `no-variant`          | A sygnatura matches no variant in the Allegro sales channel   | Fix the sygnatura, or publish the product to the channel.                |
+| `no-offer`            | A stored mapping's offer is gone from the listing             | Usually nothing: the link was cleared and discovery re-links on re-list. |
+| `sku-mismatch`        | The LIVE offer contradicts its mapping row                    | Fix the sygnatura on Allegro, or let discovery re-map it.                 |
+
+`duplicate-sku` covers one case worth naming explicitly: two offers can reach the same
+variant by DIFFERENT keys - one by sygnatura, another by an EAN matching that variant's
+barcode - so neither looks contested on its own. Both are held out.
+
+`sku-mismatch` is recorded by the stock loop rather than by discovery, because the stock
+push is the only place the mapping row and the live offer are compared at write time. A
+seller who edits a sygnatura between discovery and the push makes the two disagree, and
+re-pairing on the live value is how one product's quantity lands on another product's
+listing. Only that offer is skipped; the rest of the catalogue still syncs.
 
 Picking a winner for a contested SKU would push a price or a quantity to the wrong
 offer, which is a real mispricing or a real oversell. So the plugin refuses, and the
@@ -423,7 +453,12 @@ Bounds are `[ceil(break-even), SRP]`.
   commission rate from `allegro_category_rate` selected by the offer's category
   **and its promotion state**. Ceiled to a whole unit, because the managed rules
   require it.
-- **The ceiling** is the SRP, from `srpMetadataKey` or `srpPriceListId`.
+- **The ceiling** is the SRP, from `srpMetadataKey` or `srpPriceListId`. A price-list SRP
+  is matched to the offer's **own currency**, and there is deliberately no conversion: a
+  converted ceiling would depend on a rate this plugin does not have and cannot audit, so
+  an offer whose currency has no SRP row is skipped with `missing-srp`. A number in
+  variant metadata carries no currency and is taken as being in the offer's currency,
+  which is what putting a bare number there means.
 
 **Any missing input skips the offer with a counted reason. Neither bound is ever
 defaulted.** A defaulted floor is a licence to sell at a loss; a ceiling guessed
@@ -433,6 +468,21 @@ order the ladder reports them:
 
 `not-linked`, `sync-disabled`, `status-unknown`, `offer-not-active`,
 `promotion-unresolved`, `missing-break-even`, `missing-srp`, `invalid-bounds`.
+
+`promotion-unresolved` is worth understanding, because it is the one an operator is most
+likely to meet on a fresh install. `allegro_offer.promoted` is **three-state**: `true`,
+`false`, or NULL meaning "the promo-options sweep has not resolved it". NULL is not "not
+promoted", and the difference is money: promotion state selects the commission rate, the
+rate sets the break-even, and the break-even is the floor a rule may sell down to - so
+pricing an unresolved offer as unpromoted gives a genuinely promoted one a floor below
+its true break-even. Discovery fills it in from a successful sweep; until then the offer
+is skipped and the Offers page shows `unresolved`. The promo sweep returns nothing
+resolvable when it hits its page cap, when Allegro answers "Feature unavailable", or on a
+non-systemic error, and each of those is reported on the offers state row.
+
+The monitor withholds its drift verdict for the same offers, and counts them as
+`promotionUnresolved`: without a resolved promotion state there is no expectation to
+compare the attached rule against, so reporting "no drift" would be a guess.
 
 The order IS the reported reason, deliberately: an unlinked SKU reports
 `not-linked` even when it is also missing an SRP, and the per-offer opt-out
@@ -694,8 +744,20 @@ To stop every write to Allegro, disconnect the account.
 Check the state row's `status` on the settings page:
 
 - **`running` and not moving.** A crashed run holds the claim for up to six minutes,
-  after which the next tick takes it over as stale and logs that it did. If it
-  persists longer than that, something is holding it live.
+  after which the next tick takes it over as stale and logs that it did. If it persists
+  longer than that, something is genuinely holding it live. Staleness is measured from
+  `claim_heartbeat_at`, which a live run bumps at least once a minute, so a long but
+  healthy run (an orders drain refreshing a hundred forms, a stock run polling several
+  commands, a full-catalogue price push) keeps its claim instead of being taken over
+  mid-flight.
+- **`running`, and a log line about losing the claim.** A run discovered it had been
+  taken over and stopped without writing anything further, including its own outcome -
+  the row belongs to whichever run replaced it. Nothing is lost: the abandoned work
+  replays.
+- **`idle` or `error` with a kill-switch message, while a run is in flight.** A skip
+  that arrives while another run holds the claim deliberately does NOT touch the state
+  row, and logs that it declined to. Writing it would have released that run's claim and
+  let the next tick start a second concurrent run.
 - **`error` with `SYSTEMIC` in the message.** The loop is waiting on Allegro. Nothing
   was skipped and nothing quarantined; it retries on its own.
 - **`ok` with zero counters.** Nothing to do, which is different from broken - the
@@ -786,9 +848,11 @@ server and a worker refreshing at the same moment can invalidate each other's to
 and force a reconnect.
 
 The single-flight claims on `allegro_sync_state` DO work across processes - they are a
-compare-and-set on the row - so two instances cannot run the same loop concurrently.
-It is only the token refresh that is uncovered. Until a cross-process lock lands, run
-the scheduled jobs in exactly one instance.
+compare-and-set on the row, and every write a running loop makes is additionally fenced on
+the claim token it was issued - so two instances cannot run the same loop concurrently, and
+a run that has been taken over as stale discovers that fact rather than trampling its
+successor's state. It is only the token refresh that is uncovered. Until a cross-process
+lock lands, run the scheduled jobs in exactly one instance.
 
 ## Allegro API quirks encoded in this plugin
 

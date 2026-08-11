@@ -179,6 +179,15 @@ type CommandOutcome =
 
 /** Rows to read per page of the bounds-memory scan. */
 const BOUNDS_PAGE_SIZE = 1000;
+/**
+ * Pages of bounds memory read per run.
+ *
+ * `allegro_price_push` is append-only, so this scan grows with HISTORY rather than with
+ * the catalogue: without a cap every tick eventually reads every success row ever written.
+ * 50k rows is far more than a healthy store accumulates between prunes, and overrunning it
+ * is reported rather than absorbed.
+ */
+const BOUNDS_MAX_PAGES = 50;
 
 /**
  * Bounds memory: the `[floor, ceiling]` recorded on the LAST SUCCESSFUL push per
@@ -197,15 +206,29 @@ const BOUNDS_PAGE_SIZE = 1000;
  */
 const fetchLastSuccessfulBounds = async (
   allegro: AllegroModuleService,
+  logger: Logger,
 ): Promise<Map<string, SyncBounds>> => {
   const bounds = new Map<string, SyncBounds>();
   const seen = new Set<string>();
 
-  for (let page = 0; ; page += 1) {
+  for (let page = 0; page < BOUNDS_MAX_PAGES; page += 1) {
     // Offset pagination over our own table; each page depends on the previous.
+    //
+    // The `id` tiebreak is load-bearing, not cosmetic. Offset pagination over an
+    // unstable sort is not a partition: `pushed_at` is a timestamp, a run pushes many
+    // offers in quick succession, and rows sharing one timestamp may come back in a
+    // different order on each page request. A row could then be returned on two pages
+    // (harmless, `seen` dedupes it) or on NEITHER - and a skipped row is a lost bounds
+    // record, which reads as "no bounds on record" and re-pushes an offer that was
+    // already correct. Adding a unique second key makes the ordering total, so every
+    // row appears exactly once across the pages.
     const rows = (await allegro.listAllegroPricePushes(
       { result: "success" },
-      { order: { pushed_at: "DESC" }, skip: page * BOUNDS_PAGE_SIZE, take: BOUNDS_PAGE_SIZE },
+      {
+        order: { id: "DESC", pushed_at: "DESC" },
+        skip: page * BOUNDS_PAGE_SIZE,
+        take: BOUNDS_PAGE_SIZE,
+      },
     )) as unknown as Record<string, unknown>[];
 
     for (const row of rows) {
@@ -225,6 +248,17 @@ const fetchLastSuccessfulBounds = async (
       return bounds;
     }
   }
+
+  // The audit is append-only, so this scan grows with history rather than with the
+  // catalogue and would otherwise read every success row ever written on every tick.
+  // Bounded and reported instead of unbounded: the consequence of stopping early is that
+  // the oldest offers read as having no bounds on record and get re-pushed, which is
+  // idempotent and merely wasteful - whereas an unbounded scan degrades every run
+  // forever. A store that reaches this needs the audit pruned or the scan indexed.
+  logger.warn(
+    `[allegro-prices] the bounds-memory scan hit its page cap (${BOUNDS_MAX_PAGES} x ${BOUNDS_PAGE_SIZE} rows) without exhausting allegro_price_push. Offers whose last successful push is older than that read as having no recorded bounds and will be re-pushed once. Prune the audit table or add an index to keep this scan bounded.`,
+  );
+  return bounds;
 };
 
 /** Best-effort per-offer fail reason from the command's task report. */
@@ -520,7 +554,7 @@ const resolvePlanningInputs = async (
   const [rateRows, srpSource, lastBounds, breakEvenFor] = await Promise.all([
     allegro.listAllegroCategoryRates({}) as Promise<Record<string, unknown>[]>,
     buildSrpBySku(container, variants, options),
-    fetchLastSuccessfulBounds(allegro),
+    fetchLastSuccessfulBounds(allegro, logger),
     buildBreakEvenResolver(resolveCostsService(container, options.costsModuleKey), skus),
   ]);
 
