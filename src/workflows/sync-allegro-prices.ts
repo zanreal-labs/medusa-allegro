@@ -45,11 +45,13 @@ import type AllegroModuleService from "../modules/allegro/service";
 import { listEligibleVariants } from "./lib/catalog";
 import { listAllOffers } from "./lib/offers";
 import type { OfferListing } from "./lib/offers";
+import type { SrpSource } from "./lib/pricing";
 import {
   buildBreakEvenResolver,
   buildCategoryRates,
   buildSrpBySku,
   resolveCommissionFraction,
+  resolveSrp,
   resolveCostsService,
   warnOnMissingSrpSource,
 } from "./lib/pricing";
@@ -399,7 +401,7 @@ interface PlanningInputs {
   rules: AutomationRuleNames;
   categoryRates: ReturnType<typeof buildCategoryRates>;
   breakEvenFor: (sku: string, commission: number | undefined) => Promise<number | undefined>;
-  srpBySku: Map<string, number>;
+  srp: SrpSource;
   lastBounds: Map<string, SyncBounds>;
 }
 
@@ -428,13 +430,18 @@ const planOffer = async (
   const breakEven =
     promoted === undefined ? undefined : await inputs.breakEvenFor(row.sku, commission);
 
+  // The offer's own currency, resolved BEFORE eligibility because the SRP ceiling is
+  // currency-specific: a price-list SRP in another currency is not a usable ceiling for this
+  // offer, and using one is a mispricing rather than a rounding difference.
+  const currency = row.price_currency ?? offer.sellingMode?.price?.currency ?? "PLN";
+
   const eligibility = evaluateSyncEligibility({
     breakEvenPrice: breakEven,
     offerLinked: true,
     offerStatus: offer.publication?.status as OfferStatus | undefined,
     priceSyncEnabled: opts.ignoreDisabled ? true : (row.price_sync_enabled ?? true),
     promoted,
-    srp: inputs.srpBySku.get(row.sku),
+    srp: resolveSrp(inputs.srp, row.sku, currency),
   });
   if (!eligibility.eligible) {
     return { skip: eligibility.reason };
@@ -460,7 +467,7 @@ const planOffer = async (
       // The offer's own currency, as Allegro reported it. Allegro rejects a range
       // in any other currency, and defaulting to PLN would break a seller listing
       // on a non-PLN marketplace.
-      currency: row.price_currency ?? offer.sellingMode?.price?.currency ?? "PLN",
+      currency,
       expectedRule: decision.expectedRule,
       expectedRuleId: eligibility.promoted
         ? inputs.expectedIds.promotedId
@@ -510,7 +517,7 @@ const resolvePlanningInputs = async (
   warnOnMissingSrpSource(logger, options);
   warnOnUnscopedCatalogue(logger, options, "prices");
   const variants = await listEligibleVariants(container, options);
-  const [rateRows, srpBySku, lastBounds, breakEvenFor] = await Promise.all([
+  const [rateRows, srpSource, lastBounds, breakEvenFor] = await Promise.all([
     allegro.listAllegroCategoryRates({}) as Promise<Record<string, unknown>[]>,
     buildSrpBySku(container, variants, options),
     fetchLastSuccessfulBounds(allegro),
@@ -525,7 +532,7 @@ const resolvePlanningInputs = async (
       lastBounds,
       ruleNames,
       rules,
-      srpBySku,
+      srp: srpSource,
     },
     ok: true,
   };

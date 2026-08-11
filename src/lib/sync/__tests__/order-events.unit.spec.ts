@@ -422,3 +422,84 @@ describe("summarizeOrdersSync", () => {
     );
   });
 });
+
+describe("drainOrderEvents: a pipeline error is systemic even alongside a success", () => {
+  const events = [
+    { id: "e1", order: { checkoutForm: { id: "f1" } }, type: "BOUGHT" as const },
+    { id: "e2", order: { checkoutForm: { id: "f2" } }, type: "BOUGHT" as const },
+  ];
+
+  it("quarantines nothing when a recognised outage lands after one success", async () => {
+    // The gap: systemic was inferred ONLY from "every attempt failed and none succeeded", so a
+    // rate-limit storm or an outage that happened to land after one success was read as a set
+    // of bad orders - and every failing order's quarantine streak grew toward being skipped
+    // for good. The price loop already had the stronger signal; the drain did not.
+    const failure = new Error("HTTP 429");
+    const result = await drainOrderEvents("e0", {
+      applyForm: (formId) => {
+        if (formId === "f2") {
+          return Promise.reject(failure);
+        }
+        return Promise.resolve(true);
+      },
+      isSystemicError: (error) => error === failure,
+      latestEventId: () => Promise.resolve("e2"),
+      listEvents: (from) => Promise.resolve(from === "e0" ? events : []),
+    });
+
+    expect(result.systemicFailure).toBe(true);
+    expect(result.quarantined).toEqual([]);
+    // No streak grew, so the next tick simply retries.
+    expect(result.failures.streaks).toEqual({});
+  });
+
+  it("still treats an ordinary per-order failure as non-systemic", async () => {
+    // The contrast, so the branch above cannot be satisfied by calling everything systemic.
+    const result = await drainOrderEvents("e0", {
+      applyForm: (formId) => {
+        if (formId === "f2") {
+          return Promise.reject(new Error("this one order is malformed"));
+        }
+        return Promise.resolve(true);
+      },
+      isSystemicError: () => false,
+      latestEventId: () => Promise.resolve("e2"),
+      listEvents: (from) => Promise.resolve(from === "e0" ? events : []),
+    });
+
+    expect(result.systemicFailure).toBe(false);
+    expect(result.failures.streaks.f2?.count).toBe(1);
+  });
+});
+
+describe("drainOrderEvents: losing the claim abandons rather than fails", () => {
+  it("holds the cursor and grows no streaks when the claim is lost", async () => {
+    const attempted: string[] = [];
+    const result = await drainOrderEvents("e0", {
+      applyForm: (formId) => {
+        attempted.push(formId);
+        return Promise.resolve(true);
+      },
+      heartbeat: () => Promise.resolve(false),
+      latestEventId: () => Promise.resolve("e2"),
+      listEvents: (from) =>
+        Promise.resolve(
+          from === "e0"
+            ? [
+                { id: "e1", order: { checkoutForm: { id: "f1" } }, type: "BOUGHT" as const },
+                { id: "e2", order: { checkoutForm: { id: "f2" } }, type: "BOUGHT" as const },
+              ]
+            : [],
+        ),
+    });
+
+    // Nothing attempted: the check happens before each form.
+    expect(attempted).toEqual([]);
+    // Abandoned forms are DEFERRED, not failed - they were never tried, so they must not
+    // count against their own quarantine streaks.
+    expect(result.failed).toBe(0);
+    expect(result.failures.streaks).toEqual({});
+    expect(result.truncated).toBe(true);
+    expect(result.cursor).toBe("e0");
+  });
+});

@@ -176,14 +176,29 @@ interface QueryGraph {
 }
 
 /**
+ * Resolved SRP data, split by whether the source carried a currency.
+ *
+ * The split exists because the two sources are genuinely different facts. A number in
+ * variant metadata has no currency attached and is implicitly in the offer's own currency,
+ * which is what the operator meant. A price-list row DOES carry a currency, and using it for
+ * an offer in a different one would be a mispricing.
+ */
+export interface SrpSource {
+  /** SRP by SKU with no currency attached (the metadata path). */
+  bySku: Map<string, number>;
+  /** SRP by SKU, then by lower-cased currency (the price-list path). */
+  byCurrency: Map<string, Map<string, number>>;
+}
+
+/**
  * SRP (the ceiling) per variant SKU, from whichever source is configured.
  *
  * `srpMetadataKey` reads a numeric value from the variant's `metadata`, falling
  * back to the product's - a store that prices a whole product at one RRP should
  * not have to repeat it on every variant. `srpPriceListId` reads the variant's
- * price in that list.
+ * price in that list, per currency.
  *
- * With neither configured the map is empty and every offer is skipped with
+ * With neither configured the result is empty and every offer is skipped with
  * `missing-srp`. That is a legitimate, loudly-visible state rather than an error:
  * a store can run discovery and the monitor with no SRP source at all, and only
  * price sync needs one.
@@ -192,8 +207,9 @@ export const buildSrpBySku = async (
   container: MedusaContainer,
   variants: readonly CatalogVariant[],
   options: Pick<AllegroSyncOptions, "srpMetadataKey" | "srpPriceListId">,
-): Promise<Map<string, number>> => {
+): Promise<SrpSource> => {
   const srpBySku = new Map<string, number>();
+  const srpByCurrency = new Map<string, Map<string, number>>();
 
   if (options.srpMetadataKey) {
     const key = options.srpMetadataKey;
@@ -205,11 +221,11 @@ export const buildSrpBySku = async (
         srpBySku.set(variant.sku, srp);
       }
     }
-    return srpBySku;
+    return { byCurrency: srpByCurrency, bySku: srpBySku };
   }
 
   if (!options.srpPriceListId) {
-    return srpBySku;
+    return { byCurrency: srpByCurrency, bySku: srpBySku };
   }
 
   const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
@@ -222,18 +238,41 @@ export const buildSrpBySku = async (
 
   const prices = (data[0]?.prices ?? []) as {
     amount?: number | string;
+    currency_code?: string | null;
     price_set?: { variant?: { id?: string } };
   }[];
   for (const price of prices) {
     const variantId = price.price_set?.variant?.id;
     const sku = variantId ? skuByVariantId.get(variantId) : undefined;
     const amount = parseAmount(price.amount ?? null);
-    if (sku && amount !== undefined && amount > 0) {
-      srpBySku.set(sku, amount);
+    const currency = price.currency_code?.trim().toLowerCase();
+    // Keyed by CURRENCY as well as SKU. `currency_code` was already being requested by the
+    // query above and then ignored, so on a multi-currency price list - the normal shape for
+    // a store selling in more than one - whichever row came last won for that SKU. A EUR
+    // amount could therefore become the PLN ceiling of a price-automation rule, roughly a
+    // quarter of the intended figure, and the rule would then be licensed to sell down to it.
+    // A price carrying no currency is not usable here and is dropped rather than guessed.
+    if (sku && currency && amount !== undefined && amount > 0) {
+      const byCurrency = srpByCurrency.get(sku) ?? new Map<string, number>();
+      byCurrency.set(currency, amount);
+      srpByCurrency.set(sku, byCurrency);
     }
   }
-  return srpBySku;
+  return { byCurrency: srpByCurrency, bySku: srpBySku };
 };
+
+/**
+ * The SRP to use as a ceiling for one offer, in the offer's OWN currency.
+ *
+ * There is deliberately no cross-currency conversion: a converted ceiling would silently
+ * depend on a rate this plugin does not have and cannot audit. An offer whose currency has
+ * no SRP is skipped with `missing-srp`, the same fail-closed answer as having none at all.
+ *
+ * The metadata path carries no currency, so it applies whatever the offer's currency is -
+ * that is the operator's stated intent when they put a bare number in `metadata.srp`.
+ */
+export const resolveSrp = (source: SrpSource, sku: string, currency: string): number | undefined =>
+  source.byCurrency.get(sku)?.get(currency.trim().toLowerCase()) ?? source.bySku.get(sku);
 
 /**
  * Warn once when the SRP source is not configured at all.

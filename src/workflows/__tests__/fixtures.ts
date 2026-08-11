@@ -312,7 +312,14 @@ export const fakeContainer = (input: {
   variants?: VariantFixture[];
   costs?: unknown;
   inventory?: unknown;
-  priceListPrices?: { amount: number; variantId: string }[];
+  /**
+   * Price-list rows. `currency` defaults to PLN, matching the offer fixtures.
+   *
+   * Stated per row so a multi-currency list can be expressed: the SRP ceiling is
+   * currency-specific, and a fixture that could not express two currencies for one SKU
+   * could not catch a cross-currency ceiling.
+   */
+  priceListPrices?: { amount: number; variantId: string; currency?: string }[];
   stockLocationIds?: string[];
   logs?: string[];
 }) => {
@@ -375,7 +382,7 @@ export const fakeContainer = (input: {
                     id: "plist_1",
                     prices: (input.priceListPrices ?? []).map((price) => ({
                       amount: price.amount,
-                      currency_code: "pln",
+                      currency_code: price.currency ?? "pln",
                       price_set: { variant: { id: price.variantId } },
                     })),
                   },

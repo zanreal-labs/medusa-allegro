@@ -657,6 +657,63 @@ describe("syncAllegroPrices: skip reasons", () => {
     expect(summary.skippedCounts["missing-srp"]).toBe(0);
   });
 
+  it("takes the price-list SRP in the OFFER's currency, not whichever row came last", async () => {
+    // `currency_code` was requested by the query and then ignored, so on a multi-currency
+    // price list - the normal shape for a store selling in more than one - the last row won
+    // for that SKU. A EUR amount could become the PLN ceiling of a price-automation rule,
+    // roughly a quarter of the intended figure, and the rule would be licensed to sell down
+    // to it. The EUR row is listed LAST here, so an order-dependent implementation picks it.
+    const allegro = fakeAllegroService({
+      categories: CAT_RATES,
+      client: fakeClient({ offers: [offerFixture({ id: "o1" })] }),
+      offers: [
+        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+      ],
+      syncOptions: { automationRules: { ...RULES }, srpPriceListId: "plist_1" },
+    });
+    const container = fakeContainer({
+      allegro,
+      costs: fakeCostsService({ "SKU-1": 100 }),
+      priceListPrices: [
+        { amount: 420, currency: "pln", variantId: "v1" },
+        { amount: 99, currency: "eur", variantId: "v1" },
+      ],
+      variants: [{ id: "v1", sku: "SKU-1" }],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary.synced).toBe(1);
+    // The PLN ceiling, because the offer fixture prices in PLN. 99 would have been the EUR
+    // amount misapplied, and it also sits below the 137 floor, so the offer would instead
+    // have been skipped as an inverted range - silently unsynced rather than mispriced.
+    expect(allegro.pushes[0]).toMatchObject({ bound_ceiling: "420.00" });
+  });
+
+  it("skips an offer whose currency has no price-list SRP, rather than converting", async () => {
+    // No cross-currency conversion: a converted ceiling would depend on a rate this plugin
+    // does not have and cannot audit. Fail-closed with `missing-srp` instead.
+    const allegro = fakeAllegroService({
+      categories: CAT_RATES,
+      client: fakeClient({ offers: [offerFixture({ id: "o1" })] }),
+      offers: [
+        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+      ],
+      syncOptions: { automationRules: { ...RULES }, srpPriceListId: "plist_1" },
+    });
+    const container = fakeContainer({
+      allegro,
+      costs: fakeCostsService({ "SKU-1": 100 }),
+      priceListPrices: [{ amount: 99, currency: "eur", variantId: "v1" }],
+      variants: [{ id: "v1", sku: "SKU-1" }],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary.synced).toBe(0);
+    expect(summary.skippedCounts["missing-srp"]).toBe(1);
+  });
+
   it("skips an inverted range", async () => {
     const { summary } = await runWith({
       variants: [{ id: "v1", metadata: { srp: 100 }, sku: "SKU-1" }],

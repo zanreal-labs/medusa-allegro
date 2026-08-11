@@ -767,3 +767,46 @@ describe("AllegroClient token rotation", () => {
     }
   });
 });
+
+describe("AllegroApiError.isSystemic", () => {
+  const at = (httpStatus: number) => new AllegroApiError({ httpStatus, message: "x" });
+
+  it("treats a transport failure as systemic", () => {
+    // `httpStatus: 0` is how `send` reports DNS failure, connection refused, TLS errors and
+    // its own abort timeout. Allegro being unreachable is the textbook systemic condition,
+    // and it was the one most likely to quarantine a whole working set: every active item
+    // fails together, so without a systemic verdict they all cross the threshold on the same
+    // tick and are set aside, each then needing manual repair.
+    expect(at(0).isTransportFailure()).toBe(true);
+    expect(at(0).isSystemic()).toBe(true);
+  });
+
+  it("treats 408 and 401 as systemic", () => {
+    // 408 is server-side slowness, indistinguishable in kind from a 5xx. A 401 reaches this
+    // class only when there is no refresh token to retry with, so it means the stored
+    // connection is dead - true of every item, not of the one it happened to hit.
+    expect(at(408).isSystemic()).toBe(true);
+    expect(at(401).isSystemic()).toBe(true);
+  });
+
+  it("keeps 429 and 5xx systemic", () => {
+    expect(at(429).isSystemic()).toBe(true);
+    expect(at(500).isSystemic()).toBe(true);
+    expect(at(503).isSystemic()).toBe(true);
+  });
+
+  it("keeps 403 OUT of systemic, because it is the write-scope gap", () => {
+    // Only the command paths know to read a 403 as a missing offer-write scope, and they
+    // handle it as its own circuit-breaker condition with a reconnect banner.
+    expect(at(403).isForbidden()).toBe(true);
+    expect(at(403).isSystemic()).toBe(false);
+  });
+
+  it("keeps ordinary client errors per-item", () => {
+    // These really are about the item: a 400 or a 404 on one offer says nothing about the
+    // pipeline, so the streak SHOULD grow toward quarantine.
+    expect(at(400).isSystemic()).toBe(false);
+    expect(at(404).isSystemic()).toBe(false);
+    expect(at(422).isSystemic()).toBe(false);
+  });
+});

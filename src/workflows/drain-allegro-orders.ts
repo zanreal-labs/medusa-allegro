@@ -5,6 +5,8 @@ import {
   StepResponse,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk";
+import { AllegroAuthError } from "../lib/allegro/auth-error";
+import { AllegroApiError } from "../lib/allegro/errors";
 import {
   clearFailureKey,
   isEmptyFailureState,
@@ -101,6 +103,12 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
           // `getCheckoutForm` plus a multi-step order write, which comfortably exceeds the
           // staleness window on a slow Allegro.
           heartbeat,
+          // The client's own classification, so the drain does not re-implement it: a 429, a
+          // 5xx, a 401 without a usable refresh token, or a transport failure is about
+          // Allegro rather than about this order.
+          isSystemicError: (error) =>
+            error instanceof AllegroAuthError ||
+            (error instanceof AllegroApiError && error.isSystemic()),
           latestEventId: async () => (await client.getOrderEventStats()).latestEvent?.id,
           listEvents: async (from, limit) =>
             (await client.listOrderEvents({ from, limit })).events ?? [],

@@ -137,6 +137,17 @@ export interface OrderEventDrainDeps {
    * treated exactly like deferred ones: they hold the cursor, so they replay next tick.
    */
   heartbeat?: () => Promise<boolean>;
+  /**
+   * Whether a thrown error is a PIPELINE condition rather than a bad order.
+   *
+   * Without this the drain could only infer systemic from "every attempt failed and none
+   * succeeded", so a rate-limit storm or an outage that happened to land after one success
+   * was read as a set of bad orders - and each one's quarantine streak grew toward being
+   * skipped for good. The price loop already had the stronger signal (a 429, a 5xx, an auth
+   * error or a transport failure is systemic on its own, even on a tick with successes);
+   * this gives the drain the same one.
+   */
+  isSystemicError?: (error: unknown) => boolean;
 }
 
 export interface OrderEventDrainResult {
@@ -319,12 +330,15 @@ const applyEventRefreshes = async (
   succeeded: Set<string>;
   /** Forms never attempted because the claim was lost part-way through. */
   abandoned: Set<string>;
+  /** A failure was recognised as a pipeline condition, not a bad order. */
+  systemicSignal: boolean;
 }> => {
   const failed = new Map<string, string>();
   const succeeded = new Set<string>();
   const abandoned = new Set<string>();
   let refreshed = 0;
   let statusChanged = 0;
+  let systemicSignal = false;
   for (const [index, formId] of formIds.entries()) {
     // The claim is re-asserted before each form, not once for the whole drain. If it has
     // been taken over, stopping HERE is what keeps this pass from interleaving order writes
@@ -350,10 +364,13 @@ const applyEventRefreshes = async (
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       failed.set(formId, message);
+      if (deps.isSystemicError?.(error)) {
+        systemicSignal = true;
+      }
       deps.log?.("error", `event-driven refresh failed for checkout form ${formId}: ${message}`);
     }
   }
-  return { abandoned, failed, refreshed, statusChanged, succeeded };
+  return { abandoned, failed, refreshed, statusChanged, succeeded, systemicSignal };
 };
 
 /**
@@ -404,10 +421,8 @@ export const drainOrderEvents = async (
     );
   }
 
-  const { abandoned, failed, refreshed, statusChanged, succeeded } = await applyEventRefreshes(
-    scheduled,
-    deps,
-  );
+  const { abandoned, failed, refreshed, statusChanged, succeeded, systemicSignal } =
+    await applyEventRefreshes(scheduled, deps);
   if (abandoned.size > 0) {
     // Same treatment as a deferred form: never attempted, so it must block the cursor and
     // replay rather than being counted as a failure against its own quarantine streak.
@@ -417,7 +432,10 @@ export const drainOrderEvents = async (
     }
   }
 
-  const systemic = isSystemicFailure({ failed, succeeded });
+  // Either the all-failed inference OR a recognised pipeline error. The second is what
+  // stops a rate-limit storm that happened to land after one success from growing every
+  // other order's quarantine streak.
+  const systemic = systemicSignal || isSystemicFailure({ failed, succeeded });
   const { failures, quarantined } = updateFailureState(previousFailures, {
     failed,
     succeeded,
