@@ -507,12 +507,24 @@ describe("getConnectionStatus", () => {
 });
 
 describe("getPublicOptions", () => {
+  /**
+   * Option names that trip the credential heuristic below without being credentials.
+   *
+   * The allowlist exists so the tripwire stays sharp rather than being loosened.
+   * `srpMetadataKey` is the NAME of a variant metadata field the operator chose,
+   * shown in the admin so somebody can see where the SRP ceiling is read from - not
+   * secret material. Anything added here needs that argument made explicitly.
+   */
+  const NOT_SECRETS = new Set(["srpMetadataKey"]);
+
   it("returns no key that looks like secret material", async () => {
     const options = await makeService(fakeTable()).getPublicOptions();
 
-    expect(Object.keys(options).filter((name) => /secret|token|key|encrypt/i.test(name))).toEqual(
-      [],
-    );
+    expect(
+      Object.keys(options).filter(
+        (name) => /secret|token|key|encrypt/i.test(name) && !NOT_SECRETS.has(name),
+      ),
+    ).toEqual([]);
   });
 
   it("does not carry the client secret or the encryption key in any value", async () => {
@@ -529,10 +541,23 @@ describe("getPublicOptions", () => {
     expect(options).toEqual({
       appName: "MedusaAllegro",
       appVersion: "0.1.0",
+      // Undefined rather than absent, and asserted so: the admin distinguishes
+      // "not configured" (price sync inert, SRP unresolvable) from a default, and
+      // a key silently disappearing from this shape would break that.
+      automationRules: undefined,
+      changeCap: 100,
       environment: "production",
+      marketplaceId: "allegro-pl",
+      ordersSyncDisabled: false,
       priceSyncDisabled: false,
       redirectPath: "/admin/allegro/oauth/callback",
+      salesChannelId: undefined,
+      salesChannelName: undefined,
       scopes: expect.stringContaining("allegro:api:sale:offers:read"),
+      srpMetadataKey: undefined,
+      srpPriceListId: undefined,
+      stockLocationIds: [],
+      stockSyncDisabled: false,
     });
   });
 });

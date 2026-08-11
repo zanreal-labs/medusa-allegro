@@ -1,6 +1,13 @@
 {
   "compilerOptions": {
     "target": "ES2021",
+    // ES2023 LIBRARY, ES2021 EMIT. `target` controls the syntax that is emitted
+    // and stays where Medusa's own build has it; `lib` describes which runtime
+    // APIs exist, and the runtime here is Node >= 20 (see `engines`), which has
+    // the ES2023 array methods. Without this the repo formatter's preference for
+    // the non-mutating `toSorted` over `sort` is a type error, and the workaround
+    // - copy-then-sort-in-place - is the thing the preference exists to avoid.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "esModuleInterop": true,
     "module": "Node16",
     "moduleResolution": "Node16",

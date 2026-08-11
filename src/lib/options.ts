@@ -45,6 +45,75 @@ export interface AllegroPluginOptions {
    * operator can disable price sync before the code that needs disabling ships.
    */
   priceSyncDisabled?: boolean;
+  /** Kill-switch for every quantity write. See `priceSyncDisabled`. */
+  stockSyncDisabled?: boolean;
+  /**
+   * Kill-switch for the order event drain. Set it and the journal is not
+   * consumed at all, so the cursor holds and no order is imported or updated.
+   */
+  ordersSyncDisabled?: boolean;
+  /**
+   * The two named price-automation rules this plugin attaches, by promotion
+   * state. These MUST already exist on the Allegro account: the plugin resolves
+   * them by name on every run and refuses to write anything when a name is
+   * missing or ambiguous. It never creates or edits a rule.
+   *
+   * Omit it and price sync stays inert with a recorded error rather than
+   * guessing which rule an operator meant.
+   */
+  automationRules?: { promoted: string; standard: string };
+  /**
+   * Commands issued per price-sync run. A bug that mislabels the whole catalogue
+   * as drifting can reprice at most this many offers before a human sees the run
+   * and can flip the kill-switch; the rest waits for the next tick.
+   */
+  changeCap?: number;
+  /**
+   * The sales channel that scopes which products are sync-eligible. Only
+   * variants of products in this channel are matched against Allegro offers, so
+   * a store can sell a subset of its catalogue on Allegro.
+   *
+   * `salesChannelId` is exact; `salesChannelName` is resolved by name at run
+   * time (handy when the id differs per environment). With neither set the whole
+   * catalogue is eligible.
+   */
+  salesChannelId?: string;
+  salesChannelName?: string;
+  /**
+   * Stock locations whose available quantity is summed into the quantity pushed
+   * to Allegro. Empty means every location Medusa knows about.
+   */
+  stockLocationIds?: string[];
+  /**
+   * Where the SRP (the price-range ceiling) comes from. Exactly one of the two
+   * is used, `srpMetadataKey` first:
+   *
+   * - `srpMetadataKey` - a numeric value under that key in the variant's
+   *   `metadata` (or, failing that, the product's).
+   * - `srpPriceListId` - the variant's price in that price list.
+   *
+   * With neither configured - or with no value for a given variant - the offer
+   * is skipped with reason `missing-srp`. There is deliberately no fallback to
+   * the variant's regular price: a ceiling guessed from the current selling
+   * price would let an automation rule ratchet a price down indefinitely.
+   */
+  srpMetadataKey?: string;
+  srpPriceListId?: string;
+  /**
+   * Container key of the `@zanreal/medusa-product-costs` module, resolved
+   * lazily and optionally: without it (or without a cost for a given SKU) the
+   * break-even floor is unresolvable and the offer is skipped with reason
+   * `missing-break-even`. There is no default floor, ever.
+   */
+  costsModuleKey?: string;
+  /** Marketplace the rule assignment targets. Single-account PL sellers: `allegro-pl`. */
+  marketplaceId?: string;
+  /**
+   * Region that Allegro-sourced orders are created in. Medusa needs one to
+   * price an order; with none configured the plugin uses the first region whose
+   * currency matches the checkout form (then the first region at all).
+   */
+  regionId?: string;
   /**
    * Absolute base URL of this Medusa backend, e.g. "https://admin.example.com".
    * Only needed when the backend sits behind a proxy that rewrites Host, or
@@ -66,6 +135,18 @@ export interface ResolvedAllegroOptions {
   redirectPath: string;
   scopes: string;
   priceSyncDisabled: boolean;
+  stockSyncDisabled: boolean;
+  ordersSyncDisabled: boolean;
+  automationRules?: { promoted: string; standard: string };
+  changeCap: number;
+  salesChannelId?: string;
+  salesChannelName?: string;
+  stockLocationIds: string[];
+  srpMetadataKey?: string;
+  srpPriceListId?: string;
+  costsModuleKey: string;
+  marketplaceId: string;
+  regionId?: string;
   backendUrl?: string;
 }
 
@@ -88,16 +169,41 @@ export interface AllegroPublicOptions {
   redirectPath: string;
   scopes: string;
   priceSyncDisabled: boolean;
+  stockSyncDisabled: boolean;
+  ordersSyncDisabled: boolean;
+  /**
+   * The configured rule names, so the admin can say which two rules the account
+   * must carry. Names, not ids - a name is what an operator sees in the seller
+   * panel, and the ids are resolved from it on every run.
+   */
+  automationRules?: { promoted: string; standard: string };
+  changeCap: number;
+  salesChannelId?: string;
+  salesChannelName?: string;
+  stockLocationIds: string[];
+  srpMetadataKey?: string;
+  srpPriceListId?: string;
+  marketplaceId: string;
 }
 
 /** Narrow the resolved options to the fields that may leave the service. */
 export const toPublicAllegroOptions = (options: ResolvedAllegroOptions): AllegroPublicOptions => ({
   appName: options.appName,
   appVersion: options.appVersion,
+  automationRules: options.automationRules,
+  changeCap: options.changeCap,
   environment: options.environment,
+  marketplaceId: options.marketplaceId,
+  ordersSyncDisabled: options.ordersSyncDisabled,
   priceSyncDisabled: options.priceSyncDisabled,
   redirectPath: options.redirectPath,
+  salesChannelId: options.salesChannelId,
+  salesChannelName: options.salesChannelName,
   scopes: options.scopes,
+  srpMetadataKey: options.srpMetadataKey,
+  srpPriceListId: options.srpPriceListId,
+  stockLocationIds: options.stockLocationIds,
+  stockSyncDisabled: options.stockSyncDisabled,
 });
 
 export const DEFAULT_REDIRECT_PATH = "/admin/allegro/oauth/callback";
@@ -112,6 +218,12 @@ export const DEFAULT_SCOPES =
  * incident, and a stale `priceSyncDisabled: false` in config must not undo that.
  */
 const PRICE_SYNC_DISABLED_ENV = "ALLEGRO_PRICE_SYNC_DISABLED";
+/** Same contract as `ALLEGRO_PRICE_SYNC_DISABLED`, for the quantity writes. */
+const STOCK_SYNC_DISABLED_ENV = "ALLEGRO_STOCK_SYNC_DISABLED";
+/** Same contract again, for the order event drain. */
+const ORDERS_SYNC_DISABLED_ENV = "ALLEGRO_ORDERS_SYNC_DISABLED";
+/** Comma-separated stock location ids, overriding `stockLocationIds`. */
+const STOCK_LOCATION_IDS_ENV = "ALLEGRO_STOCK_LOCATION_IDS";
 
 const truthyEnv = (value: string | undefined): boolean => {
   const normalized = (value ?? "").trim().toLowerCase();
@@ -120,6 +232,125 @@ const truthyEnv = (value: string | undefined): boolean => {
 
 export const isPriceSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
   truthyEnv(env[PRICE_SYNC_DISABLED_ENV]);
+
+export const isStockSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
+  truthyEnv(env[STOCK_SYNC_DISABLED_ENV]);
+
+export const isOrdersSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
+  truthyEnv(env[ORDERS_SYNC_DISABLED_ENV]);
+
+/** Default price-automation marketplace: a single-account PL seller lives here. */
+export const DEFAULT_MARKETPLACE_ID = "allegro-pl";
+/** Default container key of the optional `@zanreal/medusa-product-costs` module. */
+export const DEFAULT_COSTS_MODULE_KEY = "productCosts";
+/** Default per-run cap on price-automation commands. */
+export const DEFAULT_CHANGE_CAP = 100;
+
+/**
+ * Reject a boolean-looking string on a kill-switch.
+ *
+ * `priceSyncDisabled: process.env.SOMETHING` yields "true", which a truthiness
+ * test would honour but a `=== true` test silently ignores - the switch would
+ * read as enabled while the operator believed it was off. Fail loudly instead,
+ * and name the env var that does the job properly.
+ */
+const requireBooleanSwitch = (
+  value: unknown,
+  field: keyof AllegroPluginOptions,
+  envVar: string,
+): void => {
+  if (value !== undefined && typeof value !== "boolean") {
+    throw new Error(
+      `medusa-allegro: plugin option \`${field}\` must be a boolean (got ${typeof value} "${String(value)}"). To drive it from the environment, set ${envVar}=1 instead of passing a string here.`,
+    );
+  }
+};
+
+/** Trimmed non-empty string, or undefined. Blank strings are not configuration. */
+const optionalString = (value: unknown): string | undefined => {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return trimmed || undefined;
+};
+
+/**
+ * Validate the two managed rule names.
+ *
+ * Both must be present and distinct. One name used for both promotion states
+ * would make every promotion flip a no-op switch, which reads as "price sync is
+ * working" while the promoted commission rate is never applied - exactly the
+ * silent mispricing the fail-loud rule resolution exists to prevent.
+ */
+const resolveAutomationRules = (
+  value: AllegroPluginOptions["automationRules"],
+): { promoted: string; standard: string } | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null) {
+    throw new Error(
+      `medusa-allegro: plugin option \`automationRules\` must be an object with \`promoted\` and \`standard\` rule names (got ${typeof value}).`,
+    );
+  }
+  const promoted = optionalString(value.promoted);
+  const standard = optionalString(value.standard);
+  if (!(promoted && standard)) {
+    throw new Error(
+      "medusa-allegro: plugin option `automationRules` needs both `promoted` and `standard` rule names. They must match rules that already exist on the Allegro account - the plugin never creates or edits a rule.",
+    );
+  }
+  if (promoted === standard) {
+    throw new Error(
+      `medusa-allegro: plugin option \`automationRules\` uses the same rule name ("${promoted}") for both promotion states. A promotion flip would then be a no-op switch, so the promoted commission rate would never reach the price floor. Use two distinct rules.`,
+    );
+  }
+  return { promoted, standard };
+};
+
+/** Locations from the env var when set, otherwise from the option. */
+const resolveStockLocationIds = (
+  value: AllegroPluginOptions["stockLocationIds"],
+  env: NodeJS.ProcessEnv,
+): string[] => {
+  const fromEnv = (env[STOCK_LOCATION_IDS_ENV] ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (fromEnv.length > 0) {
+    return [...new Set(fromEnv)];
+  }
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      `medusa-allegro: plugin option \`stockLocationIds\` must be an array of stock location ids (got ${typeof value}).`,
+    );
+  }
+  const ids = value
+    .map((entry) => optionalString(entry))
+    .filter((entry): entry is string => Boolean(entry));
+  return [...new Set(ids)];
+};
+
+/**
+ * The per-run command cap.
+ *
+ * Rejects 0 and negatives rather than treating them as "no writes": a cap is a
+ * blast-radius limit, and an operator who wants no writes has three kill
+ * switches to reach for. A silently inert loop that still reports "ok" is the
+ * failure mode this refuses to have.
+ */
+const resolveChangeCap = (value: AllegroPluginOptions["changeCap"]): number => {
+  if (value === undefined) {
+    return DEFAULT_CHANGE_CAP;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new Error(
+      `medusa-allegro: plugin option \`changeCap\` must be a positive integer (got ${typeof value} "${String(value)}"). To stop price writes entirely, use \`priceSyncDisabled\` or ALLEGRO_PRICE_SYNC_DISABLED.`,
+    );
+  }
+  return value;
+};
 
 const requireString = (value: unknown, field: keyof AllegroPluginOptions): string => {
   const trimmed = typeof value === "string" ? value.trim() : "";
@@ -174,11 +405,9 @@ export const resolveAllegroOptions = (
   // process.env.SOMETHING` yields "true", which a truthiness test would honour
   // but a `=== true` test silently ignores - the kill-switch would read as
   // enabled while the operator believed it was off. Fail loudly instead.
-  if (options.priceSyncDisabled !== undefined && typeof options.priceSyncDisabled !== "boolean") {
-    throw new Error(
-      `medusa-allegro: plugin option \`priceSyncDisabled\` must be a boolean (got ${typeof options.priceSyncDisabled} "${String(options.priceSyncDisabled)}"). To drive it from the environment, set ${PRICE_SYNC_DISABLED_ENV}=1 instead of passing a string here.`,
-    );
-  }
+  requireBooleanSwitch(options.priceSyncDisabled, "priceSyncDisabled", PRICE_SYNC_DISABLED_ENV);
+  requireBooleanSwitch(options.stockSyncDisabled, "stockSyncDisabled", STOCK_SYNC_DISABLED_ENV);
+  requireBooleanSwitch(options.ordersSyncDisabled, "ordersSyncDisabled", ORDERS_SYNC_DISABLED_ENV);
 
   const redirectPath = (options.redirectPath ?? DEFAULT_REDIRECT_PATH).trim();
   if (!redirectPath.startsWith("/")) {
@@ -207,17 +436,42 @@ export const resolveAllegroOptions = (
     }
   }
 
+  const srpMetadataKey = optionalString(options.srpMetadataKey);
+  const srpPriceListId = optionalString(options.srpPriceListId);
+  // Not an error, but the one misconfiguration that silently produces a
+  // catalogue-wide `missing-srp` skip: both sources absent means no offer can
+  // ever resolve a ceiling, so price sync would report itself healthy while
+  // writing nothing. The admin surfaces the same fact from `srpMetadataKey` /
+  // `srpPriceListId` being empty; this is only reachable at boot.
+  if (srpMetadataKey && srpPriceListId) {
+    throw new Error(
+      "medusa-allegro: plugin options `srpMetadataKey` and `srpPriceListId` are mutually exclusive - configure exactly one source for the SRP ceiling.",
+    );
+  }
+
   return {
     appName,
     appVersion,
+    automationRules: resolveAutomationRules(options.automationRules),
     backendUrl: backendUrl || undefined,
+    changeCap: resolveChangeCap(options.changeCap),
     clientId,
     clientSecret,
+    costsModuleKey: optionalString(options.costsModuleKey) ?? DEFAULT_COSTS_MODULE_KEY,
     docsUrl,
     encryptionKey,
     environment,
+    marketplaceId: optionalString(options.marketplaceId) ?? DEFAULT_MARKETPLACE_ID,
+    ordersSyncDisabled: options.ordersSyncDisabled === true || isOrdersSyncDisabledByEnv(),
     priceSyncDisabled: options.priceSyncDisabled === true || isPriceSyncDisabledByEnv(),
     redirectPath,
+    regionId: optionalString(options.regionId),
+    salesChannelId: optionalString(options.salesChannelId),
+    salesChannelName: optionalString(options.salesChannelName),
     scopes: (options.scopes ?? DEFAULT_SCOPES).trim() || DEFAULT_SCOPES,
+    srpMetadataKey,
+    srpPriceListId,
+    stockLocationIds: resolveStockLocationIds(options.stockLocationIds, process.env),
+    stockSyncDisabled: options.stockSyncDisabled === true || isStockSyncDisabledByEnv(),
   };
 };

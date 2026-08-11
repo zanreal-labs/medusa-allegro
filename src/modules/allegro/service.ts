@@ -11,7 +11,9 @@ import { AllegroOAuth } from "../../lib/allegro/oauth";
 import type { PersistedToken } from "../../lib/allegro/types";
 import { decryptValue, encryptValue } from "../../lib/crypto";
 import {
+  isOrdersSyncDisabledByEnv,
   isPriceSyncDisabledByEnv,
+  isStockSyncDisabledByEnv,
   resolveAllegroOptions,
   toPublicAllegroOptions,
 } from "../../lib/options";
@@ -22,11 +24,78 @@ import type {
 } from "../../lib/options";
 import { mintOAuthState, verifyOAuthState } from "../../lib/oauth-state";
 import type { OAuthStateVerification } from "../../lib/oauth-state";
+import type { FailureState } from "../../lib/sync/failure-state";
 import AllegroAuth from "./models/allegro-auth";
 import AllegroCategoryRate from "./models/allegro-category-rate";
 import AllegroOffer from "./models/allegro-offer";
+import AllegroOrder from "./models/allegro-order";
 import AllegroPricePush from "./models/allegro-price-push";
 import AllegroSyncState from "./models/allegro-sync-state";
+
+/** The distinct sync loops, each with its own state row, claim and kill switch. */
+export const ALLEGRO_SYNC_PROVIDERS = {
+  OFFERS: "offers",
+  ORDERS: "orders",
+  PRICES: "prices",
+  PRICE_AUTOMATION: "price-automation",
+  STOCK: "stock",
+} as const;
+
+export type AllegroSyncProvider =
+  (typeof ALLEGRO_SYNC_PROVIDERS)[keyof typeof ALLEGRO_SYNC_PROVIDERS];
+
+/**
+ * A `running` claim older than this is treated as crashed and taken over.
+ *
+ * Long enough that a live run is never usurped - a full-catalogue price sync
+ * polling a hundred commands is the slow case - and short enough that a process
+ * killed mid-run only blocks its loop for a few ticks. Without a staleness window
+ * one crash wedges the loop until somebody edits the row by hand.
+ */
+export const STALE_CLAIM_MS = 6 * 60_000;
+
+/**
+ * The single message every entry point returns when a claim is held.
+ *
+ * A named constant rather than three literals, because the admin has to recognise
+ * this case by identity: colliding with a scheduled run is RETRYABLE (try again in
+ * a minute and it succeeds), not a failure of the thing the operator asked for.
+ * Substring-matching a message would start reporting collisions as hard failures
+ * the day the wording changes.
+ */
+export const SYNC_CLAIM_HELD = "a sync run is already in progress for this provider";
+
+/** The sync-state row, as the loops read it. */
+export interface AllegroSyncStateRow {
+  id: string;
+  provider: string;
+  status: "idle" | "running" | "ok" | "error";
+  cursor: string | null;
+  counts: unknown;
+  failures: unknown;
+  last_error: string | null;
+  last_synced_at: Date | null;
+  write_scope_missing: boolean;
+  updated_at: Date;
+}
+
+/**
+ * What a loop persists at the end of a run.
+ *
+ * `counts` is `Record<string, unknown>` rather than a union of the per-provider
+ * summary types: the summaries are the providers' own shapes, and pulling them
+ * into the service would make every loop's counters part of the module's public
+ * contract for no gain. The admin reads them structurally.
+ */
+export interface AllegroSyncStatePatch {
+  status?: "idle" | "running" | "ok" | "error";
+  cursor?: string | null;
+  counts?: Record<string, unknown> | null;
+  failures?: FailureState | null;
+  last_error?: string | null;
+  last_synced_at?: Date | null;
+  write_scope_missing?: boolean;
+}
 
 /** Shape of a stored connection as the admin surfaces it. */
 export interface AllegroConnectionStatus {
@@ -78,6 +147,7 @@ class AllegroModuleService extends MedusaService({
   AllegroAuth,
   AllegroCategoryRate,
   AllegroOffer,
+  AllegroOrder,
   AllegroPricePush,
   AllegroSyncState,
 }) {
@@ -128,6 +198,141 @@ class AllegroModuleService extends MedusaService({
    */
   isPriceSyncDisabled(): Promise<boolean> {
     return Promise.resolve(this.options_.priceSyncDisabled || isPriceSyncDisabledByEnv());
+  }
+
+  /** Effective quantity-write kill-switch. Same env-wins contract as prices. */
+  isStockSyncDisabled(): Promise<boolean> {
+    return Promise.resolve(this.options_.stockSyncDisabled || isStockSyncDisabledByEnv());
+  }
+
+  /** Effective order-drain kill-switch. Same env-wins contract as prices. */
+  isOrdersSyncDisabled(): Promise<boolean> {
+    return Promise.resolve(this.options_.ordersSyncDisabled || isOrdersSyncDisabledByEnv());
+  }
+
+  /**
+   * Every kill switch in one read, for the admin.
+   *
+   * One method rather than three calls from the route because the three are only
+   * ever meaningful together: "price sync is off" reads as "nothing is written",
+   * which is wrong while stock sync is on.
+   */
+  async getKillSwitches(): Promise<{
+    priceSyncDisabled: boolean;
+    stockSyncDisabled: boolean;
+    ordersSyncDisabled: boolean;
+  }> {
+    const [priceSyncDisabled, stockSyncDisabled, ordersSyncDisabled] = await Promise.all([
+      this.isPriceSyncDisabled(),
+      this.isStockSyncDisabled(),
+      this.isOrdersSyncDisabled(),
+    ]);
+    return { ordersSyncDisabled, priceSyncDisabled, stockSyncDisabled };
+  }
+
+  // ─── Sync-state: single-flight claim and health ───
+
+  /** The provider's state row, or undefined before its first run. */
+  async getSyncState(provider: AllegroSyncProvider): Promise<AllegroSyncStateRow | undefined> {
+    const [row] = await this.listAllegroSyncStates({ provider }, { take: 1 });
+    return row as AllegroSyncStateRow | undefined;
+  }
+
+  /**
+   * Create the provider's state row if it does not exist yet, and return it.
+   *
+   * Separate from the claim so the claim can be a pure compare-and-set: a claim
+   * that also had to handle "no row yet" would need an insert path whose
+   * concurrency story is different from its update path.
+   */
+  async ensureSyncState(provider: AllegroSyncProvider): Promise<AllegroSyncStateRow> {
+    const existing = await this.getSyncState(provider);
+    if (existing) {
+      return existing;
+    }
+    const [created] = await this.createAllegroSyncStates([{ provider, status: "idle" }]);
+    return created as unknown as AllegroSyncStateRow;
+  }
+
+  /**
+   * Atomically claim a run for one provider.
+   *
+   * Two loops must never overlap. Price sync would double-push commands; the
+   * orders drain would interleave two full item replacements on the same order.
+   * A scheduled job and an operator pressing "run now" are exactly the collision
+   * this prevents.
+   *
+   * Shape: read the row, decide LOCALLY whether a non-stale run holds the claim,
+   * then update conditioned on `updated_at` still being the value that was read.
+   * Mikro-ORM bumps `updated_at` on every update, so a concurrent claimant
+   * invalidates the match and the loser's update affects zero rows. That count is
+   * the answer - `updateAllegroSyncStates` with a selector returns the rows it
+   * touched, so an empty result means somebody else won.
+   *
+   * This is the Medusa equivalent of the trigger-plus-optimistic-filter pattern
+   * used against Postgres directly: there is no trigger to write here, but the
+   * ORM's own `updated_at` maintenance plays the same role, and the verification
+   * is on affected rows rather than on trusting the filter.
+   */
+  async claimSyncRun(
+    provider: AllegroSyncProvider,
+  ): Promise<{ acquired: boolean; state?: AllegroSyncStateRow; reason?: string }> {
+    const state = await this.ensureSyncState(provider);
+
+    const updatedAt = new Date(state.updated_at).getTime();
+    const isRunning = state.status === "running";
+    const isStale = !Number.isFinite(updatedAt) || Date.now() - updatedAt > STALE_CLAIM_MS;
+    if (isRunning && !isStale) {
+      return { acquired: false, reason: SYNC_CLAIM_HELD, state };
+    }
+    if (isRunning && isStale) {
+      this.logger_?.warn(
+        `[medusa-allegro] taking over a stale "${provider}" sync claim last touched at ${new Date(state.updated_at).toISOString()}; the previous run appears to have crashed.`,
+      );
+    }
+
+    const claimed = await this.updateAllegroSyncStates({
+      data: { status: "running" },
+      selector: { provider, updated_at: state.updated_at },
+    });
+    if ((claimed as unknown[]).length === 0) {
+      return { acquired: false, reason: SYNC_CLAIM_HELD, state };
+    }
+    // The PRE-claim row is returned on purpose: the cursor and failure state a run
+    // needs are the ones from before it took the claim, and reading them again
+    // afterwards is a second round trip for the same values.
+    return { acquired: true, state };
+  }
+
+  /**
+   * Persist a run's outcome, releasing the claim.
+   *
+   * `failures: null` clears the column, which is what an empty failure state must
+   * write - a `{}`-shaped json blob reads as "some bookkeeping exists" in every
+   * later query and in the admin.
+   */
+  async writeSyncState(provider: AllegroSyncProvider, patch: AllegroSyncStatePatch): Promise<void> {
+    await this.ensureSyncState(provider);
+    // Spread into a fresh literal: the generated CRUD signature wants an
+    // index-signature shape, and `FailureState` is a closed interface on purpose -
+    // an index signature on it would let a typo through at every call site that
+    // builds one.
+    const data: Record<string, unknown> = { ...patch };
+    await this.updateAllegroSyncStates({ data, selector: { provider } });
+  }
+
+  /**
+   * Release a claim without recording an outcome.
+   *
+   * For the caller that could not even start - a kill switch, a missing
+   * connection - where leaving the row `running` would make the next tick take it
+   * over as stale instead of simply skipping again.
+   */
+  async releaseSyncRun(provider: AllegroSyncProvider, lastError?: string | null): Promise<void> {
+    await this.writeSyncState(provider, {
+      ...(lastError === undefined ? {} : { last_error: lastError }),
+      status: lastError ? "error" : "idle",
+    });
   }
 
   /** An unauthenticated OAuth helper for the connect/callback/revoke flow. */
