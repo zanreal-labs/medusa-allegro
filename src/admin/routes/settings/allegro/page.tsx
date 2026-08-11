@@ -86,6 +86,7 @@ const SYNC_STATUS_COLOR: Record<SyncStateRow["status"], "green" | "orange" | "re
 const AllegroSettingsPage = () => {
   const [data, setData] = useState<OverviewResponse | undefined>();
   const [loadError, setLoadError] = useState<string | undefined>();
+  const [disconnectWarning, setDisconnectWarning] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
 
   const params = new URLSearchParams(window.location.search);
@@ -123,8 +124,15 @@ const AllegroSettingsPage = () => {
 
   const disconnect = async () => {
     setBusy(true);
+    setDisconnectWarning(undefined);
     try {
-      await sdk.client.fetch("/admin/allegro/disconnect", { method: "POST" });
+      // The route answers with a `warning` when it deleted the local rows but
+      // could not revoke at Allegro. Nothing can retry that afterwards - the
+      // tokens are gone - so the hint has to reach the operator here.
+      const result = await sdk.client.fetch<{ warning?: string }>("/admin/allegro/disconnect", {
+        method: "POST",
+      });
+      setDisconnectWarning(result?.warning);
       await load();
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Could not disconnect.");
@@ -168,6 +176,12 @@ const AllegroSettingsPage = () => {
       {loadError ? (
         <div className="px-6 py-4">
           <Alert variant="error">{loadError}</Alert>
+        </div>
+      ) : null}
+
+      {disconnectWarning ? (
+        <div className="px-6 py-4">
+          <Alert variant="warning">{disconnectWarning}</Alert>
         </div>
       ) : null}
 
