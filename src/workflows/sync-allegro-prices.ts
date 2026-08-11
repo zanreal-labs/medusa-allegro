@@ -811,9 +811,30 @@ export const pushSingleAllegroOffer = async (
     async ({ allegro, client, logger, state }) => {
       const options = await allegro.getSyncOptions();
       const priorFailures = readFailureState(state.failures);
-      // Recomputed rather than nulled, so one per-offer action never wipes the
-      // quarantine signal for every OTHER offer off the admin.
-      const standingLine = standingHealthLine(priorFailures, "offer");
+      const priorScopeMissing = state.write_scope_missing;
+
+      /**
+       * The provider-wide health line that must SURVIVE a single-offer action.
+       *
+       * Recomputed rather than nulled, so one per-offer action never wipes the quarantine
+       * signal for every OTHER offer off the admin. It also carries the write-scope banner,
+       * because that flag is provider-wide too: a manual push for one SKU that left the flag
+       * set while erasing its explanatory line produced a raised banner with no text next to
+       * it.
+       */
+      const standingLine = (scopeMissing: boolean): string | null => {
+        const parts: string[] = [];
+        if (scopeMissing) {
+          parts.push(
+            "WRITE_SCOPE_MISSING: the stored Allegro token cannot write offers. Reconnect Allegro with the offer write scope to enable price sync.",
+          );
+        }
+        const quarantine = standingHealthLine(priorFailures, "offer");
+        if (quarantine) {
+          parts.push(quarantine);
+        }
+        return parts.length > 0 ? parts.join("; ") : null;
+      };
 
       const settle = (
         outcome: SingleOfferPushResult,
@@ -824,7 +845,28 @@ export const pushSingleAllegroOffer = async (
         } = {},
       ) => {
         result = outcome;
-        const lastError = over.lastError === undefined ? standingLine : over.lastError;
+        const scopeMissing = over.writeScopeMissing ?? priorScopeMissing;
+        const standing = standingLine(scopeMissing);
+        // A FAILED action may never settle the provider row as `ok`. It used to: the failed
+        // -command and no-mapping exits passed no `lastError`, so the row fell back to the
+        // standing line - null on a healthy provider - and was written `status: "ok"`,
+        // `last_error: null`, `last_synced_at: now`. That clobbered any standing SYSTEMIC or
+        // WRITE_SCOPE line the scheduled loop had recorded, so a broken provider read as
+        // freshly healthy because an operator's push had just failed against it.
+        const failureLine = outcome.ok
+          ? null
+          : `the manual push for "${sku}" failed: ${outcome.message}`;
+        // An explicit line wins VERBATIM. Callers that pass one have already composed the
+        // right answer - the success path in particular recomputes it from the POST-clear
+        // failures, so appending the pre-clear standing line here would re-report the very
+        // offer that was just repaired. The composition below is only for the exits that
+        // pass no line of their own, which is exactly where the `ok` downgrade used to
+        // happen.
+        const explicit = over.lastError;
+        const lastError =
+          explicit === undefined
+            ? [failureLine, standing].filter(Boolean).join("; ") || null
+            : explicit;
         return {
           outcome: {
             ...(over.failures === undefined ? {} : { failures: over.failures }),
@@ -932,6 +974,9 @@ export const pushSingleAllegroOffer = async (
         // The remedy path: a repaired offer stops being quarantined AND does not
         // resume a stale streak, so the loop takes it back over next tick.
         const { cleared, failures } = clearFailureKey(priorFailures, planned.plan.offerId);
+        // Recomputed from the POST-clear failures, so this offer stops being reported while
+        // every other quarantined offer stays on the line. A successful command also proves
+        // the write scope is present, so the banner text is dropped with the flag.
         const line = standingHealthLine(failures, "offer");
         await allegro.updateAllegroOffers([
           { id: row.id, last_error: null, price_synced_at: new Date() },

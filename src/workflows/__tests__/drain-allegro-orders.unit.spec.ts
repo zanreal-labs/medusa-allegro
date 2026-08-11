@@ -1056,6 +1056,52 @@ describe("repairAllegroOrder", () => {
   });
 });
 
+describe("importAllegroOrdersWindow: the standing quarantine line survives", () => {
+  it("keeps a standing quarantine on the row after a clean import", async () => {
+    // The regression: the import composed its error line from its OWN findings only, so a
+    // clean import wrote `last_error: null, status: "ok"` over any standing quarantine the
+    // per-minute drain had recorded. The orders set aside for manual repair silently vanished
+    // from the admin, and nothing else reports them.
+    const context = setup({
+      checkoutFormPages: [[form({ id: "f1" })]],
+      states: [
+        {
+          failures: {
+            quarantined: { "f-broken": { error: "boom", since: RECENT } },
+            streaks: {},
+          },
+          provider: "orders",
+          status: "error",
+        },
+      ],
+    });
+
+    const result = await importAllegroOrdersWindow(context.container as never, {
+      since: "2026-06-01T00:00:00.000Z",
+    });
+
+    expect(result.imported).toBe(1);
+    const state = context.allegro.states.get("orders");
+    expect(state?.status).toBe("error");
+    expect(state?.last_error).toContain("f-broken");
+    // Exactly as `repairAllegroOrder` does it.
+    expect(state?.last_error).toContain("quarantined");
+  });
+
+  it("settles ok when the import is clean and nothing is standing", async () => {
+    const context = setup({
+      checkoutFormPages: [[form({ id: "f1" })]],
+      states: [{ provider: "orders", status: "ok" }],
+    });
+
+    await importAllegroOrdersWindow(context.container as never, {
+      since: "2026-06-01T00:00:00.000Z",
+    });
+
+    expect(context.allegro.states.get("orders")).toMatchObject({ last_error: null, status: "ok" });
+  });
+});
+
 describe("importAllegroOrdersWindow", () => {
   it("imports every form in the window", async () => {
     const context = setup({

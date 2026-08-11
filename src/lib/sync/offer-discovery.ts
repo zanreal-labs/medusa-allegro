@@ -153,9 +153,11 @@ export const planOfferDiscovery = (input: {
   const upserts: OfferUpsert[] = [];
   const conflicts: OfferConflictRecord[] = [];
   const categoryIds = new Set<string>();
-  /** key -> the offer id that legitimately owns it this run. */
+  /** Resolved SKU -> the offer id that legitimately owns it this run. */
   const ownedBy = new Map<string, string>();
   const matchedVariantSkus = new Set<string>();
+  /** Every group that resolved to a variant, before collisions across groups are judged. */
+  const resolved: { offer: AllegroOffer; variant: EligibleVariant }[] = [];
   let matched = 0;
 
   for (const [key, group] of offersByKey) {
@@ -219,6 +221,43 @@ export const planOfferDiscovery = (input: {
 
     const variant = candidates[0] as EligibleVariant;
     matchedVariantSkus.add(variant.sku);
+    // Collected, NOT written yet. Two offers can reach the same variant through
+    // DIFFERENT keys - offer A by sygnatura "S1", offer B by an EAN whose barcode belongs
+    // to the same variant - so they land in different groups and the per-group duplicate
+    // check cannot see each other. Writing here let both claim SKU row S1 with no conflict
+    // recorded at all: last write wins, so a price or a quantity went to whichever offer
+    // happened to be written second. The collision is only visible once every group has
+    // been resolved to a variant, which is what the pass below does.
+    resolved.push({ offer, variant });
+  }
+
+  /** Resolved variant SKU -> every offer that reached it, by any key. */
+  const claimantsBySku = new Map<string, typeof resolved>();
+  for (const entry of resolved) {
+    const group = claimantsBySku.get(entry.variant.sku) ?? [];
+    group.push(entry);
+    claimantsBySku.set(entry.variant.sku, group);
+  }
+
+  for (const [sku, claimants] of claimantsBySku) {
+    if (claimants.length > 1) {
+      // The same class of ambiguity as two offers sharing a sygnatura, and reported under
+      // the same code, because the operator's question is identical: which of these offers
+      // owns the SKU? Naming the ids is the actionable part.
+      conflicts.push({
+        conflict: "duplicate-sku",
+        conflict_detail: `${claimants.length} live offers resolve to this SKU by different keys (sygnatura or EAN): ${claimants
+          .map((entry) => entry.offer.id)
+          .join(", ")}. Nothing is synced until exactly one offer maps to it.`,
+        sku,
+      });
+      continue;
+    }
+    const entry = claimants[0];
+    if (!entry) {
+      continue;
+    }
+    const { offer, variant } = entry;
     ownedBy.set(variant.sku, offer.id);
     matched += 1;
     upserts.push({
@@ -289,13 +328,24 @@ export const planOfferDiscovery = (input: {
     }
   }
 
+  // CONFLICT WINS. A SKU can reach both lists by different routes - the offers pass writes
+  // an upsert for it, and the unlink pass then records a `no-offer` conflict for a stored
+  // row that pointed at a now-renamed offer with the same SKU. Emitting both left the
+  // outcome to whichever write the applier happened to queue second: a healthy `offer_id`
+  // could land on a row simultaneously declared conflicted, which is precisely the state
+  // every write path treats as safe to push to. Withholding the upsert is the safe
+  // direction - the next run re-establishes it once the conflict is genuinely gone.
+  const conflictedSkus = new Set(conflicts.map((conflict) => conflict.sku));
+  const safeUpserts = upserts.filter((upsert) => !conflictedSkus.has(upsert.sku));
+
   return {
     categoryIds: [...categoryIds],
     conflicts,
-    matched,
+    // Only the upserts that survived. A withheld one is not a match this run.
+    matched: matched - (upserts.length - safeUpserts.length),
     skippedNoSku,
     unlink,
     unmatchedVariants: variants.filter((variant) => !matchedVariantSkus.has(variant.sku)).length,
-    upserts,
+    upserts: safeUpserts,
   };
 };

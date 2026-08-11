@@ -29,6 +29,58 @@ const plan = (input: {
     variants: input.variants ?? [],
   });
 
+describe("planOfferDiscovery: two offers resolving to one variant", () => {
+  it("records a duplicate-sku conflict when a sygnatura and an EAN reach the same variant", () => {
+    // The collision the per-group check could not see. Offer o1 presents sygnatura "SKU-1";
+    // offer o2 presents no sygnatura and an EAN that is that same variant's barcode. They
+    // group under DIFFERENT keys, so each looked unique, and both wrote an upsert for SKU row
+    // "SKU-1" with no conflict recorded at all. Last write won, so a price or a quantity went
+    // to whichever offer happened to be applied second.
+    const result = plan({
+      offers: [linked("o1", "SKU-1"), offer({ ean: "5901234123457", id: "o2" })],
+      variants: [variant("v1", "SKU-1", "5901234123457")],
+    });
+
+    // Neither offer wins, and no healthy `offer_id` is written.
+    expect(result.upserts).toEqual([]);
+    expect(result.matched).toBe(0);
+    const conflict = result.conflicts.find((entry) => entry.sku === "SKU-1");
+    expect(conflict?.conflict).toBe("duplicate-sku");
+    // Both ids named: resolving this means deciding which offer owns the SKU.
+    expect(conflict?.conflict_detail).toContain("o1");
+    expect(conflict?.conflict_detail).toContain("o2");
+  });
+
+  it("still maps a single offer that reaches its variant by EAN alone", () => {
+    // The contrast: no collision, so the EAN route works exactly as before.
+    const result = plan({
+      offers: [offer({ ean: "5901234123457", id: "o2" })],
+      variants: [variant("v1", "SKU-1", "5901234123457")],
+    });
+
+    expect(result.conflicts).toEqual([]);
+    expect(result.upserts).toHaveLength(1);
+    expect(result.upserts[0]).toMatchObject({ offer_id: "o2", sku: "SKU-1" });
+  });
+
+  it("never leaves a conflicted SKU carrying a healthy upsert as well", () => {
+    // A SKU can reach both lists by different routes: the offers pass writes an upsert while
+    // the unlink pass records `no-offer` for a stored row that pointed at a now-renamed
+    // offer. Emitting both left the outcome to whichever write was queued second, and a
+    // healthy `offer_id` landing on a row simultaneously declared conflicted is exactly the
+    // state every write path treats as safe to push to.
+    const result = plan({
+      offers: [linked("o1", "SKU-1"), offer({ ean: "5901234123457", id: "o2" })],
+      stored: [{ id: "row-1", offer_id: "o-old", sku: "SKU-1" }],
+      variants: [variant("v1", "SKU-1", "5901234123457")],
+    });
+
+    const conflictedSkus = new Set(result.conflicts.map((entry) => entry.sku));
+    expect([...conflictedSkus]).toContain("SKU-1");
+    expect(result.upserts.filter((upsert) => conflictedSkus.has(upsert.sku))).toEqual([]);
+  });
+});
+
 describe("planOfferDiscovery", () => {
   it("maps a sygnatura match onto the variant's SKU", () => {
     const result = plan({

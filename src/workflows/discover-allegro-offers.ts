@@ -1,4 +1,5 @@
 import type { MedusaContainer } from "@medusajs/framework/types";
+import { MedusaError } from "@medusajs/framework/utils";
 import {
   createStep,
   createWorkflow,
@@ -184,6 +185,35 @@ const applyPlan = async (
       continue;
     }
     toUpdate.push({ id: existing.id, offer_id: null, promoted: null });
+  }
+
+  // Fail-closed invariant check, before ANY write. Two updates for one row id, or two
+  // creates for one SKU, are the shapes a planner collision produces: the first makes the
+  // outcome depend on statement ordering nobody should have to reason about, and the second
+  // violates the unique index on `sku`. The plan is fully computed by this point, so
+  // throwing here writes nothing at all - the safe direction for a state the planner is
+  // supposed to have made impossible.
+  const queuedIds = new Set<string>();
+  for (const row of toUpdate) {
+    const id = row.id as string;
+    if (queuedIds.has(id)) {
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        `medusa-allegro: discovery planned two writes for mapping row ${id} (sku "${String(row.sku ?? "?")}"). Refusing to apply any of them; this is a planner bug, not a data problem.`,
+      );
+    }
+    queuedIds.add(id);
+  }
+  const queuedSkus = new Set<string>();
+  for (const row of toCreate) {
+    const sku = row.sku as string;
+    if (queuedSkus.has(sku)) {
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        `medusa-allegro: discovery planned two new mapping rows for SKU "${sku}". Refusing to apply any of them; the SKU is unique, so this is a planner bug.`,
+      );
+    }
+    queuedSkus.add(sku);
   }
 
   if (toCreate.length > 0) {

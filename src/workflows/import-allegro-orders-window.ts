@@ -5,6 +5,7 @@ import {
   StepResponse,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk";
+import { readFailureState, standingHealthLine } from "../lib/sync/failure-state";
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
 import { applyCheckoutForm } from "./lib/order-upsert";
 import { runUnderSyncClaim } from "./lib/run";
@@ -79,8 +80,14 @@ export const importAllegroOrdersWindow = async (
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.ORDERS,
-    async ({ allegro, client, heartbeat, logger }) => {
+    async ({ allegro, client, heartbeat, logger, state }) => {
       const options = await allegro.getSyncOptions();
+      // The provider-wide quarantine line has to SURVIVE an import. The import composed its
+      // error line from its own findings only, so a clean import wrote `last_error: null,
+      // status: "ok"` over any standing quarantine the per-minute drain had recorded - and
+      // the orders that had been set aside for manual repair silently vanished from the
+      // admin. Recomputed here exactly as `repairAllegroOrder` does it.
+      const standingLine = standingHealthLine(readFailureState(state.failures), "order");
       const failedFormIds: string[] = [];
       let fetched = 0;
       let imported = 0;
@@ -144,6 +151,9 @@ export const importAllegroOrdersWindow = async (
         parts.push(
           `the page cap (${maxPages} x ${pageLimit}) was hit; re-run the import with a later \`since\` to continue`,
         );
+      }
+      if (standingLine) {
+        parts.push(standingLine);
       }
       const errorLine = parts.length > 0 ? parts.join("; ") : null;
 

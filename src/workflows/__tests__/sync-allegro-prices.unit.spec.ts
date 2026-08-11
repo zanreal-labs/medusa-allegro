@@ -178,6 +178,65 @@ const healthy = (over: Partial<Parameters<typeof setup>[0]> = {}) =>
     ...over,
   });
 
+describe("pushSingleAllegroOffer: a failed push never settles the provider as healthy", () => {
+  /** A provider row carrying a standing write-scope condition from the scheduled loop. */
+  const standing = (over: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      live: [offerFixture({ id: "o1" })],
+      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
+      states: [
+        {
+          last_error: "WRITE_SCOPE_MISSING: reconnect Allegro with the offer write scope.",
+          provider: "prices",
+          status: "error",
+          write_scope_missing: true,
+        },
+      ],
+      ...over,
+    });
+
+  it("does not settle the provider as ok when the command fails", async () => {
+    // The regression: the failed-command exit passed no `lastError`, so the row fell back to
+    // the standing line - null on a provider with no quarantines - and was written
+    // `status: "ok"`, `last_error: null`, `last_synced_at: now`. An operator's FAILED push
+    // therefore made a broken provider read as freshly healthy.
+    const { allegro, container } = standing({
+      script: { tallyFor: { o1: { failed: 1, success: 0, total: 1 } } },
+    });
+
+    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+
+    expect(result.ok).toBe(false);
+    const state = allegro.states.get("prices");
+    expect(state?.status).toBe("error");
+    expect(state?.last_error).toContain('the manual push for "SKU-1" failed');
+  });
+
+  it("keeps the write-scope banner text while the flag is still raised", async () => {
+    // A no-mapping exit touches nothing about the scope, so the flag stays set - and the line
+    // explaining it has to stay with it, or the admin renders a banner with no text.
+    const { allegro, container } = standing();
+
+    const result = await pushSingleAllegroOffer(container as never, "SKU-UNKNOWN", "operator");
+
+    expect(result.ok).toBe(false);
+    const state = allegro.states.get("prices");
+    expect(state?.status).toBe("error");
+    expect(state?.last_error).toContain("WRITE_SCOPE_MISSING");
+    expect(state?.write_scope_missing).toBe(true);
+  });
+
+  it("still settles ok when the push genuinely succeeds and nothing is standing", async () => {
+    // The contrast, so the guard above cannot be satisfied by simply never reporting ok.
+    const { allegro, container } = healthy();
+
+    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+
+    expect(result.status).toBe("synced");
+    expect(allegro.states.get("prices")).toMatchObject({ last_error: null, status: "ok" });
+  });
+});
+
 describe("syncAllegroPrices: the claim is re-asserted between commands", () => {
   it("abandons the remaining commands when the claim is taken over mid-run", async () => {
     // A full-catalogue push is minutes of sequential commands, each with its own 15s poll,
