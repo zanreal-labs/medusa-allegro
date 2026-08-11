@@ -21,6 +21,12 @@ export {
 } from "./run-price-automation-monitor";
 export type { PriceAutomationMonitorResult } from "./run-price-automation-monitor";
 export {
+  emptyStockSyncResult,
+  pushAllegroStock,
+  pushAllegroStockWorkflow,
+} from "./push-allegro-stock";
+export type { StockSyncResult } from "./push-allegro-stock";
+export {
   emptyPriceSyncSummary,
   pushSingleAllegroOffer,
   syncAllegroPrices,

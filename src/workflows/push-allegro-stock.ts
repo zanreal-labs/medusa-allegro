@@ -1,0 +1,420 @@
+import { randomUUID } from "node:crypto";
+import type { MedusaContainer } from "@medusajs/framework/types";
+import {
+  createStep,
+  createWorkflow,
+  StepResponse,
+  WorkflowResponse,
+} from "@medusajs/framework/workflows-sdk";
+import { AllegroAuthError } from "../lib/allegro/auth-error";
+import type { AllegroClient } from "../lib/allegro/client";
+import { AllegroApiError } from "../lib/allegro/errors";
+import {
+  buildStockCommandChunks,
+  isStockCoverageComplete,
+  isStockPlanSafe,
+  planStockSync,
+  STOCK_COMMAND_SIZE,
+  STOCK_POLL_CONCURRENCY,
+} from "../lib/sync/stock-plan";
+import type { StockChange, StockSyncSummary } from "../lib/sync/stock-plan";
+import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
+import type AllegroModuleService from "../modules/allegro/service";
+import { listEligibleVariants, readAvailableQuantities } from "./lib/catalog";
+import { listAllOffers } from "./lib/offers";
+import type { OfferListing } from "./lib/offers";
+import { runUnderSyncClaim } from "./lib/run";
+
+/**
+ * The quantity push: make Allegro's available quantity match Medusa's.
+ *
+ * ## Medusa inventory is the source of truth, and keeping it honest is not this
+ * plugin's job
+ *
+ * This loop reads `retrieveAvailableQuantity` (stocked minus reserved) and pushes
+ * it. It does NOT decide whether that number is trustworthy. In this stack the
+ * `@zanreal/medusa-marken` plugin owns the supplier snapshot and the `stockArmed`
+ * gate that refuses to propagate an untrustworthy one into Medusa inventory - so
+ * the guard against "publish stale stock after a supplier outage" lives THERE, one
+ * layer up, where the supplier response is actually visible.
+ *
+ * Putting a second such gate here would be worse than redundant: this loop cannot
+ * see a supplier at all, so any guard it invented would be a guess about data it
+ * has no source for. What it CAN see, and does refuse on, is its own uncertainty -
+ * see the plan-safety rule below.
+ *
+ * ## Why an unsafe plan refuses the whole run
+ *
+ * An ambiguous match or an unreadable quantity means the plan does not know the
+ * whole truth about the catalogue. A partial quantity push is worse than none: some
+ * offers get a fresh figure while others keep a stale one, with nothing recording
+ * which is which - so the next run cannot tell either. The run is refused as a
+ * whole and the reason is reported.
+ *
+ * Quantities are grouped by target value because the API forces it - one command
+ * sets ONE fixed value across up to 1,000 offers - which also makes a full
+ * catalogue reconciliation cheap, since most offers share a handful of quantities.
+ */
+
+export interface StockSyncResult extends StockSyncSummary {
+  /** Set when the run did nothing. */
+  skipped?: string;
+}
+
+export const emptyStockSyncResult = (): StockSyncResult => ({
+  alreadyInSync: 0,
+  ambiguous: 0,
+  commands: 0,
+  complete: false,
+  eligible: 0,
+  failed: 0,
+  mismatched: 0,
+  pending: 0,
+  skippedInactive: 0,
+  skippedUnlinked: 0,
+  synced: 0,
+  unresolved: 0,
+});
+
+/** Run `fn` over `values` with at most `concurrency` in flight. */
+const mapWithConcurrency = async <T, R>(
+  values: readonly T[],
+  concurrency: number,
+  fn: (value: T) => Promise<R>,
+): Promise<R[]> => {
+  const results = new Array<R>(values.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < values.length) {
+      const index = next;
+      next += 1;
+      results[index] = await fn(values[index] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  return results;
+};
+
+interface SubmittedCommand {
+  commandId: string;
+  changes: StockChange[];
+}
+
+/**
+ * Submit one command per quantity group, stopping at the first systemic failure.
+ *
+ * Sequential submission with an early break, not a fan-out: on a 429 or a 5xx there
+ * is nothing to gain from firing the remaining commands, and a fan-out would have
+ * already sent them by the time the first failure came back.
+ */
+const submitCommands = async (
+  client: AllegroClient,
+  chunks: readonly StockChange[][],
+): Promise<{ submitted: SubmittedCommand[]; error?: string }> => {
+  const submitted: SubmittedCommand[] = [];
+  for (const changes of chunks) {
+    const commandId = randomUUID();
+    try {
+      await client.changeOfferQuantity({
+        commandId,
+        offerIds: changes.map((change) => change.offerId),
+        value: changes[0]?.desired ?? 0,
+      });
+      submitted.push({ changes, commandId });
+    } catch (error) {
+      if (error instanceof AllegroApiError && error.isForbidden()) {
+        return {
+          error:
+            "WRITE_SCOPE_MISSING: the stored Allegro token cannot write offer quantities. Reconnect Allegro with the offer write scope.",
+          submitted,
+        };
+      }
+      const message =
+        error instanceof AllegroAuthError
+          ? `auth error: ${error.message}`
+          : (error instanceof Error
+            ? error.message
+            : String(error));
+      return { error: message, submitted };
+    }
+  }
+  return { submitted };
+};
+
+/**
+ * Poll each submitted command to terminal and count what Allegro confirmed.
+ *
+ * Confirmation is per OFFER, from the task report, not per command: a command can
+ * report itself complete while individual offers inside it failed, and counting the
+ * command as a success would claim quantities that never landed. An offer with no
+ * SUCCESS task is `failed`, not silently synced.
+ */
+const collectOutcomes = async (
+  client: AllegroClient,
+  submitted: readonly SubmittedCommand[],
+): Promise<{
+  synced: number;
+  pending: number;
+  failed: number;
+  /** Offers Allegro confirmed at the new quantity, per offer and not per command. */
+  confirmed: string[];
+  error?: string;
+}> => {
+  let firstError: string | undefined;
+
+  const outcomes = await mapWithConcurrency(
+    submitted,
+    STOCK_POLL_CONCURRENCY,
+    async (submission) => {
+      try {
+        const report = await client.pollOfferQuantityCommand(submission.commandId, {
+          timeoutMs: 120_000,
+        });
+        const tally = report.taskCount;
+        const terminal = Boolean(
+          report.completedAt ||
+          (tally && tally.total > 0 && tally.success + tally.failed >= tally.total),
+        );
+        if (!terminal) {
+          // Submitted but unconfirmed. `pending`, not `failed`: the quantities may
+          // well have landed, and reporting them as failures would make the next run
+          // treat a working push as a broken one.
+          return { confirmed: [], failed: 0, pending: submission.changes.length, synced: 0 };
+        }
+
+        const tasks = await client.getOfferQuantityCommandTasks(submission.commandId, {
+          limit: STOCK_COMMAND_SIZE,
+          offset: 0,
+        });
+        const confirmedOfferIds = new Set<string>();
+        for (const task of tasks.tasks ?? []) {
+          const offerId = task.offer?.id;
+          // `field === "quantity"` matters: a command report can carry tasks for
+          // other fields, and counting one of those as a quantity confirmation would
+          // report a quantity that was never set.
+          if (task.status === "SUCCESS" && task.field === "quantity" && offerId) {
+            confirmedOfferIds.add(offerId);
+          }
+        }
+        const confirmed = submission.changes
+          .map((change) => change.offerId)
+          .filter((offerId) => confirmedOfferIds.has(offerId));
+        return {
+          confirmed,
+          // An offer with no SUCCESS task inside a TERMINAL command is `failed`, not
+          // silently synced: a command can report itself complete while individual
+          // offers inside it were rejected.
+          failed: submission.changes.length - confirmed.length,
+          pending: 0,
+          synced: confirmed.length,
+        };
+      } catch (error) {
+        firstError ??= error instanceof Error ? error.message : String(error);
+        return { confirmed: [], failed: 0, pending: submission.changes.length, synced: 0 };
+      }
+    },
+  );
+
+  const confirmed: string[] = [];
+  let synced = 0;
+  let pending = 0;
+  let failed = 0;
+  for (const outcome of outcomes) {
+    synced += outcome.synced;
+    pending += outcome.pending;
+    failed += outcome.failed;
+    confirmed.push(...outcome.confirmed);
+  }
+  return { confirmed, error: firstError, failed, pending, synced };
+};
+
+/** The `last_error` line for the admin, or null when the run was clean. */
+const buildStockError = (result: StockSyncResult, firstError?: string): string | null => {
+  const parts: string[] = [];
+  if (firstError) {
+    parts.push(firstError);
+  }
+  if (result.ambiguous > 0) {
+    parts.push(
+      `${result.ambiguous} offer(s) match more than one variant, so the whole plan was refused rather than partially applied`,
+    );
+  }
+  if (result.unresolved > 0) {
+    parts.push(
+      `${result.unresolved} offer(s) have an unreadable quantity on one side, so the whole plan was refused rather than partially applied`,
+    );
+  }
+  if (result.failed > 0) {
+    parts.push(`${result.failed} offer quantity write(s) were not confirmed by Allegro`);
+  }
+  if (result.pending > 0) {
+    parts.push(
+      `${result.pending} offer quantity write(s) were submitted but not confirmed within the poll budget; the next run re-checks them`,
+    );
+  }
+  return parts.length > 0 ? parts.join("; ") : null;
+};
+
+/** Stamp `stock_synced_at` on the offers whose quantity Allegro confirmed. */
+const stampSyncedOffers = async (
+  allegro: AllegroModuleService,
+  offerIds: readonly string[],
+): Promise<void> => {
+  if (offerIds.length === 0) {
+    return;
+  }
+  const rows = (await allegro.listAllegroOffers({ offer_id: [...offerIds] })) as unknown as {
+    id: string;
+  }[];
+  if (rows.length === 0) {
+    return;
+  }
+  await allegro.updateAllegroOffers(
+    rows.map((row) => ({ id: row.id, stock_synced_at: new Date() })) as never,
+  );
+};
+
+/**
+ * Run one quantity-push tick.
+ *
+ * `listing` may be supplied by a caller that already fetched the catalogue.
+ */
+export const pushAllegroStock = async (
+  container: MedusaContainer,
+  listing?: OfferListing,
+): Promise<StockSyncResult> => {
+  let result = emptyStockSyncResult();
+
+  const run = await runUnderSyncClaim(
+    container,
+    ALLEGRO_SYNC_PROVIDERS.STOCK,
+    async ({ allegro, client, logger }) => {
+      const options = await allegro.getSyncOptions();
+      const variants = await listEligibleVariants(container, options);
+      const quantities = await readAvailableQuantities(
+        container,
+        variants,
+        options.stockLocationIds,
+      );
+      const offers = listing ?? (await listAllOffers(client));
+
+      // Only mapped, unconflicted offers are candidates. Reading the mapping table
+      // rather than matching the raw listing again is what makes discovery's conflict
+      // detection actually bind on the write path.
+      const rows = (await allegro.listAllegroOffers({})) as unknown as {
+        sku: string;
+        offer_id?: string | null;
+        conflict?: string | null;
+      }[];
+      const syncableOfferIds = new Set(
+        rows.filter((row) => !row.conflict && row.offer_id).map((row) => row.offer_id as string),
+      );
+      const candidateOffers = offers.offers.filter((offer) => syncableOfferIds.has(offer.id));
+
+      const plan = planStockSync(
+        variants.map((variant) => ({ quantity: quantities.get(variant.sku), sku: variant.sku })),
+        candidateOffers,
+      );
+      const { changes, ...summary } = plan;
+      result = { ...summary };
+
+      if (!isStockPlanSafe(plan)) {
+        // Refused as a whole. See the class comment: a partial push leaves some
+        // offers fresh and others stale with no record of which.
+        result.complete = false;
+        result.failed = changes.length;
+        const errorLine = buildStockError(result);
+        result.error = errorLine ?? undefined;
+        logger.warn(
+          `[allegro-stock] plan refused: ambiguous=${plan.ambiguous} unresolved=${plan.unresolved}. No quantity was written.`,
+        );
+        return {
+          outcome: { counts: { ...result }, lastError: errorLine, status: "error" as const },
+          value: undefined,
+        };
+      }
+
+      if (changes.length === 0) {
+        result.complete = isStockCoverageComplete(plan);
+        const errorLine = buildStockError(result);
+        result.error = errorLine ?? undefined;
+        return {
+          outcome: {
+            counts: { ...result },
+            lastError: errorLine,
+            status: errorLine ? ("error" as const) : ("ok" as const),
+          },
+          value: undefined,
+        };
+      }
+
+      const chunks = buildStockCommandChunks(changes);
+      const { error: submitError, submitted } = await submitCommands(client, chunks);
+      result.commands = submitted.length;
+
+      const submittedCount = submitted.reduce((sum, item) => sum + item.changes.length, 0);
+      // Everything in a chunk that was never submitted counts as failed: those
+      // offers keep a stale quantity and nothing else records that.
+      const notSubmitted = changes.length - submittedCount;
+
+      const outcomes = await collectOutcomes(client, submitted);
+      result.synced = outcomes.synced;
+      result.pending = outcomes.pending;
+      result.failed = outcomes.failed + notSubmitted;
+      result.complete =
+        result.synced === plan.mismatched &&
+        result.pending === 0 &&
+        result.failed === 0 &&
+        isStockCoverageComplete(plan);
+
+      // Stamped per confirmed offer, not per run: on a partly-confirmed run the
+      // offers that landed are exactly the ones whose `stock_synced_at` should move,
+      // and stamping the rest would claim a push that did not happen.
+      await stampSyncedOffers(allegro, outcomes.confirmed);
+
+      const firstError = submitError ?? outcomes.error;
+      const errorLine = buildStockError(result, firstError);
+      result.error = errorLine ?? undefined;
+      return {
+        outcome: {
+          counts: { ...result },
+          lastError: errorLine,
+          status: errorLine ? ("error" as const) : ("ok" as const),
+          // A 403 on the quantity command is the same write-scope gap the price loop
+          // detects, and the same reconnect fixes both, so it raises the same banner.
+          ...(submitError?.startsWith("WRITE_SCOPE_MISSING") ? { writeScopeMissing: true } : {}),
+        },
+        value: undefined,
+      };
+    },
+    {
+      disabled: (allegro) => allegro.isStockSyncDisabled(),
+      reason:
+        "stock sync is disabled (the `stockSyncDisabled` option, or ALLEGRO_STOCK_SYNC_DISABLED). No quantity was written to Allegro.",
+    },
+  );
+
+  if (!run.ran) {
+    result.skipped = run.skip.reason;
+  }
+  return result;
+};
+
+const pushAllegroStockStep = createStep(
+  "push-allegro-stock",
+  async (_input: void, { container }: { container: MedusaContainer }) =>
+    new StepResponse(await pushAllegroStock(container)),
+);
+
+/**
+ * The quantity push as a workflow, for the admin "run now" action.
+ *
+ * Deliberately NOT compensated. A quantity is absolute state that Allegro owns and
+ * Medusa is the source of, so the repair for a bad push is another push from a
+ * corrected inventory - "undoing" it would mean restoring a quantity that was
+ * wrong.
+ */
+export const pushAllegroStockWorkflow = createWorkflow(
+  "push-allegro-stock",
+  () => new WorkflowResponse(pushAllegroStockStep()),
+);

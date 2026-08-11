@@ -1,0 +1,403 @@
+import { AllegroApiError } from "../../lib/allegro/errors";
+import type { AllegroOffer } from "../../lib/allegro/types";
+import { pushAllegroStock } from "../push-allegro-stock";
+import { fakeAllegroService, fakeContainer, offerFixture } from "./fixtures";
+import type { OfferRowFixture, VariantFixture } from "./fixtures";
+
+interface QuantityScript {
+  /** Thrown from `changeOfferQuantity` on the Nth submission (0-based). */
+  throwOn?: Record<number, Error>;
+  /** Command ids whose report never reaches a terminal state. */
+  pendingCommands?: number[];
+  /** Offer ids to REPORT as confirmed; defaults to every offer in the command. */
+  confirmOnly?: string[];
+}
+
+const fakeClient = (input: { offers?: AllegroOffer[]; script?: QuantityScript }) => {
+  const script = input.script ?? {};
+  const submissions: { commandId: string; offerIds: string[]; value: number }[] = [];
+  const commandIndexById = new Map<string, number>();
+
+  return {
+    changeOfferQuantity: (params: { commandId: string; offerIds: string[]; value: number }) => {
+      const index = submissions.length;
+      const failure = script.throwOn?.[index];
+      if (failure) {
+        return Promise.reject(failure);
+      }
+      commandIndexById.set(params.commandId, index);
+      submissions.push({
+        commandId: params.commandId,
+        offerIds: params.offerIds,
+        value: params.value,
+      });
+      return Promise.resolve({ id: params.commandId });
+    },
+    getOfferQuantityCommandTasks: (commandId: string) => {
+      const submission = submissions.find((entry) => entry.commandId === commandId);
+      const offerIds = (submission?.offerIds ?? []).filter((offerId) =>
+        script.confirmOnly ? script.confirmOnly.includes(offerId) : true,
+      );
+      return Promise.resolve({
+        tasks: offerIds.map((offerId) => ({
+          field: "quantity" as const,
+          offer: { id: offerId },
+          status: "SUCCESS" as const,
+        })),
+      });
+    },
+    listOffers: () =>
+      Promise.resolve({
+        count: (input.offers ?? []).length,
+        offers: input.offers ?? [],
+        totalCount: (input.offers ?? []).length,
+      }),
+    pollOfferQuantityCommand: (commandId: string) => {
+      const index = commandIndexById.get(commandId) ?? -1;
+      if (script.pendingCommands?.includes(index)) {
+        return Promise.resolve({ completedAt: null, id: commandId });
+      }
+      const submission = submissions.find((entry) => entry.commandId === commandId);
+      const total = submission?.offerIds.length ?? 0;
+      return Promise.resolve({
+        completedAt: "2026-06-01T00:00:00.000Z",
+        id: commandId,
+        taskCount: { failed: 0, success: total, total },
+      });
+    },
+    submissions,
+  };
+};
+
+const fakeInventory = (available: Record<string, number>) => ({
+  retrieveAvailableQuantity: (itemId: string) => Promise.resolve(available[itemId] ?? 0),
+});
+
+const setup = (input: {
+  rows?: OfferRowFixture[];
+  live?: AllegroOffer[];
+  variants?: VariantFixture[];
+  available?: Record<string, number>;
+  script?: QuantityScript;
+  stockSyncDisabled?: boolean;
+  noInventory?: boolean;
+  stockLocationIds?: string[];
+  syncOptions?: Record<string, unknown>;
+}) => {
+  const client = fakeClient({ offers: input.live, script: input.script });
+  const allegro = fakeAllegroService({
+    client,
+    offers: input.rows ?? [],
+    stockSyncDisabled: input.stockSyncDisabled,
+    syncOptions: input.syncOptions,
+  });
+  const logs: string[] = [];
+  const container = fakeContainer({
+    allegro,
+    ...(input.noInventory ? {} : { inventory: fakeInventory(input.available ?? { inv_1: 9 }) }),
+    logs,
+    stockLocationIds: input.stockLocationIds,
+    variants: input.variants ?? [{ id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" }],
+  });
+  return { allegro, client, container, logs };
+};
+
+/** One mapped, ACTIVE offer at quantity 5 with Medusa reporting 9. */
+const healthy = (over: Partial<Parameters<typeof setup>[0]> = {}) =>
+  setup({
+    live: [offerFixture({ external: { id: "SKU-1" }, id: "o1", stock: { available: 5 } })],
+    rows: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+    ...over,
+  });
+
+describe("pushAllegroStock", () => {
+  it("pushes the available quantity Medusa reports", async () => {
+    const { allegro, client, container } = healthy();
+
+    const result = await pushAllegroStock(container as never);
+
+    expect(client.submissions).toHaveLength(1);
+    expect(client.submissions[0]).toMatchObject({ offerIds: ["o1"], value: 9 });
+    expect(result).toMatchObject({
+      alreadyInSync: 0,
+      commands: 1,
+      complete: true,
+      eligible: 1,
+      failed: 0,
+      mismatched: 1,
+      pending: 0,
+      synced: 1,
+    });
+    expect(allegro.offers[0]?.stock_synced_at).toBeInstanceOf(Date);
+  });
+
+  it("sums available quantity across a variant's inventory items", async () => {
+    const { client } = await runWith({
+      available: { inv_1: 4, inv_2: 5 },
+      variants: [{ id: "v1", inventoryItemIds: ["inv_1", "inv_2"], sku: "SKU-1" }],
+    });
+    expect(client.submissions[0]?.value).toBe(9);
+  });
+
+  it("writes nothing when the quantities already match", async () => {
+    const { client, result } = await runWith({ available: { inv_1: 5 } });
+    expect(client.submissions).toEqual([]);
+    expect(result).toMatchObject({ alreadyInSync: 1, complete: true, mismatched: 0 });
+  });
+
+  it("pushes a quantity down to zero", async () => {
+    // Zero is a real quantity, not an absence. Refusing it is how a sold-out item
+    // stays purchasable on the marketplace.
+    const { client } = await runWith({ available: { inv_1: 0 } });
+    expect(client.submissions[0]?.value).toBe(0);
+  });
+
+  it("groups offers by target quantity into one command each", async () => {
+    const { client } = await runWith({
+      available: { inv_1: 9, inv_2: 9, inv_3: 4 },
+      live: [
+        offerFixture({ external: { id: "SKU-1" }, id: "o1", stock: { available: 5 } }),
+        offerFixture({ external: { id: "SKU-2" }, id: "o2", stock: { available: 5 } }),
+        offerFixture({ external: { id: "SKU-3" }, id: "o3", stock: { available: 5 } }),
+      ],
+      rows: [
+        { id: "row-1", offer_id: "o1", sku: "SKU-1" },
+        { id: "row-2", offer_id: "o2", sku: "SKU-2" },
+        { id: "row-3", offer_id: "o3", sku: "SKU-3" },
+      ],
+      variants: [
+        { id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" },
+        { id: "v2", inventoryItemIds: ["inv_2"], sku: "SKU-2" },
+        { id: "v3", inventoryItemIds: ["inv_3"], sku: "SKU-3" },
+      ],
+    });
+
+    expect(client.submissions).toHaveLength(2);
+    expect(client.submissions.map((entry) => entry.value).toSorted()).toEqual([4, 9]);
+    expect(client.submissions.find((entry) => entry.value === 9)?.offerIds.toSorted()).toEqual([
+      "o1",
+      "o2",
+    ]);
+  });
+
+  it("refuses the whole plan when a variant quantity is unreadable", async () => {
+    // A partial push leaves some offers fresh and others stale with no record of
+    // which, so the next run cannot tell either.
+    const { client, logs, result } = await runWith({
+      noInventory: true,
+    });
+    expect(client.submissions).toEqual([]);
+    expect(result).toMatchObject({ complete: false, unresolved: 1 });
+    expect(result.error).toContain("the whole plan was refused");
+    expect(logs.some((line) => line.includes("plan refused"))).toBe(true);
+  });
+
+  it("refuses the whole plan on an ambiguous match", async () => {
+    const { client, result } = await runWith({
+      available: { inv_1: 9, inv_2: 9 },
+      variants: [
+        { id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" },
+        { id: "v2", inventoryItemIds: ["inv_2"], sku: "SKU-1" },
+      ],
+    });
+    expect(client.submissions).toEqual([]);
+    expect(result.ambiguous).toBe(1);
+  });
+
+  it("holds a conflicted mapping out of the candidate set", async () => {
+    // The write path binding on discovery's conflict detection: pushing a quantity
+    // to one of two offers contesting a SKU is a real oversell.
+    const { client, result } = await runWith({
+      rows: [{ conflict: "duplicate-sku", id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+    });
+    expect(client.submissions).toEqual([]);
+    // The variant is then reported unlinked rather than eligible, which is accurate:
+    // there is no offer this plugin will write to for it.
+    expect(result).toMatchObject({ eligible: 0, skippedUnlinked: 1 });
+  });
+
+  it("holds an unmapped offer out of the candidate set", async () => {
+    const { client, result } = await runWith({
+      rows: [{ id: "row-1", offer_id: null, sku: "SKU-1" }],
+    });
+    expect(client.submissions).toEqual([]);
+    expect(result.skippedUnlinked).toBe(1);
+  });
+
+  it("counts a non-ACTIVE offer as skipped and refuses to call the run complete", async () => {
+    const { result } = await runWith({
+      live: [
+        offerFixture({
+          external: { id: "SKU-1" },
+          id: "o1",
+          publication: { status: "ENDED" },
+          stock: { available: 5 },
+        }),
+      ],
+    });
+    expect(result).toMatchObject({ complete: false, eligible: 0, skippedInactive: 1 });
+  });
+
+  it("treats a variant that does not manage inventory as unresolved, never as zero", async () => {
+    // Publishing 0 would delist it; publishing anything else would be fabricated.
+    const { client, result } = await runWith({
+      variants: [{ id: "v1", inventoryItemIds: [], manageInventory: false, sku: "SKU-1" }],
+    });
+    expect(client.submissions).toEqual([]);
+    expect(result.unresolved).toBe(1);
+  });
+
+  it("reports a 403 as the write-scope gap and raises the banner", async () => {
+    const { allegro, result } = await runWith({
+      script: { throwOn: { 0: new AllegroApiError({ httpStatus: 403, message: "Forbidden" }) } },
+    });
+    expect(result.error).toContain("WRITE_SCOPE_MISSING");
+    expect(result.failed).toBe(1);
+    expect(allegro.states.get("stock")).toMatchObject({ write_scope_missing: true });
+  });
+
+  it("stops submitting at the first systemic failure and counts the rest as failed", async () => {
+    // Offers whose command was never submitted keep a stale quantity, and nothing
+    // else records that.
+    const { client, result } = await runWith({
+      available: { inv_1: 9, inv_2: 4 },
+      live: [
+        offerFixture({ external: { id: "SKU-1" }, id: "o1", stock: { available: 5 } }),
+        offerFixture({ external: { id: "SKU-2" }, id: "o2", stock: { available: 5 } }),
+      ],
+      rows: [
+        { id: "row-1", offer_id: "o1", sku: "SKU-1" },
+        { id: "row-2", offer_id: "o2", sku: "SKU-2" },
+      ],
+      script: { throwOn: { 1: new AllegroApiError({ httpStatus: 500, message: "Boom" }) } },
+      variants: [
+        { id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" },
+        { id: "v2", inventoryItemIds: ["inv_2"], sku: "SKU-2" },
+      ],
+    });
+
+    expect(client.submissions).toHaveLength(1);
+    expect(result.commands).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(result.complete).toBe(false);
+  });
+
+  it("reports an unconfirmed command as pending, not failed", async () => {
+    // The quantities may well have landed; calling them failures would make the next
+    // run treat a working push as broken.
+    const { allegro, result } = await runWith({ script: { pendingCommands: [0] } });
+    expect(result).toMatchObject({ failed: 0, pending: 1, synced: 0 });
+    expect(result.error).toContain("not confirmed within the poll budget");
+    // Not stamped: nothing was confirmed.
+    expect(allegro.offers[0]?.stock_synced_at).toBeUndefined();
+  });
+
+  it("counts an offer with no SUCCESS task inside a terminal command as failed", async () => {
+    // A command can report itself complete while individual offers in it were
+    // rejected, and counting the command as a success would claim a quantity that
+    // never landed.
+    const { allegro, result } = await runWith({
+      available: { inv_1: 9, inv_2: 9 },
+      live: [
+        offerFixture({ external: { id: "SKU-1" }, id: "o1", stock: { available: 5 } }),
+        offerFixture({ external: { id: "SKU-2" }, id: "o2", stock: { available: 5 } }),
+      ],
+      rows: [
+        { id: "row-1", offer_id: "o1", sku: "SKU-1" },
+        { id: "row-2", offer_id: "o2", sku: "SKU-2" },
+      ],
+      script: { confirmOnly: ["o1"] },
+      variants: [
+        { id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" },
+        { id: "v2", inventoryItemIds: ["inv_2"], sku: "SKU-2" },
+      ],
+    });
+
+    expect(result).toMatchObject({ failed: 1, synced: 1 });
+    // Stamped per confirmed offer: only o1's row moves.
+    expect(allegro.offers.find((row) => row.offer_id === "o1")?.stock_synced_at).toBeInstanceOf(
+      Date,
+    );
+    expect(allegro.offers.find((row) => row.offer_id === "o2")?.stock_synced_at).toBeUndefined();
+  });
+
+  it("writes nothing and records the reason when the kill switch is on", async () => {
+    const { allegro, client, result } = await runWith({ stockSyncDisabled: true });
+    expect(client.submissions).toEqual([]);
+    expect(result.skipped).toContain("stock sync is disabled");
+    expect(allegro.states.get("stock")).toMatchObject({ status: "idle" });
+    expect(allegro.claims).toEqual([]);
+  });
+
+  it("records its counters on the state row", async () => {
+    const { allegro } = await runWith({});
+    const state = allegro.states.get("stock");
+    expect(state).toMatchObject({ last_error: null, status: "ok" });
+    expect(state?.counts).toMatchObject({ eligible: 1, synced: 1 });
+  });
+
+  it("takes only the stock claim", async () => {
+    const { allegro } = await runWith({});
+    expect(allegro.claims).toEqual(["stock"]);
+  });
+
+  it("reads quantities at the configured locations only", async () => {
+    const inventoryCalls: string[][] = [];
+    const client = fakeClient({
+      offers: [offerFixture({ external: { id: "SKU-1" }, id: "o1", stock: { available: 5 } })],
+    });
+    const allegro = fakeAllegroService({
+      client,
+      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      syncOptions: { stockLocationIds: ["sloc_warehouse"] },
+    });
+    const container = fakeContainer({
+      allegro,
+      inventory: {
+        retrieveAvailableQuantity: (_itemId: string, locationIds: string[]) => {
+          inventoryCalls.push(locationIds);
+          return Promise.resolve(9);
+        },
+      },
+      variants: [{ id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" }],
+    });
+
+    await pushAllegroStock(container as never);
+
+    expect(inventoryCalls).toEqual([["sloc_warehouse"]]);
+  });
+
+  it("materialises every location when none is configured", async () => {
+    // `retrieveAvailableQuantity` needs an explicit list, and an empty one reads as
+    // "nowhere" - which would report the whole catalogue out of stock.
+    const inventoryCalls: string[][] = [];
+    const client = fakeClient({
+      offers: [offerFixture({ external: { id: "SKU-1" }, id: "o1", stock: { available: 5 } })],
+    });
+    const allegro = fakeAllegroService({
+      client,
+      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+    });
+    const container = fakeContainer({
+      allegro,
+      inventory: {
+        retrieveAvailableQuantity: (_itemId: string, locationIds: string[]) => {
+          inventoryCalls.push(locationIds);
+          return Promise.resolve(9);
+        },
+      },
+      stockLocationIds: ["sloc_a", "sloc_b"],
+      variants: [{ id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" }],
+    });
+
+    await pushAllegroStock(container as never);
+
+    expect(inventoryCalls).toEqual([["sloc_a", "sloc_b"]]);
+  });
+});
+
+const runWith = async (input: Parameters<typeof setup>[0]) => {
+  const context = healthy(input);
+  const result = await pushAllegroStock(context.container as never);
+  return { ...context, result };
+};

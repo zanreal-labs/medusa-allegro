@@ -195,6 +195,11 @@ export const listEligibleVariants = async (
  *   be fabricated.
  * - **A read that threw** is a transient fault, and a transient fault must not
  *   look like a stock level.
+ * - **No inventory module at all** is the same answer for every variant. Medusa
+ *   always registers one, so this is a defensive branch rather than an expected
+ *   state - but degrading to "unresolved" keeps the failure mode consistent with
+ *   everything else here, and the planner then refuses the whole plan instead of
+ *   the loop crashing.
  */
 export const readAvailableQuantities = async (
   container: MedusaContainer,
@@ -206,7 +211,19 @@ export const readAvailableQuantities = async (
     return quantities;
   }
 
-  const inventory = container.resolve<IInventoryService>(Modules.INVENTORY);
+  let inventory: IInventoryService | undefined;
+  try {
+    inventory = container.resolve<IInventoryService>(Modules.INVENTORY);
+  } catch {
+    inventory = undefined;
+  }
+  if (!inventory) {
+    for (const variant of variants) {
+      quantities.set(variant.sku, undefined);
+    }
+    return quantities;
+  }
+
   const locationIds = await resolveStockLocationIds(container, stockLocationIds);
 
   for (const variant of variants) {

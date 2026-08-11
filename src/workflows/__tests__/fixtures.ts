@@ -159,10 +159,19 @@ export const fakeAllegroService = (seed: {
           ? categories.filter((row) => filters.category_id?.includes(row.category_id))
           : categories,
       ),
-    listAllegroOffers: (filters: { sku?: string } = {}, config: { take?: number } = {}) => {
+    listAllegroOffers: (
+      filters: { sku?: string; offer_id?: string[] } = {},
+      config: { take?: number } = {},
+    ) => {
       let rows = offers.map((row) => ({ ...row }));
       if (filters.sku) {
         rows = rows.filter((row) => row.sku === filters.sku);
+      }
+      // Honoured, not ignored: the stock loop stamps `stock_synced_at` on exactly
+      // the offers Allegro confirmed, and a fake that returned everything would let
+      // a per-offer stamping bug pass.
+      if (filters.offer_id) {
+        rows = rows.filter((row) => row.offer_id && filters.offer_id?.includes(row.offer_id));
       }
       return Promise.resolve(config.take === undefined ? rows : rows.slice(0, config.take));
     },
