@@ -1,6 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { DEFAULT_REDIRECT_PATH, DEFAULT_SCOPES, isPriceSyncDisabledByEnv, resolveAllegroOptions } from '../options';
-import type { AllegroPluginOptions } from '../options';
+import {
+  DEFAULT_REDIRECT_PATH,
+  DEFAULT_SCOPES,
+  isPriceSyncDisabledByEnv,
+  resolveAllegroOptions,
+} from "../options";
+import type { AllegroPluginOptions } from "../options";
 
 const validOptions = (): AllegroPluginOptions => ({
   appName: "MedusaAllegro",
@@ -67,7 +72,13 @@ describe("resolveAllegroOptions", () => {
         ...validOptions(),
         encryptionKey: randomBytes(8).toString("base64"),
       }),
-    ).toThrow(/exactly 32 bytes/);
+    ).toThrow(/base64-encoded 32-byte value/);
+  });
+
+  it("rejects an all-zero encryption key at boot", () => {
+    expect(() =>
+      resolveAllegroOptions({ ...validOptions(), encryptionKey: "A".repeat(43) }),
+    ).toThrow(/zero bytes/);
   });
 
   it("rejects app identity that Allegro's User-Agent rule would reject", () => {
@@ -88,10 +99,37 @@ describe("resolveAllegroOptions", () => {
     ).toThrow(/must start with/);
   });
 
+  it("rejects a protocol-relative redirectPath, which would move the redirect_uri off-origin", () => {
+    expect(() => resolveAllegroOptions({ ...validOptions(), redirectPath: "//host/x" })).toThrow(
+      /protocol-relative/,
+    );
+  });
+
   it("rejects a relative backendUrl", () => {
     expect(() => resolveAllegroOptions({ ...validOptions(), backendUrl: "/backend" })).toThrow(
       /absolute URL/,
     );
+  });
+
+  it("rejects a non-boolean priceSyncDisabled instead of failing open", () => {
+    expect(() =>
+      resolveAllegroOptions({
+        ...validOptions(),
+        priceSyncDisabled: "true" as never,
+      }),
+    ).toThrow(/must be a boolean/);
+    expect(() =>
+      resolveAllegroOptions({
+        ...validOptions(),
+        priceSyncDisabled: "true" as never,
+      }),
+    ).toThrow(/ALLEGRO_PRICE_SYNC_DISABLED/);
+  });
+
+  it("still accepts an explicit false for priceSyncDisabled", () => {
+    expect(
+      resolveAllegroOptions({ ...validOptions(), priceSyncDisabled: false }).priceSyncDisabled,
+    ).toBe(false);
   });
 
   it("falls back to the default scopes when an empty string is given", () => {

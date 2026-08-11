@@ -109,7 +109,7 @@ const requireString = (value: unknown, field: keyof AllegroPluginOptions): strin
  * an opaque 400/401 from Allegro.
  */
 export const resolveAllegroOptions = (
-  options?: Partial<AllegroPluginOptions>
+  options?: Partial<AllegroPluginOptions>,
 ): ResolvedAllegroOptions => {
   if (!options) {
     throw new Error(
@@ -139,10 +139,29 @@ export const resolveAllegroOptions = (
   // resolution turns "Allegro rejects our User-Agent" into a startup error.
   buildAllegroUserAgent({ appName, appVersion, docsUrl }, "medusa-allegro plugin options");
 
+  // A boolean-looking string is the mistake this catches: `priceSyncDisabled:
+  // process.env.SOMETHING` yields "true", which a truthiness test would honour
+  // but a `=== true` test silently ignores - the kill-switch would read as
+  // enabled while the operator believed it was off. Fail loudly instead.
+  if (options.priceSyncDisabled !== undefined && typeof options.priceSyncDisabled !== "boolean") {
+    throw new Error(
+      `medusa-allegro: plugin option \`priceSyncDisabled\` must be a boolean (got ${typeof options.priceSyncDisabled} "${String(options.priceSyncDisabled)}"). To drive it from the environment, set ${PRICE_SYNC_DISABLED_ENV}=1 instead of passing a string here.`,
+    );
+  }
+
   const redirectPath = (options.redirectPath ?? DEFAULT_REDIRECT_PATH).trim();
   if (!redirectPath.startsWith("/")) {
     throw new Error(
       `medusa-allegro: plugin option \`redirectPath\` must start with "/" (got "${redirectPath}").`,
+    );
+  }
+  // "//host/cb" starts with "/" but is a protocol-relative URL: `new
+  // URL("//evil.example/cb", "https://shop.example")` resolves to
+  // https://evil.example/cb, so this would silently move the OAuth redirect_uri
+  // to another origin.
+  if (redirectPath.startsWith("//")) {
+    throw new Error(
+      `medusa-allegro: plugin option \`redirectPath\` must be a path on this backend, not a protocol-relative URL (got "${redirectPath}").`,
     );
   }
 
