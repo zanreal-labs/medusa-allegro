@@ -49,6 +49,7 @@
   },
   "devDependencies": {
     "@medusajs/admin-sdk": "2.18.0",
+    "@medusajs/admin-shared": "2.18.0",
     "@medusajs/cli": "2.18.0",
     "@medusajs/eslint-plugin": "2.18.0",
     "@medusajs/framework": "2.18.0",
@@ -76,6 +77,7 @@
   },
   "peerDependencies": {
     "@medusajs/admin-sdk": "2.18.0",
+    "@medusajs/admin-shared": "2.18.0",
     "@medusajs/cli": "2.18.0",
     "@medusajs/framework": "2.18.0",
     "@medusajs/icons": "2.18.0",
