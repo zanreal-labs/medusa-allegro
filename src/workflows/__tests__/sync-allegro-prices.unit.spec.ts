@@ -403,6 +403,19 @@ describe("syncAllegroPrices: skip reasons", () => {
     expect(summary.skippedCounts["missing-srp"]).toBe(1);
   });
 
+  it("warns when a write loop is armed over an unscoped catalogue", async () => {
+    // An unset sales channel makes EVERY variant with a SKU eligible, and no
+    // per-offer counter can express that: the run reports a clean success and the
+    // only symptom is on Allegro. So it has to be said out loud.
+    const { logs } = await runWith({});
+    expect(logs.some((line) => line.includes("no sales channel is configured"))).toBe(true);
+  });
+
+  it("does not warn about scope when a sales channel is configured", async () => {
+    const { logs } = await runWith({ syncOptions: { salesChannelId: "sc_allegro" } });
+    expect(logs.some((line) => line.includes("no sales channel is configured"))).toBe(false);
+  });
+
   it("reads the SRP from a price list when one is configured", async () => {
     const allegro = fakeAllegroService({
       categories: CAT_RATES,

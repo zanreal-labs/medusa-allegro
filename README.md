@@ -664,6 +664,28 @@ responding to an incident, and a stale `false` in config must not undo that. A
 disabled loop RECORDS that it was disabled on its state row, so "disabled" stays
 distinguishable from "broken" - both look like "nothing happened" from outside.
 
+**The env var can only ever disable, never enable.** The resolution is
+`option === true || envIsTruthy`, so `ALLEGRO_PRICE_SYNC_DISABLED=0` does not re-arm
+a loop whose option is `true`. What re-arming takes therefore depends on how your
+config was written, and it is worth settling before you need it under pressure:
+
+```ts
+// Pattern A - option pinned. Re-arming means editing config and redeploying.
+priceSyncDisabled: true,
+
+// Pattern B - option derived from the same variable. Re-arming is one env change,
+// and the incident switch still wins, because =1 also yields option true:
+//   unset -> true (disabled)    =1 -> true (disabled)    =0 -> false (armed)
+priceSyncDisabled: process.env.ALLEGRO_PRICE_SYNC_DISABLED !== "0",
+```
+
+Pattern B is the better default for a staged cutover: one variable is both the
+pre-cutover hold and the arming switch, so no config edit stands between an operator
+and a working sync. Pattern A is right when you want arming to require a code review.
+Pattern B must compare against `"0"` explicitly rather than coercing -
+`Boolean(process.env.X)` is `true` for the string `"0"`, which would pin it disabled
+forever.
+
 Note that `ordersSyncDisabled` does not stop the fulfillment write-back subscriber.
 To stop every write to Allegro, disconnect the account.
 

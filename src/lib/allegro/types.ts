@@ -694,6 +694,23 @@ export interface OfferQuantityTask {
   status?: "NEW" | "SUCCESS" | "FAIL";
 }
 
+/**
+ * Response of `GET /sale/offer-quantity-change-commands/{commandId}/tasks`.
+ *
+ * PAGINATED, and that is load-bearing. A command naming 1,000 offers can emit more
+ * than 1,000 tasks - the `field` discriminator on a task exists precisely because
+ * Allegro reports tasks for fields other than `quantity` - so one page is not the
+ * whole report. Reading a single page and classifying every unseen offer as failed
+ * reports a healthy push as broken on every subsequent run, so the caller pages to
+ * exhaustion (`readAllQuantityTasks`).
+ *
+ * `count` / `totalCount` are optional because the plugin must not depend on Allegro
+ * populating them; a short page is the fallback signal that the report is complete.
+ */
 export interface OfferQuantityTaskReport {
   tasks?: OfferQuantityTask[];
+  /** Tasks in this page. */
+  count?: number;
+  /** Tasks across every page of this command. */
+  totalCount?: number;
 }

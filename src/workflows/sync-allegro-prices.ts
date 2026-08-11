@@ -50,6 +50,7 @@ import {
   warnOnMissingSrpSource,
 } from "./lib/pricing";
 import { runUnderSyncClaim } from "./lib/run";
+import { warnOnUnscopedCatalogue } from "./lib/scope-warnings";
 
 /**
  * The armed price-sync loop.
@@ -370,7 +371,7 @@ const planOffer = async (
 ): Promise<{ plan: OfferPlan } | { skip: SyncSkipReason } | { noop: true }> => {
   // The promoted flag selects BOTH the expected rule and the commission rate, so it
   // is resolved before anything else that depends on it.
-  const {promoted} = row;
+  const { promoted } = row;
   const commission = resolveCommissionFraction(
     inputs.categoryRates,
     row.category_id,
@@ -459,6 +460,7 @@ const resolvePlanningInputs = async (
   }
 
   warnOnMissingSrpSource(logger, options);
+  warnOnUnscopedCatalogue(logger, options, "prices");
   const variants = await listEligibleVariants(container, options);
   const [rateRows, srpBySku, lastBounds, breakEvenFor] = await Promise.all([
     allegro.listAllegroCategoryRates({}) as Promise<Record<string, unknown>[]>,

@@ -22,6 +22,7 @@ import type {
   OfferFeePreviewResponse,
   OfferPriceAutomationCommandReport,
   OfferPriceAutomationState,
+  OfferPriceAutomationTaskCount,
   OfferPriceAutomationTaskReport,
   OfferQuantityCommandReport,
   OfferQuantityTaskReport,
@@ -384,8 +385,24 @@ export class AllegroClient {
    * A command report is terminal when Allegro stamps `completedAt`, or when the
    * task tally shows every scheduled offer accounted for (a defensive fallback
    * in case `completedAt` lags the counts).
+   *
+   * PUBLIC on purpose, and it is the ONLY terminality test in the plugin. Both
+   * command loops poll to a budget and then have to decide whether the last report
+   * they hold is a verdict or a timeout, and re-deriving that decision at the call
+   * site is how a weaker test creeps in: `taskCount.total > 0` alone is true of a
+   * command that has scheduled one task and finished none, so an in-progress
+   * command would be read as a confirmed success. That mattered most for price
+   * sync, where a "success" stamps `price_synced_at` and writes the only bounds
+   * memory this plugin has - poisoning it means the offer is never re-pushed.
+   *
+   * Structurally typed rather than taking one of the two report interfaces, because
+   * the price-automation and quantity reports carry the same two fields and both
+   * need the same answer.
    */
-  private static isCommandTerminal(report: OfferPriceAutomationCommandReport): boolean {
+  static isCommandTerminal(report: {
+    completedAt?: string | null;
+    taskCount?: OfferPriceAutomationTaskCount;
+  }): boolean {
     if (report.completedAt) {
       return true;
     }

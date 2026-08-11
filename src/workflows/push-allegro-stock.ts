@@ -24,6 +24,7 @@ import { listEligibleVariants, readAvailableQuantities } from "./lib/catalog";
 import { listAllOffers } from "./lib/offers";
 import type { OfferListing } from "./lib/offers";
 import { runUnderSyncClaim } from "./lib/run";
+import { warnOnUnscopedCatalogue } from "./lib/scope-warnings";
 
 /**
  * The quantity push: make Allegro's available quantity match Medusa's.
@@ -290,6 +291,7 @@ export const pushAllegroStock = async (
     ALLEGRO_SYNC_PROVIDERS.STOCK,
     async ({ allegro, client, logger }) => {
       const options = await allegro.getSyncOptions();
+      warnOnUnscopedCatalogue(logger, options, "stock");
       const variants = await listEligibleVariants(container, options);
       const quantities = await readAvailableQuantities(
         container,
