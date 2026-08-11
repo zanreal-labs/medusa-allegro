@@ -77,7 +77,7 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.ORDERS,
-    async ({ allegro, client, logger, state }) => {
+    async ({ allegro, client, heartbeat, logger, state }) => {
       const options = await allegro.getSyncOptions();
       const priorFailures = readFailureState(state.failures);
       let created = 0;
@@ -97,6 +97,10 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
             }
             return applied.statusChanged;
           },
+          // Per form: a drain can refresh up to 100 forms sequentially, each a
+          // `getCheckoutForm` plus a multi-step order write, which comfortably exceeds the
+          // staleness window on a slow Allegro.
+          heartbeat,
           latestEventId: async () => (await client.getOrderEventStats()).latestEvent?.id,
           listEvents: async (from, limit) =>
             (await client.listOrderEvents({ from, limit })).events ?? [],

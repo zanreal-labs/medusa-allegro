@@ -137,6 +137,8 @@ const setup = (input: {
   syncOptions?: Record<string, unknown>;
   priceSyncDisabled?: boolean;
   noCosts?: boolean;
+  /** Simulates the claim being taken over mid-run: every heartbeat reports it lost. */
+  claimLost?: boolean;
 }) => {
   const client = fakeClient({
     offers: input.live,
@@ -146,6 +148,7 @@ const setup = (input: {
   });
   const allegro = fakeAllegroService({
     categories: input.categories ?? CAT_RATES,
+    claimLost: input.claimLost,
     client,
     offers: input.rows ?? [],
     priceSyncDisabled: input.priceSyncDisabled,
@@ -174,6 +177,50 @@ const healthy = (over: Partial<Parameters<typeof setup>[0]> = {}) =>
     rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     ...over,
   });
+
+describe("syncAllegroPrices: the claim is re-asserted between commands", () => {
+  it("abandons the remaining commands when the claim is taken over mid-run", async () => {
+    // A full-catalogue push is minutes of sequential commands, each with its own 15s poll,
+    // so the claim was routinely taken over mid-flight - and the run carried on pushing
+    // prices concurrently with the run that had replaced it. Two writers issuing
+    // price-automation commands for the same offers is exactly what single-flight prevents.
+    const { allegro, client, container } = setup({
+      claimLost: true,
+      costs: { "SKU-1": 100, "SKU-2": 100 },
+      live: [offerFixture({ id: "o1" }), offerFixture({ id: "o2" })],
+      rows: [
+        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+        { category_id: "cat-1", id: "row-2", offer_id: "o2", promoted: false, sku: "SKU-2" },
+      ],
+      variants: [
+        { id: "v1", metadata: { srp: 500 }, sku: "SKU-1" },
+        { id: "v2", metadata: { srp: 500 }, sku: "SKU-2" },
+      ],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    // Not a single command: the heartbeat is checked BEFORE each one.
+    expect(client.commands).toEqual([]);
+    expect(summary.synced).toBe(0);
+    // Read as systemic, so nothing is quarantined over it - the offers are fine, the run
+    // is not.
+    expect(summary.systemic).toBe(true);
+    expect(summary.error).toContain("claim was taken over");
+    // And the outcome is NOT written over the successor's state row.
+    expect(allegro.states.get("prices")?.status).not.toBe("error");
+  });
+
+  it("heartbeats under its own claim token while it still holds it", async () => {
+    const { allegro, client, container } = healthy();
+
+    await syncAllegroPrices(container as never);
+
+    expect(client.commands).toHaveLength(1);
+    expect(allegro.heartbeats.map((beat) => beat.provider)).toEqual(["prices"]);
+    expect(allegro.heartbeats[0]?.token).toEqual(expect.any(String));
+  });
+});
 
 describe("syncAllegroPrices: command terminality", () => {
   it("treats an in-progress command at the poll budget as PENDING, not a success", async () => {

@@ -573,7 +573,7 @@ export const syncAllegroPrices = async (
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.PRICES,
-    async ({ allegro, client, logger, state }) => {
+    async ({ allegro, client, heartbeat, logger, state }) => {
       const options = await allegro.getSyncOptions();
       const priorFailures = readFailureState(state.failures);
       const priorScopeMissing = state.write_scope_missing;
@@ -667,6 +667,16 @@ export const syncAllegroPrices = async (
       let scopeObserved: "present" | "missing" | "unknown" = "unknown";
 
       for (const plan of batch) {
+        // Before each command, not just at the start of the run. A full-catalogue push is
+        // minutes of sequential commands, each with its own 15s poll, so the claim has to
+        // be re-asserted as the run proceeds - and if it has been taken over, stopping HERE
+        // is what prevents two runs issuing price commands for the same offers at once.
+        if (!(await heartbeat())) {
+          systemic = true;
+          systemicError =
+            "the sync claim was taken over mid-run, so the remaining commands were abandoned to avoid pushing concurrently with the run that replaced this one";
+          break;
+        }
         // Sequential on purpose: it keeps Allegro and database load flat, and the
         // circuit breaker has to stop on the FIRST systemic signal rather than
         // discovering it after a fan-out has already fired every command.

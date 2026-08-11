@@ -45,14 +45,32 @@ export type AllegroSyncProvider =
   (typeof ALLEGRO_SYNC_PROVIDERS)[keyof typeof ALLEGRO_SYNC_PROVIDERS];
 
 /**
- * A `running` claim older than this is treated as crashed and taken over.
+ * A `running` claim whose last heartbeat is older than this is treated as crashed
+ * and taken over.
  *
- * Long enough that a live run is never usurped - a full-catalogue price sync
- * polling a hundred commands is the slow case - and short enough that a process
- * killed mid-run only blocks its loop for a few ticks. Without a staleness window
- * one crash wedges the loop until somebody edits the row by hand.
+ * Short enough that a process killed mid-run only blocks its loop for a few ticks;
+ * without a staleness window one crash wedges the loop until somebody edits the row
+ * by hand.
+ *
+ * It is safe to keep it this short ONLY because a live run now heartbeats (see
+ * `touchSyncClaim`). Before that, the window was measured from the moment the claim
+ * was taken, so anything slower than six minutes was taken over MID-FLIGHT and two
+ * runs pushed to Allegro at once - and the slow cases are routine, not exotic: the
+ * orders drain refreshes up to 100 forms sequentially, the stock loop polls each
+ * command for up to 120 seconds, and a manual full-catalogue price run is minutes of
+ * sequential commands.
  */
 export const STALE_CLAIM_MS = 6 * 60_000;
+
+/**
+ * How often a long run re-asserts its claim.
+ *
+ * Comfortably inside `STALE_CLAIM_MS` so a run is never taken over while it is making
+ * progress, and far enough apart that a per-item heartbeat is one cheap update every
+ * minute rather than one per item. Callers may call the heartbeat as often as they
+ * like; it throttles itself to this interval.
+ */
+export const SYNC_HEARTBEAT_INTERVAL_MS = 60_000;
 
 /**
  * The single message every entry point returns when a claim is held.
@@ -77,6 +95,10 @@ export interface AllegroSyncStateRow {
   last_synced_at: Date | null;
   write_scope_missing: boolean;
   updated_at: Date;
+  /** Fencing token of the run holding the claim, when one does. */
+  claim_token?: string | null;
+  /** When the claim holder last proved it was alive. */
+  claim_heartbeat_at?: Date | null;
 }
 
 /**
@@ -115,6 +137,8 @@ export interface AllegroSyncStatePatch {
   last_error?: string | null;
   last_synced_at?: Date | null;
   write_scope_missing?: boolean;
+  claim_token?: string | null;
+  claim_heartbeat_at?: Date | null;
 }
 
 /** Shape of a stored connection as the admin surfaces it. */
@@ -329,25 +353,34 @@ class AllegroModuleService extends MedusaService({
    * what makes it atomic at the database, and the verification is on affected rows
    * rather than on trusting the filter.
    */
-  async claimSyncRun(
-    provider: AllegroSyncProvider,
-  ): Promise<{ acquired: boolean; state?: AllegroSyncStateRow; reason?: string }> {
+  async claimSyncRun(provider: AllegroSyncProvider): Promise<{
+    acquired: boolean;
+    state?: AllegroSyncStateRow;
+    reason?: string;
+    /** Fencing token to pass to every later write. Present only when acquired. */
+    token?: string;
+  }> {
     const state = await this.ensureSyncState(provider);
 
-    const updatedAt = new Date(state.updated_at).getTime();
+    // Staleness is measured from the last HEARTBEAT, falling back to `updated_at` for a
+    // row written before the column existed. Measuring from `updated_at` alone was the
+    // bug: it is bumped when the claim is taken and then not again until the run ends, so
+    // any run slower than the window was taken over mid-flight.
+    const lastAlive = new Date(state.claim_heartbeat_at ?? state.updated_at).getTime();
     const isRunning = state.status === "running";
-    const isStale = !Number.isFinite(updatedAt) || Date.now() - updatedAt > STALE_CLAIM_MS;
+    const isStale = !Number.isFinite(lastAlive) || Date.now() - lastAlive > STALE_CLAIM_MS;
     if (isRunning && !isStale) {
       return { acquired: false, reason: SYNC_CLAIM_HELD, state };
     }
     if (isRunning && isStale) {
       this.logger_?.warn(
-        `[medusa-allegro] taking over a stale "${provider}" sync claim last touched at ${new Date(state.updated_at).toISOString()}; the previous run appears to have crashed.`,
+        `[medusa-allegro] taking over a stale "${provider}" sync claim last alive at ${new Date(lastAlive).toISOString()}; the previous run appears to have crashed.`,
       );
     }
 
+    const token = crypto.randomUUID();
     const claimed = await this.updateAllegroSyncStates({
-      data: { status: "running" },
+      data: { claim_heartbeat_at: new Date(), claim_token: token, status: "running" },
       selector: { provider, updated_at: state.updated_at },
     });
     if ((claimed as unknown[]).length === 0) {
@@ -356,24 +389,90 @@ class AllegroModuleService extends MedusaService({
     // The PRE-claim row is returned on purpose: the cursor and failure state a run
     // needs are the ones from before it took the claim, and reading them again
     // afterwards is a second round trip for the same values.
-    return { acquired: true, state };
+    return { acquired: true, state, token };
   }
 
   /**
-   * Persist a run's outcome, releasing the claim.
+   * Re-assert an existing claim, proving the run is still alive.
+   *
+   * Returns false when the claim has been LOST - taken over as stale, or released by
+   * something else - and a false answer means the caller must stop writing immediately.
+   * It no longer owns the provider, so anything further it wrote would be trampling the
+   * run that replaced it, and any Allegro command it issued would be concurrent with that
+   * run's commands.
+   *
+   * The write has to change a value, which is why `claim_heartbeat_at` exists: an update
+   * whose fields all already match may not flush, and then the ORM's `onUpdate` would not
+   * bump `updated_at` either, so the heartbeat would be a silent no-op reported as
+   * success.
+   */
+  async touchSyncClaim(provider: AllegroSyncProvider, token: string): Promise<boolean> {
+    const touched = await this.updateAllegroSyncStates({
+      data: { claim_heartbeat_at: new Date() },
+      selector: { claim_token: token, provider },
+    });
+    return (touched as unknown[]).length > 0;
+  }
+
+  /**
+   * Persist a run's outcome.
+   *
+   * `token` is the fencing token from `claimSyncRun`. With it, the write only lands while
+   * this run still holds the claim, and the return value says whether it did. Without it
+   * the write is unconditional, which is only appropriate for a caller that is not
+   * operating under a claim at all.
    *
    * `failures: null` clears the column, which is what an empty failure state must
    * write - a `{}`-shaped json blob reads as "some bookkeeping exists" in every
    * later query and in the admin.
    */
-  async writeSyncState(provider: AllegroSyncProvider, patch: AllegroSyncStatePatch): Promise<void> {
+  async writeSyncState(
+    provider: AllegroSyncProvider,
+    patch: AllegroSyncStatePatch,
+    opts: { token?: string } = {},
+  ): Promise<boolean> {
     await this.ensureSyncState(provider);
     // Spread into a fresh literal: the generated CRUD signature wants an
     // index-signature shape, and `FailureState` is a closed interface on purpose -
     // an index signature on it would let a typo through at every call site that
     // builds one.
     const data: Record<string, unknown> = { ...patch };
+    const written = await this.updateAllegroSyncStates({
+      data,
+      selector: opts.token === undefined ? { provider } : { claim_token: opts.token, provider },
+    });
+    return (written as unknown[]).length > 0;
+  }
+
+  /**
+   * Write state from a caller that does NOT hold the claim, without disturbing a live run.
+   *
+   * For the pre-claim early exits: a kill switch or a missing connection has to be recorded
+   * ("disabled" and "broken" both look like "nothing happened" from outside), but the row
+   * may belong to a run that is currently in flight. Writing unconditionally was a real
+   * hazard rather than a cosmetic one: `status: "idle"` on a row held by a live run makes
+   * the NEXT tick's claim succeed, so two runs execute concurrently - which is precisely
+   * what the claim exists to prevent.
+   *
+   * So a live, non-stale `running` row is left completely alone and the caller is told the
+   * write was skipped. The check is a read-then-write rather than one atomic statement, and
+   * that is acceptable here in a way it would not be for the claim itself: the worst
+   * outcome of losing this race is a status field briefly disagreeing, whereas the claim
+   * being wrong means two concurrent writers on a live marketplace.
+   */
+  async writeSyncStateIfUnclaimed(
+    provider: AllegroSyncProvider,
+    patch: AllegroSyncStatePatch,
+  ): Promise<boolean> {
+    const state = await this.ensureSyncState(provider);
+    const lastAlive = new Date(state.claim_heartbeat_at ?? state.updated_at).getTime();
+    const isStale = !Number.isFinite(lastAlive) || Date.now() - lastAlive > STALE_CLAIM_MS;
+    if (state.status === "running" && !isStale) {
+      return false;
+    }
+    const data: Record<string, unknown> = { ...patch };
     await this.updateAllegroSyncStates({ data, selector: { provider } });
+    return true;
   }
 
   /**
@@ -382,12 +481,25 @@ class AllegroModuleService extends MedusaService({
    * For the caller that could not even start - a kill switch, a missing
    * connection - where leaving the row `running` would make the next tick take it
    * over as stale instead of simply skipping again.
+   *
+   * Takes the fencing token, so a run that has already lost its claim cannot release
+   * somebody else's.
    */
-  async releaseSyncRun(provider: AllegroSyncProvider, lastError?: string | null): Promise<void> {
-    await this.writeSyncState(provider, {
-      ...(lastError === undefined ? {} : { last_error: lastError }),
-      status: lastError ? "error" : "idle",
-    });
+  async releaseSyncRun(
+    provider: AllegroSyncProvider,
+    opts: { token?: string; lastError?: string | null } = {},
+  ): Promise<boolean> {
+    return await this.writeSyncState(
+      provider,
+      {
+        ...(opts.lastError === undefined ? {} : { last_error: opts.lastError }),
+        // Cleared together with the status: a released row holds no claim, and leaving a
+        // stale token behind would let a dead run's heartbeat resurrect it.
+        claim_token: null,
+        status: opts.lastError ? "error" : "idle",
+      },
+      { token: opts.token },
+    );
   }
 
   /** An unauthenticated OAuth helper for the connect/callback/revoke flow. */

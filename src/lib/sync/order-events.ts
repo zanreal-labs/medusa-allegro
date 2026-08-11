@@ -125,6 +125,18 @@ export interface OrderEventDrainDeps {
   applyForm: (formId: string) => Promise<boolean>;
   /** Optional structured logging hook. */
   log?: (level: "warn" | "error", message: string) => void;
+  /**
+   * Re-assert the caller's single-flight claim, returning false once it has been lost.
+   *
+   * Called before each form. A drain refreshes up to `MAX_EVENT_REFRESHES` forms
+   * sequentially, each a `getCheckoutForm` plus a multi-step order write, which on a slow
+   * Allegro comfortably exceeds the claim's staleness window - so without it the run is
+   * taken over mid-drain and two passes interleave writes on the same order.
+   *
+   * A false answer stops the drain where it stands. The forms it never attempted are
+   * treated exactly like deferred ones: they hold the cursor, so they replay next tick.
+   */
+  heartbeat?: () => Promise<boolean>;
 }
 
 export interface OrderEventDrainResult {
@@ -305,12 +317,28 @@ const applyEventRefreshes = async (
   statusChanged: number;
   failed: Map<string, string>;
   succeeded: Set<string>;
+  /** Forms never attempted because the claim was lost part-way through. */
+  abandoned: Set<string>;
 }> => {
   const failed = new Map<string, string>();
   const succeeded = new Set<string>();
+  const abandoned = new Set<string>();
   let refreshed = 0;
   let statusChanged = 0;
-  for (const formId of formIds) {
+  for (const [index, formId] of formIds.entries()) {
+    // The claim is re-asserted before each form, not once for the whole drain. If it has
+    // been taken over, stopping HERE is what keeps this pass from interleaving order writes
+    // with the pass that replaced it.
+    if (deps.heartbeat && !(await deps.heartbeat())) {
+      for (const remaining of formIds.slice(index)) {
+        abandoned.add(remaining);
+      }
+      deps.log?.(
+        "error",
+        `sync claim lost after ${refreshed} refresh(es); abandoning ${abandoned.size} form(s) without attempting them. They hold the event cursor and replay on the next tick.`,
+      );
+      break;
+    }
     // Sequential on purpose: it keeps Allegro and database load flat, and the cap
     // is what bounds the run.
     try {
@@ -325,7 +353,7 @@ const applyEventRefreshes = async (
       deps.log?.("error", `event-driven refresh failed for checkout form ${formId}: ${message}`);
     }
   }
-  return { failed, refreshed, statusChanged, succeeded };
+  return { abandoned, failed, refreshed, statusChanged, succeeded };
 };
 
 /**
@@ -376,10 +404,18 @@ export const drainOrderEvents = async (
     );
   }
 
-  const { failed, refreshed, statusChanged, succeeded } = await applyEventRefreshes(
+  const { abandoned, failed, refreshed, statusChanged, succeeded } = await applyEventRefreshes(
     scheduled,
     deps,
   );
+  if (abandoned.size > 0) {
+    // Same treatment as a deferred form: never attempted, so it must block the cursor and
+    // replay rather than being counted as a failure against its own quarantine streak.
+    truncated = true;
+    for (const formId of abandoned) {
+      deferred.add(formId);
+    }
+  }
 
   const systemic = isSystemicFailure({ failed, succeeded });
   const { failures, quarantined } = updateFailureState(previousFailures, {

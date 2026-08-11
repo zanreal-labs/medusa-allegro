@@ -209,6 +209,7 @@ const discoverCategories = async (
   allegro: AllegroModuleService,
   client: { getCategory: (id: string) => Promise<{ name: string }> },
   categoryIds: readonly string[],
+  heartbeat: () => Promise<boolean>,
 ): Promise<{ created: number; error?: string }> => {
   if (categoryIds.length === 0) {
     return { created: 0 };
@@ -223,6 +224,9 @@ const discoverCategories = async (
   const rows: { category_id: string; name: string }[] = [];
   let firstError: string | undefined;
   for (const id of missing) {
+    // A first sweep of a large catalogue resolves one category name per request,
+    // sequentially, which is easily minutes of wall clock.
+    await heartbeat();
     // Sequential: a name is cosmetic, and a fan-out of category reads is the
     // cheapest way to earn a 429 on a run that is otherwise well within limits.
     try {
@@ -269,7 +273,7 @@ export const runOfferDiscovery = async (
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.OFFERS,
-    async ({ allegro, client, logger }) => {
+    async ({ allegro, client, heartbeat, logger }) => {
       const [listing, sweep, variants, stored] = await Promise.all([
         listAllOffers(client),
         sweepPromotedOffers(client),
@@ -295,7 +299,7 @@ export const runOfferDiscovery = async (
       const offersById = new Map(listing.offers.map((offer) => [offer.id, offer]));
       const existingBySku = new Map(stored.map((row) => [row.sku, row]));
       const applied = await applyPlan(allegro, plan, sweep, offersById, existingBySku);
-      const categories = await discoverCategories(allegro, client, plan.categoryIds);
+      const categories = await discoverCategories(allegro, client, plan.categoryIds, heartbeat);
 
       result.categoriesCreated = categories.created;
       result.categoriesSeen = plan.categoryIds.length;

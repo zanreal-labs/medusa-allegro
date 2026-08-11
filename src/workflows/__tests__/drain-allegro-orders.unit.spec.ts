@@ -240,10 +240,13 @@ const setup = (input: {
   orderQueryThrows?: boolean;
   /** Make the filter match everything, as a filter that silently does nothing would. */
   orderQueryIgnoresFilter?: boolean;
+  /** Simulates the claim being taken over mid-run: every heartbeat reports it lost. */
+  claimLost?: boolean;
 }) => {
   const client = fakeClient(input);
   const table = orderTable(input.orders ?? []);
   const allegro = fakeAllegroService({
+    claimLost: input.claimLost,
     client,
     ordersSyncDisabled: input.ordersSyncDisabled,
     states: input.states ?? [],
@@ -343,6 +346,101 @@ describe("drainAllegroOrders: bootstrap", () => {
     expect(context.allegro.states.get("orders")).toMatchObject({ cursor: "e-newest" });
     expect(context.table.rows).toEqual([]);
     expect(context.logs.some((line) => line.includes("cursor bootstrapped"))).toBe(true);
+  });
+});
+
+describe("drainAllegroOrders: the claim is re-asserted between forms", () => {
+  const withCursor = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ states: [{ cursor: "e0", provider: "orders", status: "ok" }], ...input });
+
+  it("abandons the drain and holds the cursor when the claim is taken over", async () => {
+    // A drain refreshes up to 100 forms sequentially, each a `getCheckoutForm` plus a
+    // multi-step order write, so on a slow Allegro it outlives the staleness window - and
+    // the run then kept applying forms concurrently with the pass that had replaced it,
+    // interleaving full item replacements on the same order.
+    const context = withCursor({
+      claimLost: true,
+      forms: [form({ id: "f1" }), form({ id: "f2" })],
+      pages: [[event("e1", "f1"), event("e2", "f2")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    // Not one form applied: the check happens BEFORE each.
+    expect(coreFlows.created).toEqual([]);
+    expect(result.refreshed).toBe(0);
+    // Abandoned forms are treated like deferred ones - never attempted, so they must NOT
+    // count as failures against their own quarantine streaks.
+    expect(result.failed).toBe(0);
+    expect(result.truncated).toBe(true);
+    // And the cursor holds where it was, so they replay.
+    expect(context.allegro.states.get("orders")?.cursor).toBe("e0");
+  });
+
+  it("does not write its outcome over the successor's state row", async () => {
+    const context = withCursor({
+      claimLost: true,
+      forms: [form({ id: "f1" })],
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(context.allegro.states.get("orders")?.status).toBe("ok");
+    expect(context.logs.some((line) => line.includes("belongs to its successor"))).toBe(true);
+  });
+
+  it("heartbeats under its own token while it still holds the claim", async () => {
+    const context = withCursor({ forms: [form({ id: "f1" })], pages: [[event("e1", "f1")]] });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(context.allegro.heartbeats.map((beat) => beat.provider)).toEqual(["orders"]);
+  });
+});
+
+describe("drainAllegroOrders: a pre-claim skip never releases a live claim", () => {
+  it("leaves the state row alone when the kill switch fires while a run is in flight", async () => {
+    // The finding: the disabled path wrote `status: "idle"` unconditionally. On a row held
+    // by a run in flight that releases its claim, so the NEXT tick acquires it and two runs
+    // execute concurrently - the exact failure single-flight exists to prevent, reached by
+    // the code meant to report a skip.
+    const context = setup({
+      ordersSyncDisabled: true,
+      states: [
+        {
+          claim_heartbeat_at: new Date(),
+          claim_token: "incumbent",
+          cursor: "e0",
+          provider: "orders",
+          status: "running",
+        },
+      ],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.disabled).toBe(true);
+    const state = context.allegro.states.get("orders");
+    expect(state).toMatchObject({ claim_token: "incumbent", status: "running" });
+    expect(context.allegro.preClaimWritesSkipped).toEqual(["orders"]);
+    // Skipped, but never silently: "nothing happened and nothing was recorded" is the state
+    // this repo has been bitten by before.
+    expect(context.logs.some((line) => line.includes("held by a run currently in flight"))).toBe(
+      true,
+    );
+  });
+
+  it("still records the reason when no run holds the claim", async () => {
+    const context = setup({
+      ordersSyncDisabled: true,
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(context.allegro.states.get("orders")).toMatchObject({ status: "idle" });
+    expect(context.allegro.states.get("orders")?.last_error).toContain("orders sync is disabled");
   });
 });
 

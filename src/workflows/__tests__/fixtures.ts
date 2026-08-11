@@ -97,6 +97,8 @@ export const fakeAllegroService = (seed: {
   ordersSyncDisabled?: boolean;
   client?: unknown;
   claimHeld?: boolean;
+  /** Simulates the claim being taken over mid-run: every heartbeat reports it lost. */
+  claimLost?: boolean;
 }) => {
   const offers = seed.offers ?? [];
   const pushes = seed.pushes ?? [];
@@ -105,6 +107,9 @@ export const fakeAllegroService = (seed: {
     (seed.states ?? []).map((row) => [row.provider, { ...row }]),
   );
   const claims: string[] = [];
+  const heartbeats: { provider: string; token: string }[] = [];
+  const preClaimWritesSkipped: string[] = [];
+  let claimSequence = 0;
   let offerSequence = offers.length;
   let pushSequence = pushes.length;
 
@@ -119,9 +124,36 @@ export const fakeAllegroService = (seed: {
         });
       }
       const row = states.get(provider) ?? { provider, status: "idle", updated_at: new Date() };
-      states.set(provider, row);
-      return Promise.resolve({ acquired: true, state: { write_scope_missing: false, ...row } });
+      // A TOKEN, like the real service. Without one the wrapper cannot fence its writes, so
+      // a fake that omitted it would make every run report the claim as held.
+      claimSequence += 1;
+      const token = `token-${claimSequence}`;
+      states.set(provider, { ...row, claim_token: token });
+      return Promise.resolve({
+        acquired: true,
+        state: { write_scope_missing: false, ...row },
+        token,
+      });
     },
+    /**
+     * The fencing check, honoured rather than stubbed true.
+     *
+     * `claimLost` simulates the run being taken over: the stored token stops matching, which
+     * is exactly what the real conditional update reports by affecting zero rows.
+     */
+    touchSyncClaim: (provider: string, token: string) => {
+      heartbeats.push({ provider, token });
+      if (seed.claimLost) {
+        return Promise.resolve(false);
+      }
+      const row = states.get(provider);
+      const held = row?.claim_token === token;
+      if (held) {
+        states.set(provider, { ...row, claim_heartbeat_at: new Date() } as StateRowFixture);
+      }
+      return Promise.resolve(held);
+    },
+    heartbeats,
     claims,
     createAllegroCategoryRates: (rows: Omit<CategoryRateFixture, "id">[]) => {
       const created = rows.map((row, index) => ({ ...row, id: `algcatrate_${index + 1}` }));
@@ -227,13 +259,37 @@ export const fakeAllegroService = (seed: {
       }
       return Promise.resolve(rows);
     },
-    writeSyncState: (provider: string, patch: Record<string, unknown>) => {
+    writeSyncState: (
+      provider: string,
+      patch: Record<string, unknown>,
+      opts: { token?: string } = {},
+    ) => {
+      const row = states.get(provider);
+      // The token guard is honoured, because "a run that lost its claim must not write" is
+      // the property under test. A fake that always wrote would make that untestable.
+      if (opts.token !== undefined && row?.claim_token !== opts.token) {
+        return Promise.resolve(false);
+      }
       states.set(provider, {
-        ...(states.get(provider) ?? { provider, status: "idle" }),
+        ...(row ?? { provider, status: "idle" }),
         ...patch,
       } as StateRowFixture);
-      return Promise.resolve();
+      return Promise.resolve(true);
     },
+    /** Skips the write while a live claim is held, exactly as the real guard does. */
+    writeSyncStateIfUnclaimed: (provider: string, patch: Record<string, unknown>) => {
+      const row = states.get(provider);
+      if (row?.status === "running") {
+        preClaimWritesSkipped.push(provider);
+        return Promise.resolve(false);
+      }
+      states.set(provider, {
+        ...(row ?? { provider, status: "idle" }),
+        ...patch,
+      } as StateRowFixture);
+      return Promise.resolve(true);
+    },
+    preClaimWritesSkipped,
   };
   return service;
 };

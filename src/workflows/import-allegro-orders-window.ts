@@ -79,7 +79,7 @@ export const importAllegroOrdersWindow = async (
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.ORDERS,
-    async ({ allegro, client, logger }) => {
+    async ({ allegro, client, heartbeat, logger }) => {
       const options = await allegro.getSyncOptions();
       const failedFormIds: string[] = [];
       let fetched = 0;
@@ -100,6 +100,13 @@ export const importAllegroOrdersWindow = async (
         fetched += forms.length;
 
         for (const form of forms) {
+          // Per form. An import walks up to 30 pages of 100 orders, each a multi-step write,
+          // so without this the claim goes stale long before the import finishes and a
+          // concurrent drain starts interleaving on the same orders.
+          if (!(await heartbeat())) {
+            truncated = true;
+            break;
+          }
           // Sequential: each form is a multi-step write, and a fan-out would put a
           // whole page of order creations in flight at once.
           try {

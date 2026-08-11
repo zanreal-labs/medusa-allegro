@@ -62,9 +62,10 @@ const fakeAllegro = (
     claimSyncRun: (provider: string) => {
       claims.push(provider);
       const row = state.get(provider) ?? { provider, status: "idle", updated_at: new Date() };
-      state.set(provider, row);
-      return Promise.resolve({ acquired: true, state: row });
+      state.set(provider, { ...row, claim_token: "token-1" });
+      return Promise.resolve({ acquired: true, state: row, token: "token-1" });
     },
+    touchSyncClaim: (_provider: string, token: string) => Promise.resolve(token === "token-1"),
     claims,
     createAllegroCategoryRates: (rows: Omit<CategoryRow, "id">[]) => {
       for (const row of rows) {
@@ -100,9 +101,21 @@ const fakeAllegro = (
       }
       return Promise.resolve(rows);
     },
-    writeSyncState: (provider: string, patch: Record<string, unknown>) => {
+    writeSyncState: (
+      provider: string,
+      patch: Record<string, unknown>,
+      opts: { token?: string } = {},
+    ) => {
+      const row = state.get(provider);
+      if (opts.token !== undefined && row?.claim_token !== opts.token) {
+        return Promise.resolve(false);
+      }
+      state.set(provider, { ...(row ?? { provider }), ...patch });
+      return Promise.resolve(true);
+    },
+    writeSyncStateIfUnclaimed: (provider: string, patch: Record<string, unknown>) => {
       state.set(provider, { ...(state.get(provider) ?? { provider }), ...patch });
-      return Promise.resolve();
+      return Promise.resolve(true);
     },
   };
 };

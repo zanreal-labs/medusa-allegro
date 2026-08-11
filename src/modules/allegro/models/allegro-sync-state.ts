@@ -15,6 +15,27 @@ import { model } from "@medusajs/framework/utils";
  */
 const AllegroSyncState = model.define("allegro_sync_state", {
   /**
+   * When the current claim holder last proved it was alive.
+   *
+   * A long run has to keep saying so, or the staleness window takes it over mid-flight and
+   * two runs push to Allegro concurrently. It exists as a column of its own, rather than
+   * relying on `updated_at`, because a heartbeat has to write a value that genuinely
+   * CHANGES: an update whose every field already matches may not flush at all, and then the
+   * ORM's `onUpdate` would never bump `updated_at` and the heartbeat would be a silent
+   * no-op that looked like a success.
+   */
+  claim_heartbeat_at: model.dateTime().nullable(),
+  /**
+   * Fencing token for the run that currently holds the claim.
+   *
+   * Minted on every successful claim. Writes a running loop makes to this row are
+   * conditioned on it, which is what turns "I took the claim" into "I still hold it". A run
+   * that was taken over as stale finds its token no longer matches, learns it has lost the
+   * claim, and stops writing - rather than overwriting the state of the run that replaced
+   * it, or releasing a claim it no longer owns.
+   */
+  claim_token: model.text().nullable(),
+  /**
    * The last run's counters, in the provider's own summary shape. Purely for the
    * admin, and worth a column: a run that wrote nothing is only distinguishable
    * from a run that found nothing to write by its skip counts, and a health table

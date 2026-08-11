@@ -121,9 +121,19 @@ interface SubmittedCommand {
 const submitCommands = async (
   client: AllegroClient,
   chunks: readonly StockChange[][],
+  heartbeat: () => Promise<boolean>,
 ): Promise<{ submitted: SubmittedCommand[]; error?: string }> => {
   const submitted: SubmittedCommand[] = [];
   for (const changes of chunks) {
+    // Between chunks: a catalogue-wide reconciliation can be many commands, and a claim
+    // taken over mid-submission means two runs setting quantities on the same offers.
+    if (!(await heartbeat())) {
+      return {
+        error:
+          "the sync claim was taken over mid-run, so the remaining quantity commands were abandoned rather than submitted concurrently with the run that replaced this one",
+        submitted,
+      };
+    }
     const commandId = randomUUID();
     // The command sets ONE fixed value across every offer it names, so the chunk's
     // uniformity is a correctness precondition, not a formality - and it was being
@@ -219,6 +229,7 @@ const readAllQuantityTasks = async (
 const collectOutcomes = async (
   client: AllegroClient,
   submitted: readonly SubmittedCommand[],
+  heartbeat: () => Promise<boolean>,
 ): Promise<{
   synced: number;
   pending: number;
@@ -247,6 +258,9 @@ const collectOutcomes = async (
           return { confirmed: [], failed: 0, pending: submission.changes.length, synced: 0 };
         }
 
+        // After the poll, which is where the time goes: each command is polled for up to
+        // 120 seconds, so a run with several chunks can otherwise outlive its claim.
+        await heartbeat();
         const { tasks, truncated } = await readAllQuantityTasks(client, submission.commandId);
         const confirmedOfferIds = new Set<string>();
         for (const task of tasks) {
@@ -442,7 +456,7 @@ export const pushAllegroStock = async (
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.STOCK,
-    async ({ allegro, client, logger }) => {
+    async ({ allegro, client, heartbeat, logger }) => {
       const options = await allegro.getSyncOptions();
       warnOnUnscopedCatalogue(logger, options, "stock");
       const variants = await listEligibleVariants(container, options);
@@ -525,7 +539,7 @@ export const pushAllegroStock = async (
       }
 
       const chunks = buildStockCommandChunks(changes);
-      const { error: submitError, submitted } = await submitCommands(client, chunks);
+      const { error: submitError, submitted } = await submitCommands(client, chunks, heartbeat);
       result.commands = submitted.length;
 
       const submittedCount = submitted.reduce((sum, item) => sum + item.changes.length, 0);
@@ -533,7 +547,7 @@ export const pushAllegroStock = async (
       // offers keep a stale quantity and nothing else records that.
       const notSubmitted = changes.length - submittedCount;
 
-      const outcomes = await collectOutcomes(client, submitted);
+      const outcomes = await collectOutcomes(client, submitted, heartbeat);
       result.synced = outcomes.synced;
       result.pending = outcomes.pending;
       result.failed = outcomes.failed + notSubmitted;
