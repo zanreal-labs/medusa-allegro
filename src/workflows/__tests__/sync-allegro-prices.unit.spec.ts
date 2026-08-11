@@ -445,7 +445,27 @@ describe("syncAllegroPrices: skip reasons", () => {
     expect(summary.skippedCounts["status-unknown"]).toBe(1);
   });
 
-  it("skips an unresolved promotion state", async () => {
+  it("skips an unresolved promotion state, stored as NULL", async () => {
+    // `promoted: null` EXPLICITLY, and that is the point of the fix. This test used to
+    // omit the key, so the fake produced `undefined` and the gate fired - but the column
+    // was `boolean NOT NULL default false`, so the database could never hand the loop an
+    // undefined. The test passed while the behaviour it described was unreachable in
+    // production, and every row with an unresolved promo sweep priced at the STANDARD
+    // commission instead, giving promoted offers a floor below their true break-even.
+    const { client, summary } = await runWith({
+      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: null, sku: "SKU-1" }],
+    });
+
+    expect(summary.skippedCounts["promotion-unresolved"]).toBe(1);
+    // Skipped means NOTHING was pushed: no command, so no floor computed on a guessed
+    // commission rate.
+    expect(client.commands).toEqual([]);
+    expect(summary.synced).toBe(0);
+  });
+
+  it("skips a row that never carried the promotion key at all", async () => {
+    // Belt and braces on the same gate: an absent key and a NULL must behave alike, so a
+    // row written by an older version cannot slip through as "standard".
     const { summary } = await runWith({
       rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", sku: "SKU-1" }],
     });

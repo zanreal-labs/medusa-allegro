@@ -65,7 +65,10 @@ export default async function allegroOfferSyncJob(container: MedusaContainer): P
     logger.info(
       `[${JOB_NAME}] monitor: scanned=${monitor.scanned} drift=${monitor.drift} ` +
         `updated=${monitor.updated} transitions=${monitor.transitions} ` +
-        `notObserved=${monitor.notObserved}`,
+        `notObserved=${monitor.notObserved} ` +
+        // Logged beside `drift` on purpose: an unresolved promotion state means drift
+        // was NOT judged for that offer, so `drift=0` alone would misread as clean.
+        `promotionUnresolved=${monitor.promotionUnresolved}`,
     );
     if (monitor.error) {
       logger.warn(`[${JOB_NAME}] monitor finished with findings: ${monitor.error}`);

@@ -35,12 +35,76 @@ const run = async (input: {
   const allegro = fakeAllegroService({
     client: client({ offers: input.live, rules: input.rules, rulesError: input.rulesError }),
     offers: input.offers ?? [],
-    syncOptions: (input.rulesConfigured === false ? {} : { automationRules: { ...RULES } }),
+    syncOptions: input.rulesConfigured === false ? {} : { automationRules: { ...RULES } },
   });
   const container = fakeContainer({ allegro });
   const result = await runPriceAutomationMonitor(container as never);
   return { allegro, result };
 };
+
+describe("runPriceAutomationMonitor: unresolved promotion state", () => {
+  it("does not judge drift when the promotion state is unresolved, and counts it", async () => {
+    // `promoted` is nullable, and NULL means "not resolved" rather than "not promoted".
+    // Promotion state selects which rule is EXPECTED, so without it there is nothing to
+    // compare the attached rule against. The old `row.promoted ?? false` guessed
+    // "standard", which reports a genuinely promoted offer sitting correctly on the
+    // promoted rule as drifting - an operator chasing that finds nothing wrong.
+    const { allegro, result } = await run({
+      live: [
+        offerFixture({
+          id: "o1",
+          sellingMode: { priceAutomation: { rule: { id: "rule-promoted" } } },
+        }),
+      ],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: null, sku: "SKU-1" }],
+    });
+
+    expect(result).toMatchObject({ drift: 0, promotionUnresolved: 1, scanned: 1 });
+    expect(allegro.offers[0]).toMatchObject({ price_automation_drift: false });
+    // Counted AND surfaced: a `drift: 0` sweep that silently skipped the offer would
+    // read as a clean catalogue, which is the reassurance to avoid giving.
+    expect(result.error).toContain("unresolved promotion state");
+  });
+
+  it("treats a row that never carried the key the same as an explicit null", async () => {
+    const { result } = await run({
+      live: [offerFixture({ id: "o1" })],
+      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+    });
+
+    expect(result).toMatchObject({ drift: 0, promotionUnresolved: 1 });
+  });
+
+  it("judges drift normally once the promotion state is resolved", async () => {
+    // The contrast case: same offer, same attached rule, promotion state now known. A
+    // promoted offer on the promoted rule is correct, so there is no drift.
+    const { result } = await run({
+      live: [
+        offerFixture({
+          id: "o1",
+          sellingMode: { priceAutomation: { rule: { id: "rule-promoted" } } },
+        }),
+      ],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: true, sku: "SKU-1" }],
+    });
+
+    expect(result).toMatchObject({ drift: 0, promotionUnresolved: 0 });
+  });
+
+  it("reports a promoted offer left on the standard rule as drift", async () => {
+    const { result } = await run({
+      live: [
+        offerFixture({
+          id: "o1",
+          sellingMode: { priceAutomation: { rule: { id: "rule-standard" } } },
+        }),
+      ],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: true, sku: "SKU-1" }],
+    });
+
+    expect(result).toMatchObject({ drift: 1, promotionUnresolved: 0 });
+  });
+});
 
 describe("runPriceAutomationMonitor", () => {
   it("records the observed automation state on the mapping row", async () => {
@@ -51,7 +115,7 @@ describe("runPriceAutomationMonitor", () => {
           sellingMode: { priceAutomation: { rule: { id: "rule-standard" } } },
         }),
       ],
-      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     });
 
     expect(result).toMatchObject({ drift: 0, scanned: 1, updated: 1 });
@@ -67,7 +131,7 @@ describe("runPriceAutomationMonitor", () => {
   it("reports an active offer with no rule as fixed, and as drift", async () => {
     const { allegro, result } = await run({
       live: [offerFixture({ id: "o1" })],
-      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     });
     expect(result.drift).toBe(1);
     expect(allegro.offers[0]).toMatchObject({ price_automation_drift: true, price_mode: "fixed" });
@@ -92,7 +156,7 @@ describe("runPriceAutomationMonitor", () => {
   it("reports a non-ACTIVE offer as ended and clears its drift", async () => {
     const { allegro, result } = await run({
       live: [offerFixture({ id: "o1", publication: { status: "ENDED" } })],
-      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     });
     expect(result.drift).toBe(0);
     expect(allegro.offers[0]?.price_mode).toBe("ended");
@@ -108,7 +172,7 @@ describe("runPriceAutomationMonitor", () => {
           sellingMode: { priceAutomation: { rule: { id: "rule-standard" } } },
         }),
       ],
-      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     });
     expect(result.transitions).toBe(0);
     expect(allegro.pushes).toEqual([]);
@@ -232,7 +296,7 @@ describe("runPriceAutomationMonitor", () => {
   it("skips the sweep when the rules resource is not provisioned", async () => {
     const { result } = await run({
       live: [offerFixture({ id: "o1" })],
-      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
       rulesError: new AllegroApiError({ httpStatus: 400, message: "Feature unavailable" }),
     });
     expect(result.featureUnavailable).toBe(true);
@@ -273,7 +337,7 @@ describe("runPriceAutomationMonitor", () => {
           sellingMode: { priceAutomation: { rule: { id: "rule-unknown" } } },
         }),
       ],
-      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     });
     expect(allegro.offers[0]).toMatchObject({
       automation_rule: null,
@@ -291,7 +355,7 @@ describe("runPriceAutomationMonitor", () => {
           sellingMode: { priceAutomation: { rule: { id: "rule-standard" } } },
         }),
       ],
-      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     });
     const state = allegro.states.get("price-automation");
     expect(state).toMatchObject({ last_error: null, status: "ok" });
@@ -301,7 +365,7 @@ describe("runPriceAutomationMonitor", () => {
   it("takes only the price-automation claim", async () => {
     const { allegro } = await run({
       live: [offerFixture({ id: "o1" })],
-      offers: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     });
     expect(allegro.claims).toEqual(["price-automation"]);
   });

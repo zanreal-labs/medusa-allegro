@@ -145,7 +145,8 @@ interface OfferRow {
   sku: string;
   offer_id?: string | null;
   category_id?: string | null;
-  promoted?: boolean;
+  /** Three-state: true / false / NULL-or-absent meaning "not resolved". */
+  promoted?: boolean | null;
   price_sync_enabled?: boolean;
   price_currency?: string | null;
   conflict?: string | null;
@@ -409,9 +410,16 @@ const planOffer = async (
   inputs: PlanningInputs,
   opts: { ignoreDisabled?: boolean } = {},
 ): Promise<{ plan: OfferPlan } | { skip: SyncSkipReason } | { noop: true }> => {
-  // The promoted flag selects BOTH the expected rule and the commission rate, so it
-  // is resolved before anything else that depends on it.
-  const { promoted } = row;
+  // The promoted flag selects BOTH the expected rule and the commission rate, so it is
+  // resolved before anything else that depends on it.
+  //
+  // `?? undefined` collapses NULL and absent into the one value the eligibility ladder
+  // treats as "not resolved". The column is deliberately nullable (see the model): NULL
+  // is not "not promoted", and pricing it as though it were gives a promoted offer a
+  // floor computed on the standard commission - below its true break-even, so the rule
+  // may sell it at a loss. The `promotion-unresolved` gate below is what catches that,
+  // and it was unreachable while the column defaulted to false.
+  const promoted = row.promoted ?? undefined;
   const commission = resolveCommissionFraction(
     inputs.categoryRates,
     row.category_id,

@@ -30,7 +30,7 @@ interface OfferRow {
   id: string;
   sku: string;
   offer_id?: string | null;
-  promoted?: boolean;
+  promoted?: boolean | null;
   conflict?: string | null;
   conflict_detail?: string | null;
   last_error?: string | null;
@@ -257,6 +257,49 @@ describe("runOfferDiscovery", () => {
     expect(output.result.promoFeatureUnavailable).toBe(true);
   });
 
+  it("leaves a NEWLY CREATED row unresolved when the sweep could not be resolved", async () => {
+    // The case the `NOT NULL default false` column made impossible to express, and the
+    // reason it was a real mispricing rather than a theoretical one. Discovery correctly
+    // omits `promoted` from the write when the sweep is unresolved - but on a row it is
+    // CREATING, an omitted column took the database default of `false`. The offer then
+    // looked resolved-and-not-promoted, so price sync computed its floor on the standard
+    // commission. For an offer that is in fact promoted, that floor sits below its true
+    // break-even and the attached rule is licensed to sell at a loss.
+    const { allegro } = await run({
+      offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],
+      promoError: new AllegroApiError({ httpStatus: 400, message: "Feature unavailable" }),
+      // No stored row: this run creates it.
+      variants: [{ id: "v1", sku: "SKU-1" }],
+    });
+
+    expect(allegro.offers).toHaveLength(1);
+    // Neither true nor false: unresolved. Price sync skips it with
+    // `promotion-unresolved` until a successful sweep fills it in.
+    expect(allegro.offers[0]?.promoted ?? null).toBeNull();
+  });
+
+  it("clears an unlinked row's promotion state to unresolved, not to false", async () => {
+    // An unlinked row has no offer, so its promotion state is genuinely UNKNOWN. Writing
+    // `false` would re-arm price sync on the standard commission the instant the SKU
+    // re-linked, before any sweep had confirmed anything about the new offer.
+    const { allegro } = await run({
+      offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],
+      promo: [{ basePackage: { id: "emphasized10d" }, offerId: "o1" }],
+      stored: [
+        { id: "row-1", offer_id: "o1", sku: "SKU-1" },
+        { id: "row-2", offer_id: "o-gone", promoted: true, sku: "SKU-ORPHAN" },
+      ],
+      variants: [
+        { id: "v1", sku: "SKU-1" },
+        { id: "v2", sku: "SKU-ORPHAN" },
+      ],
+    });
+
+    const orphan = allegro.offers.find((row) => row.sku === "SKU-ORPHAN");
+    expect(orphan?.offer_id ?? null).toBeNull();
+    expect(orphan?.promoted ?? null).toBeNull();
+  });
+
   it("counts an unresolved promotion state that is not a feature gap", async () => {
     const { output } = await run({
       offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],
@@ -308,9 +351,12 @@ describe("runOfferDiscovery", () => {
 
     expect(output.result.unlinked).toBe(1);
     const stale = allegro.offers.find((row) => row.sku === "SKU-2");
-    // The conflict pass owns this row (it records `no-offer`), so the unlink pass
-    // skips it - and the conflict row already clears `offer_id`.
+    // The conflict pass owns this row (it records `no-offer`), so the unlink pass skips
+    // it. That pass therefore has to clear BOTH columns: it used to clear only
+    // `offer_id`, so a stale `promoted: true` survived on a row with no offer and would
+    // be believed again the moment the SKU re-linked.
     expect(stale).toMatchObject({ conflict: "no-offer", offer_id: null });
+    expect(stale?.promoted ?? null).toBeNull();
   });
 
   it("never unlinks when the listing came back empty", async () => {

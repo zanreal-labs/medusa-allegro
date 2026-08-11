@@ -96,7 +96,8 @@ export const emptyDiscoverOffersResult = (): DiscoverOffersResult => ({
 
 /** A stored mapping row, as this engine reads and writes it. */
 interface OfferRow extends StoredOffer {
-  promoted?: boolean;
+  /** Three-state: true / false / NULL-or-absent meaning "not resolved". */
+  promoted?: boolean | null;
   conflict?: OfferConflict | null;
 }
 
@@ -151,6 +152,13 @@ const applyPlan = async (
       // the write paths build their commands from, and leaving it set is how a
       // contested SKU still gets a price pushed to one of the two offers.
       offer_id: null,
+      // The promotion state goes with it, for the same reason the unlink pass clears it.
+      // A conflicted row has no single owning offer, so its promotion state is UNKNOWN,
+      // and a stale `true` or `false` left here would be believed the moment the conflict
+      // resolves and the SKU re-links. This pass, not the unlink pass, is what clears a
+      // conflicted row: the unlink loop deliberately skips any SKU already queued here,
+      // so a stale flag on a `no-offer` row survived indefinitely.
+      promoted: null,
       sku: conflict.sku,
     };
     if (existing) {
@@ -160,9 +168,14 @@ const applyPlan = async (
     }
   }
 
-  // Stale links: clear the offer id and the promotion flag together. A promoted
-  // flag left behind on an unlinked row would select the promoted commission rate
-  // the moment the SKU is re-linked to a plain offer.
+  // Stale links: clear the offer id and the promotion flag together. A promoted flag
+  // left behind on an unlinked row would select the promoted commission rate the moment
+  // the SKU is re-linked to a plain offer.
+  //
+  // Cleared to NULL, not to `false`. An unlinked row has no offer, so its promotion
+  // state is genuinely UNKNOWN rather than known-absent, and `false` is a claim the
+  // plugin cannot support - it would also re-arm price sync on the standard commission
+  // the instant the SKU re-linked, before any sweep had confirmed anything.
   for (const sku of plan.unlink) {
     const existing = existingBySku.get(sku);
     // Skip any SKU the conflict pass already queued: two updates for one row in
@@ -170,7 +183,7 @@ const applyPlan = async (
     if (!existing || plan.conflicts.some((conflict) => conflict.sku === sku)) {
       continue;
     }
-    toUpdate.push({ id: existing.id, offer_id: null, promoted: false });
+    toUpdate.push({ id: existing.id, offer_id: null, promoted: null });
   }
 
   if (toCreate.length > 0) {

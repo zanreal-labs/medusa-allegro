@@ -50,9 +50,16 @@ export interface AutomationRuleNames {
 export const expectedRuleForPromoted = (promoted: boolean, rules: AutomationRuleNames): string =>
   promoted ? rules.promoted : rules.standard;
 
-/** Promotion state as written on an audit row. */
-export const promotionStateLabel = (promoted?: boolean): string => {
-  if (promoted === undefined) {
+/**
+ * Promotion state as written on an audit row.
+ *
+ * Accepts null as well as undefined, because the stored column is three-state: an
+ * unresolved promotion state reads as NULL from the database and as `undefined` from a
+ * row object that never carried the key, and both mean "unknown". Testing for null as
+ * well is what keeps a NULL from being mislabelled "standard" in the audit trail.
+ */
+export const promotionStateLabel = (promoted?: boolean | null): string => {
+  if (promoted === undefined || promoted === null) {
     return "unknown";
   }
   return promoted ? "promoted" : "standard";

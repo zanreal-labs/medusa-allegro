@@ -97,8 +97,24 @@ const AllegroOffer = model.define("allegro_offer", {
    * Whether the offer currently carries a promotion package ("Wyróżnienie").
    * Resolved from the promo-options resource, not from the offer body, which
    * does not carry promotion state.
+   *
+   * THREE-STATE, and nullable is the whole point: NULL means "not resolved", which
+   * is a different fact from "not promoted" and must not be collapsed into it.
+   * Promotion state selects the commission rate, the commission rate sets the
+   * break-even price, and the break-even price is the FLOOR a price-automation rule
+   * may sell down to. A promoted offer priced on the standard commission gets a floor
+   * below its true break-even, so the rule is licensed to sell it at a loss.
+   *
+   * This column was `boolean NOT NULL default false`, and that default is what made
+   * the mistake reachable: `evaluateSyncEligibility`'s `promotion-unresolved` gate
+   * could never fire, because the row always presented a boolean. A row created by
+   * discovery while the promo sweep was unresolved (page cap hit, "Feature
+   * unavailable", or a non-systemic error, all of which yield a null sweep) took the
+   * DB default and priced at the STANDARD rate. With no default, an omitted write
+   * lands as NULL and price sync skips the offer with `promotion-unresolved` until a
+   * successful sweep fills it in.
    */
-  promoted: model.boolean().default(false),
+  promoted: model.boolean().nullable(),
   /** Medusa variant SKU; matched against the Allegro offer's `external.id`. */
   sku: model.text().unique(),
   /** Allegro publication status: ACTIVE, INACTIVE, ENDED, and so on. */

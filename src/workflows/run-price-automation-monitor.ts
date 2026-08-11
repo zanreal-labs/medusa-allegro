@@ -77,6 +77,16 @@ export interface PriceAutomationMonitorResult {
   notObserved: number;
   /** No `automationRules` option, so drift cannot be judged. */
   rulesNotConfigured: boolean;
+  /**
+   * Observed offers whose promotion state is unresolved, so drift could not be judged
+   * for them either.
+   *
+   * Counted rather than folded into "no drift": promotion state selects the expected
+   * rule, so without it the monitor has no expectation to compare against. A sweep that
+   * reported `drift: 0` while half the catalogue was unresolved would read as a clean
+   * catalogue, which is exactly the reassurance an operator must not be given.
+   */
+  promotionUnresolved: number;
   error?: string;
 }
 
@@ -85,6 +95,7 @@ export const emptyPriceAutomationMonitorResult = (): PriceAutomationMonitorResul
   failed: 0,
   featureUnavailable: false,
   notObserved: 0,
+  promotionUnresolved: 0,
   rulesNotConfigured: false,
   scanned: 0,
   systemic: false,
@@ -97,7 +108,8 @@ interface OfferRow {
   id: string;
   sku: string;
   offer_id?: string | null;
-  promoted?: boolean;
+  /** Three-state: true / false / NULL-or-absent meaning "not resolved". */
+  promoted?: boolean | null;
   price_mode?: PriceMode | null;
   automation_rule?: string | null;
   automation_rule_id?: string | null;
@@ -158,6 +170,8 @@ interface ObservedState {
   ruleId?: string;
   ruleName?: string;
   drift: boolean;
+  /** True when drift could not be judged because promotion state is unresolved. */
+  promotionUnresolved: boolean;
 }
 
 const observe = (
@@ -173,19 +187,30 @@ const observe = (
     status: offer.publication?.status as OfferStatus | undefined,
   });
   const ruleName = attachedRuleId ? ruleNames.get(attachedRuleId) : undefined;
+  // Promotion state selects which rule is EXPECTED, so an unresolved one makes drift
+  // unjudgeable rather than false. `row.promoted ?? false` was the silent-default bug
+  // the nullable column exists to prevent: a genuinely promoted offer correctly sitting
+  // on the promoted rule would be compared against the STANDARD rule name and reported
+  // as drifting, and an operator chasing that finds nothing wrong.
+  const promoted = row.promoted ?? undefined;
+  const promotionUnresolved = promoted === undefined;
   return {
-    // With no rules configured there is no expectation to drift FROM, so drift is
-    // false rather than a guess. The mode and the rule name are still recorded -
+    // With no rules configured there is no expectation to drift FROM, and with no
+    // resolved promotion state there is no way to say WHICH rule is expected. Both are
+    // reported as "no drift" rather than guessed, and the unresolved case is counted so
+    // it does not read as a clean sweep. The mode and the rule name are still recorded -
     // observing the catalogue is useful before the rules are chosen.
-    drift: rules
-      ? computeDrift({
-          attachedRuleName: ruleName,
-          priceMode,
-          promoted: row.promoted ?? false,
-          rules,
-        })
-      : false,
+    drift:
+      rules && !promotionUnresolved
+        ? computeDrift({
+            attachedRuleName: ruleName,
+            priceMode,
+            promoted: promoted as boolean,
+            rules,
+          })
+        : false,
     priceMode,
+    promotionUnresolved,
     ruleId: attachedRuleId,
     ruleName,
   };
@@ -287,6 +312,9 @@ export const runPriceAutomationMonitor = async (
         if (next.drift) {
           result.drift += 1;
         }
+        if (next.promotionUnresolved) {
+          result.promotionUnresolved += 1;
+        }
 
         if (
           isTransition(
@@ -368,6 +396,14 @@ const buildMonitorError = (
     // Drift is an error state even on a clean run: an offer priced by the wrong
     // rule is being sold on the wrong commission, and nothing else says so.
     parts.push(`${result.drift} offer(s) drift from the expected price-automation rule`);
+  }
+  if (result.promotionUnresolved > 0) {
+    // Reported for the same reason drift is: these offers were NOT checked, so a
+    // `drift: 0` sweep that silently skipped them would read as a clean catalogue.
+    // Price sync skips them too, with `promotion-unresolved`, so the remedy is the same.
+    parts.push(
+      `${result.promotionUnresolved} offer(s) have an unresolved promotion state, so drift could not be judged and price sync skips them; a successful promo-options sweep fills it in`,
+    );
   }
   return parts.length > 0 ? parts.join("; ") : null;
 };

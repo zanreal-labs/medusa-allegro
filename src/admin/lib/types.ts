@@ -76,7 +76,8 @@ export interface OfferRow {
   price_amount?: string | null;
   price_currency?: string | null;
   available_quantity?: number | null;
-  promoted?: boolean;
+  /** Three-state: true / false / null meaning the promo sweep has not resolved it. */
+  promoted?: boolean | null;
   price_sync_enabled?: boolean;
   price_mode?: string | null;
   automation_rule?: string | null;

@@ -31,7 +31,15 @@ export interface OfferRowFixture {
   sku: string;
   offer_id?: string | null;
   category_id?: string | null;
-  promoted?: boolean;
+  /**
+   * Three-state, matching the column: true / false / NULL meaning "not resolved".
+   *
+   * Prefer stating it explicitly in a fixture. Omitting the key yields `undefined`, which
+   * the loops treat like NULL - but the column was once `NOT NULL default false`, so an
+   * omitted key described a state the database could never produce, and tests written
+   * that way asserted unreachable behaviour.
+   */
+  promoted?: boolean | null;
   price_sync_enabled?: boolean;
   price_currency?: string | null;
   conflict?: string | null;

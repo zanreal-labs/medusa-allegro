@@ -290,7 +290,19 @@ const AllegroOffersPage = () => {
                     ) : null}
                   </div>
                 </Table.Cell>
-                <Table.Cell>{offer.promoted ? "yes" : "no"}</Table.Cell>
+                {/*
+                  Three states, not two. `promoted` is null until a promo-options sweep
+                  resolves it, and price sync SKIPS an unresolved offer rather than
+                  pricing it on the standard commission - so rendering null as "no" would
+                  show a healthy-looking row for an offer that is not being synced at all.
+                */}
+                <Table.Cell>
+                  {offer.promoted === null || offer.promoted === undefined
+                    ? "unresolved"
+                    : (offer.promoted
+                      ? "yes"
+                      : "no")}
+                </Table.Cell>
                 <Table.Cell>
                   <Switch
                     checked={offer.price_sync_enabled ?? true}
