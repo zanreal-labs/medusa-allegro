@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { MedusaContainer } from "@medusajs/framework/types";
+import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { MedusaError } from "@medusajs/framework/utils";
 import {
   createStep,
@@ -20,7 +20,11 @@ import {
   STOCK_TASK_MAX_PAGES,
   STOCK_TASK_PAGE_SIZE,
 } from "../lib/sync/stock-plan";
-import type { StockChange, StockSyncSummary } from "../lib/sync/stock-plan";
+import type {
+  StockChange,
+  StockConflictRecord,
+  StockSyncSummary,
+} from "../lib/sync/stock-plan";
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
 import type AllegroModuleService from "../modules/allegro/service";
 import { listEligibleVariants, readAvailableQuantities } from "./lib/catalog";
@@ -70,12 +74,15 @@ export const emptyStockSyncResult = (): StockSyncResult => ({
   ambiguous: 0,
   commands: 0,
   complete: false,
+  conflicted: 0,
   eligible: 0,
   failed: 0,
   mismatched: 0,
   pending: 0,
   skippedInactive: 0,
+  skippedNoInventory: 0,
   skippedUnlinked: 0,
+  skippedUnmatched: 0,
   synced: 0,
   unresolved: 0,
 });
@@ -323,6 +330,30 @@ const buildStockError = (result: StockSyncResult, firstError?: string): string |
       `${result.pending} offer quantity write(s) were submitted but not confirmed within the poll budget; the next run re-checks them`,
     );
   }
+  // The bounded exclusions. None of them refuses the run, and that is exactly why each has
+  // to be reported: an offer in one of these buckets has its quantity published NOWHERE,
+  // and a run that reported only `synced` would look clean while part of the catalogue sat
+  // permanently stale on Allegro.
+  if (result.conflicted > 0) {
+    parts.push(
+      `${result.conflicted} offer(s) contradict their mapping row (the live sygnatura or EAN no longer matches the mapped SKU) and were skipped with a recorded conflict; resolve them in the Allegro admin`,
+    );
+  }
+  if (result.skippedUnmatched > 0) {
+    parts.push(
+      `${result.skippedUnmatched} mapped offer(s) could not be paired with an eligible variant (absent from the Allegro listing, or their SKU is not in the sales channel), so their quantity was not written`,
+    );
+  }
+  if (result.skippedNoInventory > 0) {
+    parts.push(
+      `${result.skippedNoInventory} offer(s) map to a variant that does not manage inventory, so Medusa has no quantity to publish for them`,
+    );
+  }
+  if (result.skippedUnlinked > 0) {
+    parts.push(
+      `${result.skippedUnlinked} eligible variant(s) are claimed by no mapped Allegro offer, so their quantity is published nowhere`,
+    );
+  }
   return parts.length > 0 ? parts.join("; ") : null;
 };
 
@@ -346,6 +377,58 @@ const stampSyncedOffers = async (
 };
 
 /**
+ * Mark the mapping rows whose live offer contradicts them.
+ *
+ * Best-effort: the conflict is a report, and failing to record it must not turn a run that
+ * correctly wrote nothing into a crash. It is logged loudly either way, because the offer
+ * is not being synced until somebody acts.
+ */
+const recordStockConflicts = async (
+  allegro: AllegroModuleService,
+  logger: Logger,
+  conflicts: readonly StockConflictRecord[],
+): Promise<void> => {
+  if (conflicts.length === 0) {
+    return;
+  }
+  for (const conflict of conflicts) {
+    logger.warn(`[allegro-stock] ${conflict.conflict_detail}`);
+  }
+  const skus = conflicts.map((conflict) => conflict.sku);
+  try {
+    const rows = (await allegro.listAllegroOffers({ sku: skus })) as unknown as {
+      id: string;
+      sku: string;
+    }[];
+    const byId = new Map(rows.map((row) => [row.sku, row.id]));
+    const updates = conflicts
+      .map((conflict) => {
+        const id = byId.get(conflict.sku);
+        return id
+          ? {
+              conflict: conflict.conflict,
+              conflict_detail: conflict.conflict_detail,
+              id,
+              // Cleared for the same reason discovery clears it on a conflict: this column
+              // is what every write path builds its commands from.
+              offer_id: null,
+            }
+          : undefined;
+      })
+      .filter((update): update is NonNullable<typeof update> => update !== undefined);
+    if (updates.length > 0) {
+      await allegro.updateAllegroOffers(updates as never);
+    }
+  } catch (error) {
+    logger.error(
+      `[allegro-stock] could not record ${conflicts.length} sku-mismatch conflict(s) on their mapping rows: ${
+        error instanceof Error ? error.message : String(error)
+      }. The offers were still skipped and nothing was written to Allegro.`,
+    );
+  }
+};
+
+/**
  * Run one quantity-push tick.
  *
  * `listing` may be supplied by a caller that already fetched the catalogue.
@@ -363,32 +446,53 @@ export const pushAllegroStock = async (
       const options = await allegro.getSyncOptions();
       warnOnUnscopedCatalogue(logger, options, "stock");
       const variants = await listEligibleVariants(container, options);
+
+      // The LISTING first, quantities second, and the order is deliberate. Paging a full
+      // catalogue is by far the slowest step here, so reading quantities before it left
+      // every figure ageing across the whole pagination window before it was compared and
+      // written. Reading them after means the numbers pushed are the freshest available at
+      // write time, which for stock is the difference between an oversell and a sale.
+      const offers = listing ?? (await listAllOffers(client));
       const quantities = await readAvailableQuantities(
         container,
         variants,
         options.stockLocationIds,
       );
-      const offers = listing ?? (await listAllOffers(client));
 
-      // Only mapped, unconflicted offers are candidates. Reading the mapping table
-      // rather than matching the raw listing again is what makes discovery's conflict
-      // detection actually bind on the write path.
+      // Only mapped, unconflicted rows authorise a write, and the row also supplies the
+      // PAIRING. Re-deriving the pairing from the live listing is what let a sygnatura
+      // edited between discovery and now push one variant's quantity onto another
+      // product's offer.
       const rows = (await allegro.listAllegroOffers({})) as unknown as {
         sku: string;
         offer_id?: string | null;
         conflict?: string | null;
       }[];
-      const syncableOfferIds = new Set(
-        rows.filter((row) => !row.conflict && row.offer_id).map((row) => row.offer_id as string),
-      );
-      const candidateOffers = offers.offers.filter((offer) => syncableOfferIds.has(offer.id));
+      const authorized = rows
+        .filter((row) => !row.conflict && row.offer_id)
+        .map((row) => ({ offerId: row.offer_id as string, sku: row.sku }));
 
       const plan = planStockSync(
-        variants.map((variant) => ({ quantity: quantities.get(variant.sku), sku: variant.sku })),
-        candidateOffers,
+        variants.map((variant) => {
+          const read = quantities.get(variant.sku);
+          return {
+            ean: variant.ean,
+            sku: variant.sku,
+            ...(read && "quantity" in read ? { quantity: read.quantity } : {}),
+            ...(read && "absent" in read ? { absent: read.absent } : {}),
+          };
+        }),
+        offers.offers,
+        authorized,
       );
-      const { changes, ...summary } = plan;
+      const { changes, conflicts, ...summary } = plan;
       result = { ...summary };
+
+      // Recorded on the mapping row, not just counted. A conflict that lives only in a run
+      // summary is gone by the next tick; on the row it is visible in the admin, it holds
+      // the offer out of the PRICE path too, and discovery clears it on the next healthy
+      // upsert.
+      await recordStockConflicts(allegro, logger, conflicts);
 
       if (!isStockPlanSafe(plan)) {
         // Refused as a whole. See the class comment: a partial push leaves some

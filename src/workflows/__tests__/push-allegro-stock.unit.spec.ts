@@ -213,6 +213,63 @@ describe("pushAllegroStock task-report pagination", () => {
   });
 });
 
+describe("pushAllegroStock: the mapping row is the authority", () => {
+  it("records a sku-mismatch on the row and pushes nothing for that offer", async () => {
+    // The seller-edit race, end to end. Discovery mapped o1 to SKU-1; the seller has since
+    // changed the sygnatura to SKU-OTHER. The row still authorises a write, so the old code
+    // re-derived the pairing from the live listing and pushed the WRONG variant's quantity
+    // to this listing. Now the disagreement is recorded and the offer is skipped.
+    const { allegro, client, result } = await (async () => {
+      const context = setup({
+        available: { inv_1: 9 },
+        live: [offerFixture({ external: { id: "SKU-OTHER" }, id: "o1", stock: { available: 5 } })],
+        rows: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+        variants: [{ id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" }],
+      });
+      return { ...context, result: await pushAllegroStock(context.container as never) };
+    })();
+
+    expect(client.submissions).toEqual([]);
+    expect(result.conflicted).toBe(1);
+    expect(result.error).toContain("contradict their mapping row");
+    // Durable, not just counted: visible in the admin, and it holds the offer out of the
+    // PRICE path too until somebody resolves it.
+    expect(allegro.offers[0]).toMatchObject({ conflict: "sku-mismatch", offer_id: null });
+    expect(allegro.offers[0]?.conflict_detail).toContain("SKU-OTHER");
+  });
+
+  it("counts a mapped offer that has vanished from the listing", async () => {
+    // Previously in no bucket at all, so an offer whose quantity was published nowhere left
+    // no trace in the run summary.
+    const context = setup({
+      live: [],
+      rows: [{ id: "row-1", offer_id: "o-gone", sku: "SKU-1" }],
+    });
+
+    const result = await pushAllegroStock(context.container as never);
+
+    expect(result.skippedUnmatched).toBe(1);
+    expect(result.error).toContain("could not be paired");
+    expect(result.complete).toBe(false);
+  });
+
+  it("reports an eligible variant that no mapped offer claims", async () => {
+    const context = setup({
+      live: [offerFixture({ external: { id: "SKU-1" }, id: "o1", stock: { available: 9 } })],
+      rows: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      variants: [
+        { id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" },
+        { id: "v2", inventoryItemIds: ["inv_2"], sku: "SKU-ORPHAN" },
+      ],
+    });
+
+    const result = await pushAllegroStock(context.container as never);
+
+    expect(result.skippedUnlinked).toBe(1);
+    expect(result.error).toContain("claimed by no mapped Allegro offer");
+  });
+});
+
 describe("pushAllegroStock scope warning", () => {
   it("warns that the whole catalogue is in scope when no sales channel is configured", async () => {
     // An unset channel makes every SKU-carrying variant eligible for a WRITE, and the
@@ -361,13 +418,35 @@ describe("pushAllegroStock", () => {
     expect(result).toMatchObject({ complete: false, eligible: 0, skippedInactive: 1 });
   });
 
-  it("treats a variant that does not manage inventory as unresolved, never as zero", async () => {
-    // Publishing 0 would delist it; publishing anything else would be fabricated.
+  it("skips a variant that does not manage inventory, never publishing zero for it", async () => {
+    // Publishing 0 would delist it; publishing anything else would be fabricated. It is now
+    // its OWN bucket rather than `unresolved`, because "structurally has no quantity" is a
+    // bounded permanent fact while `unresolved` means "could not read it" - and refusing
+    // the whole plan for the former meant one digital product with an Allegro offer wedged
+    // stock sync for the entire catalogue, indefinitely.
     const { client, result } = await runWith({
       variants: [{ id: "v1", inventoryItemIds: [], manageInventory: false, sku: "SKU-1" }],
     });
     expect(client.submissions).toEqual([]);
-    expect(result.unresolved).toBe(1);
+    expect(result.skippedNoInventory).toBe(1);
+    expect(result.unresolved).toBe(0);
+    // Reported and not complete, because its quantity is published nowhere.
+    expect(result.error).toContain("does not manage inventory");
+    expect(result.complete).toBe(false);
+  });
+
+  it("aborts the run when no stock location exists, rather than pushing zero everywhere", async () => {
+    // `retrieveAvailableQuantity` returns BigNumber(0) for an EMPTY location list - it does
+    // not fail - so every variant read as 0, the plan looked perfectly safe, and the run
+    // pushed a quantity of 0 across the whole catalogue and reported itself clean. A full
+    // marketplace delisting presented as a healthy sync.
+    const { allegro, client, container } = healthy({ stockLocationIds: [] });
+
+    await expect(pushAllegroStock(container as never)).rejects.toThrow(/no stock locations exist/u);
+
+    expect(client.submissions).toEqual([]);
+    expect(allegro.states.get("stock")).toMatchObject({ status: "error" });
+    expect(allegro.states.get("stock")?.last_error).toContain("no stock locations exist");
   });
 
   it("reports a 403 as the write-scope gap and raises the banner", async () => {

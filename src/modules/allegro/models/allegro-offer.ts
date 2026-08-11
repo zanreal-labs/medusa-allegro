@@ -54,12 +54,18 @@ const AllegroOffer = model.define("allegro_offer", {
    *   published to the channel.
    * - `no-offer` - a stored mapping whose offer has disappeared from the live
    *   listing, so `offer_id` was cleared.
+   * - `sku-mismatch` - the live offer contradicts this row: its sygnatura is now a
+   *   different SKU, its EAN no longer matches the mapped variant's barcode, or it
+   *   carries no key at all. Recorded by the stock loop at write time, which is the
+   *   only place the two are compared. Which variant's quantity belongs on the offer
+   *   is not a decision this plugin may take - re-pairing on the live value is how
+   *   one product's quantity lands on another product's listing.
    *
    * A conflicted row is held out of every write path. Counting them is not
    * enough: the offer stays visibly broken in the admin until it is resolved.
    */
   conflict: model
-    .enum(["missing-external-id", "duplicate-sku", "no-variant", "no-offer"])
+    .enum(["missing-external-id", "duplicate-sku", "no-variant", "no-offer", "sku-mismatch"])
     .nullable(),
   /** Human-readable detail for `conflict`, e.g. the competing offer ids. */
   conflict_detail: model.text().nullable(),

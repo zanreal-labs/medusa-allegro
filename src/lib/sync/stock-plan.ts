@@ -11,23 +11,79 @@ import type { AllegroOffer } from "../allegro/types";
  * assumes the inventory it is handed is already trustworthy and concerns itself
  * only with the marketplace side: which offers may be written to, and what.
  *
- * The skip taxonomy is the point of the function. Every offer that is NOT written
- * to falls into exactly one counted bucket, so a run that changes nothing can say
- * why. The buckets:
+ * ## The mapping row authorises the write AND supplies the pairing
  *
- * - `ambiguous` - the offer's key matches more than one eligible variant.
- * - `skippedInactive` - the offer is not ACTIVE, so its quantity is meaningless.
- * - `skippedUnlinked` - an eligible variant that no live offer claimed.
- * - `unresolved` - the offer's or the variant's quantity is not a usable integer,
- *   so the delta cannot be computed. Never treated as 0: pushing a guessed
- *   quantity is how an oversell or a silent delisting happens.
+ * Both, together, and that is the correctness argument. The planner used to take the
+ * authorisation from the mapping table but re-derive which VARIANT an offer belonged to
+ * from the live listing. The two could disagree: a seller editing a sygnatura between
+ * discovery and the push left offer A's row authorising a write whose quantity was
+ * computed from variant B, and nothing compared them. So the pairing travels with the
+ * authorisation (`AuthorizedOffer`), and the live listing is used only to VERIFY that it
+ * still agrees. A disagreement is a recorded conflict, never a silent re-pair.
+ *
+ * ## Every authorised offer lands in exactly one counted bucket
+ *
+ * That is a contract, not an aspiration: a run that changes nothing has to be able to say
+ * why for every offer it was allowed to touch. Offer-side buckets:
+ *
+ * - `alreadyInSync` - already carrying the desired quantity.
+ * - `mismatched` - planned for a write.
+ * - `ambiguous` - the row's SKU matches more than one eligible variant.
+ * - `skippedInactive` - not ACTIVE, so its quantity is meaningless.
+ * - `skippedNoInventory` - the variant structurally has no quantity to publish.
+ * - `skippedUnmatched` - absent from the listing, or its SKU matches no eligible variant.
+ * - `conflicted` - the live offer contradicts the mapping row.
+ * - `unresolved` - a quantity could not be READ on either side, so the delta is unknown.
+ *   Never treated as 0: pushing a guessed quantity is how an oversell or a silent
+ *   delisting happens.
+ *
+ * Plus one variant-side bucket, `skippedUnlinked`: an eligible variant no authorised offer
+ * claimed, so its quantity is never published anywhere.
  */
 
 /** An eligible variant's available quantity, as read from Medusa inventory. */
 export interface VariantStock {
   sku: string;
-  /** Available quantity at the configured location(s). Undefined = unreadable. */
+  /** Available quantity at the configured location(s). Absent when unavailable. */
   quantity?: number;
+  /**
+   * Why `quantity` is absent, when it is.
+   *
+   * - `no-inventory` - the variant structurally has none (does not manage inventory, or
+   *   has no inventory items). A bounded, permanent exclusion: the offer is skipped and
+   *   counted and the rest of the catalogue still syncs. Refusing the whole plan for this
+   *   meant one digital product with an Allegro offer wedged stock sync for every other
+   *   offer, indefinitely.
+   * - `unreadable` - the read failed. Unknown, and of unknown blast radius, so the whole
+   *   plan is refused.
+   */
+  absent?: "no-inventory" | "unreadable";
+  /** Barcode/EAN, matched against an offer's EAN when the offer carries no sygnatura. */
+  ean?: string;
+}
+
+/**
+ * An offer the mapping table AUTHORISES a write to, paired with the variant it records.
+ *
+ * Built from `allegro_offer` rows that are linked and unconflicted. Reading the pairing
+ * from here rather than from the live listing is what makes discovery's conflict detection
+ * actually bind on the write path.
+ */
+export interface AuthorizedOffer {
+  offerId: string;
+  /** The variant SKU the `allegro_offer` row records for this offer. */
+  sku: string;
+}
+
+/** Conflict codes this planner can record on a mapping row. */
+export type StockConflict = "sku-mismatch";
+
+/** A mapping row whose live offer contradicts it: recorded, skipped, counted. */
+export interface StockConflictRecord {
+  sku: string;
+  offerId: string;
+  conflict: StockConflict;
+  conflict_detail: string;
 }
 
 /** One quantity to set on one offer. */
@@ -58,7 +114,21 @@ export interface StockSyncSummary {
   /** Commands submitted but not confirmed terminal within the poll budget. */
   pending: number;
   skippedInactive: number;
+  /**
+   * Authorised offers whose variant has no quantity to publish at all (it does not manage
+   * inventory). A permanent, bounded exclusion rather than an unknown.
+   */
+  skippedNoInventory: number;
+  /**
+   * Authorised offers that could not be paired: absent from the live listing, or their
+   * row's SKU matches no eligible variant. Counted so they are not invisible - an offer in
+   * this bucket has its quantity published nowhere.
+   */
+  skippedUnmatched: number;
+  /** Eligible VARIANTS that no authorised offer claimed, so their quantity is unpublished. */
   skippedUnlinked: number;
+  /** Authorised offers whose live listing contradicts their mapping row. */
+  conflicted: number;
   /** Offers Allegro confirmed at the new quantity. */
   synced: number;
   unresolved: number;
@@ -66,6 +136,8 @@ export interface StockSyncSummary {
 
 export interface StockSyncPlan extends StockSyncSummary {
   changes: StockChange[];
+  /** Mapping rows to mark as conflicted, so every write path holds them out. */
+  conflicts: StockConflictRecord[];
 }
 
 /** Allegro accepts at most 1,000 offers in one quantity command. */
@@ -87,16 +159,29 @@ export const STOCK_TASK_PAGE_SIZE = 1000;
 export const STOCK_TASK_MAX_PAGES = 10;
 
 /**
- * Match live offers against variant stock and decide what to write.
+ * Decide what to write, from the authorised pairs, verified against the live listing.
  *
- * Matching is by the offer's sygnatura (`external.id`), with EAN as the fallback,
- * mirroring discovery - so a store whose mapping rows are healthy gets the same
- * answer either way, and a store mid-rename does not silently push to the wrong
- * offer.
+ * `authorized` drives the loop: those are the offers the mapping table permits a write to,
+ * each already paired with the variant its row records. The live `offers` supply the
+ * observed quantity and status, and are used to CHECK that the row still agrees with
+ * Allegro - never to re-derive the pairing.
+ *
+ * Verification, in order of what Allegro gives us:
+ *
+ * - Sygnatura present and different from the row's SKU: the seller renamed it between
+ *   discovery and now. A conflict. Re-pairing on the live value is what pushed SKU-B's
+ *   quantity onto product A's listing.
+ * - No sygnatura but an EAN: checked against the variant's barcode, the same key discovery
+ *   matched on. Note this is a genuine EAN-to-BARCODE comparison; the old code looked an
+ *   offer's EAN up in the SKU map, so an EAN-linked offer matched nothing, fell through
+ *   uncounted, and had its quantity published nowhere while the run reported success.
+ * - Neither: the offer carries no key at all, so nothing can corroborate the row. Also a
+ *   conflict, because a blanked sygnatura is the same seller edit as a renamed one.
  */
 export const planStockSync = (
   variants: readonly VariantStock[],
   offers: readonly AllegroOffer[],
+  authorized: readonly AuthorizedOffer[],
 ): StockSyncPlan => {
   const variantsBySku = new Map<string, VariantStock[]>();
   for (const variant of variants) {
@@ -104,33 +189,81 @@ export const planStockSync = (
     group.push(variant);
     variantsBySku.set(variant.sku, group);
   }
+  const offersById = new Map(offers.map((offer) => [offer.id, offer]));
 
   const changes: StockChange[] = [];
+  const conflicts: StockConflictRecord[] = [];
   let alreadyInSync = 0;
   let ambiguous = 0;
+  let conflicted = 0;
   let eligible = 0;
   let skippedInactive = 0;
+  let skippedNoInventory = 0;
+  let skippedUnmatched = 0;
   let unresolved = 0;
-  const matchedSkus = new Set<string>();
+  const claimedSkus = new Set<string>();
 
-  for (const offer of offers) {
-    const key = offer.external?.id?.trim() || offer.ean?.trim();
-    if (!key) {
+  for (const row of authorized) {
+    const offer = offersById.get(row.offerId);
+    if (!offer) {
+      // Authorised but absent from this listing: nothing to compare against and nothing to
+      // write to. Counted rather than skipped silently - its quantity is published nowhere.
+      skippedUnmatched += 1;
       continue;
     }
-    const matches = variantsBySku.get(key) ?? [];
+
+    const matches = variantsBySku.get(row.sku) ?? [];
     if (matches.length === 0) {
+      skippedUnmatched += 1;
       continue;
     }
     for (const match of matches) {
-      matchedSkus.add(match.sku);
+      claimedSkus.add(match.sku);
     }
     if (matches.length !== 1) {
       ambiguous += 1;
       continue;
     }
+    const variant = matches[0] as VariantStock;
+
+    const sygnatura = offer.external?.id?.trim();
+    const offerEan = offer.ean?.trim();
+    const variantEan = variant.ean?.trim();
+    if (sygnatura && sygnatura !== row.sku) {
+      conflicted += 1;
+      conflicts.push({
+        conflict: "sku-mismatch",
+        conflict_detail: `Offer ${offer.id} is mapped to SKU "${row.sku}" but now carries sygnatura "${sygnatura}" on Allegro. Nothing was written: the two disagree, so which variant's quantity belongs on this offer is not a decision this plugin may take. Fix the sygnatura on Allegro, or let discovery re-map it.`,
+        offerId: offer.id,
+        sku: row.sku,
+      });
+      continue;
+    }
+    if (!sygnatura) {
+      const eanAgrees = Boolean(offerEan && variantEan && offerEan === variantEan);
+      if (!eanAgrees) {
+        conflicted += 1;
+        conflicts.push({
+          conflict: "sku-mismatch",
+          conflict_detail: offerEan
+            ? `Offer ${offer.id} carries no sygnatura and its EAN "${offerEan}" does not match the barcode of the variant mapped to SKU "${row.sku}"${variantEan ? ` ("${variantEan}")` : " (which has none)"}. Nothing was written.`
+            : `Offer ${offer.id} carries neither a sygnatura nor an EAN, so nothing on Allegro corroborates its mapping to SKU "${row.sku}". Nothing was written. Set the sygnatura to "${row.sku}" on Allegro to restore it.`,
+          offerId: offer.id,
+          sku: row.sku,
+        });
+        continue;
+      }
+    }
+
     if (offer.publication?.status !== "ACTIVE") {
       skippedInactive += 1;
+      continue;
+    }
+    if (variant.absent === "no-inventory") {
+      // A permanent, bounded exclusion: this variant has no quantity to publish, and 0
+      // would delist the offer. It must NOT refuse the rest of the plan - doing so meant a
+      // single digital product with an Allegro offer wedged stock sync catalogue-wide.
+      skippedNoInventory += 1;
       continue;
     }
     eligible += 1;
@@ -139,7 +272,7 @@ export const planStockSync = (
       unresolved += 1;
       continue;
     }
-    const desired = matches[0]?.quantity;
+    const desired = variant.quantity;
     if (desired === undefined || !Number.isInteger(desired) || desired < 0) {
       unresolved += 1;
       continue;
@@ -153,7 +286,7 @@ export const planStockSync = (
 
   let skippedUnlinked = 0;
   for (const sku of variantsBySku.keys()) {
-    if (!matchedSkus.has(sku)) {
+    if (!claimedSkus.has(sku)) {
       skippedUnlinked += 1;
     }
   }
@@ -164,12 +297,16 @@ export const planStockSync = (
     changes,
     commands: 0,
     complete: false,
+    conflicted,
+    conflicts,
     eligible,
     failed: 0,
     mismatched: changes.length,
     pending: 0,
     skippedInactive,
+    skippedNoInventory,
     skippedUnlinked,
+    skippedUnmatched,
     synced: 0,
     unresolved,
   };
@@ -215,18 +352,33 @@ export const buildStockCommandChunks = (
 /**
  * Whether a plan is safe to execute at all.
  *
- * An ambiguous match or an unresolved quantity means the plan does not know the
- * whole truth about the catalogue, and a partial quantity push is worse than
- * none: it publishes a stock figure for some offers while leaving others at a
- * stale one, with no record of which is which. So the whole run is refused, and
- * the reason is reported.
+ * Refusal is reserved for UNKNOWNS, which is the distinction that matters. An ambiguous
+ * match or a quantity that could not be READ means the plan does not know the whole truth
+ * and cannot bound what it is missing, and a partial push in that state publishes a fresh
+ * figure for some offers while leaving others stale with no record of which is which.
+ *
+ * A KNOWN, bounded exclusion is different and does not refuse anything: an inactive offer,
+ * a variant that structurally has no inventory, an offer that contradicts its row, an
+ * unmatched pair. Each is counted, each is reported, and each leaves exactly one offer
+ * alone. Treating "this variant has no inventory to publish" as an unknown is what let one
+ * digital product with an Allegro offer refuse the entire catalogue's stock sync forever.
  */
 export const isStockPlanSafe = (plan: StockSyncPlan): boolean =>
   plan.ambiguous === 0 && plan.unresolved === 0;
 
-/** True when every eligible offer was accounted for, so nothing is left stale. */
+/**
+ * True when every authorised offer AND every eligible variant was accounted for, so
+ * nothing is left stale anywhere.
+ *
+ * Strictly stronger than plan safety: a safe plan can still leave offers untouched. Every
+ * bucket that means "this offer's quantity was not written" has to be empty, including the
+ * bounded ones, because `complete` is the assertion that Allegro now matches Medusa.
+ */
 export const isStockCoverageComplete = (plan: StockSyncPlan): boolean =>
   plan.ambiguous === 0 &&
   plan.unresolved === 0 &&
   plan.skippedInactive === 0 &&
+  plan.skippedNoInventory === 0 &&
+  plan.skippedUnmatched === 0 &&
+  plan.conflicted === 0 &&
   plan.skippedUnlinked === 0;

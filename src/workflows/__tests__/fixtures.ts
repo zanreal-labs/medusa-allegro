@@ -168,12 +168,17 @@ export const fakeAllegroService = (seed: {
           : categories,
       ),
     listAllegroOffers: (
-      filters: { sku?: string; offer_id?: string[] } = {},
+      filters: { sku?: string | string[]; offer_id?: string[] } = {},
       config: { take?: number } = {},
     ) => {
       let rows = offers.map((row) => ({ ...row }));
-      if (filters.sku) {
-        rows = rows.filter((row) => row.sku === filters.sku);
+      // An ARRAY as well as a scalar, because the generated CRUD surface accepts both
+      // (Mikro-ORM turns a list into `$in`) and the stock loop looks conflicted rows up in
+      // bulk. A fake that only understood the scalar form silently returned nothing for the
+      // bulk read, which would let a missing conflict write pass as green.
+      if (filters.sku !== undefined) {
+        const wanted = Array.isArray(filters.sku) ? filters.sku : [filters.sku];
+        rows = rows.filter((row) => wanted.includes(row.sku));
       }
       // Honoured, not ignored: the stock loop stamps `stock_synced_at` on exactly
       // the offers Allegro confirmed, and a fake that returned everything would let

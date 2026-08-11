@@ -184,29 +184,51 @@ export const listEligibleVariants = async (
 };
 
 /**
+ * One variant's available quantity, or the REASON it has none.
+ *
+ * The reason is the point. "Medusa has no quantity for this variant" and "we could not
+ * read Medusa's quantity" are different facts with different safe responses, and
+ * collapsing both into `undefined` forced the planner to treat them alike - which meant
+ * one digital product with an Allegro offer refused the whole catalogue's stock sync
+ * forever.
+ */
+export type VariantQuantity =
+  | { quantity: number }
+  /**
+   * The variant structurally has no quantity: it does not manage inventory, or has no
+   * inventory items. A bounded, permanent exclusion - so the offer is skipped and counted
+   * and the rest of the catalogue still syncs.
+   */
+  | { absent: "no-inventory" }
+  /**
+   * The quantity could not be READ: the inventory call threw, or no inventory module is
+   * registered. Unknown rather than absent, and unbounded in scope, so the planner
+   * refuses the whole plan.
+   */
+  | { absent: "unreadable" };
+
+/**
  * Available quantity per variant SKU, at the configured locations.
  *
- * Undefined for a variant whose quantity cannot be read, and that is a real
- * answer the stock planner counts as `unresolved` rather than pushing a guess.
- * The two cases:
+ * Never a fabricated number: a variant whose quantity is unavailable gets a reason
+ * instead, and the planner decides what that reason costs.
  *
- * - **A variant that does not manage inventory** has no meaningful quantity in
- *   Medusa at all. Publishing 0 would delist it; publishing anything else would
- *   be fabricated.
- * - **A read that threw** is a transient fault, and a transient fault must not
- *   look like a stock level.
- * - **No inventory module at all** is the same answer for every variant. Medusa
- *   always registers one, so this is a defensive branch rather than an expected
- *   state - but degrading to "unresolved" keeps the failure mode consistent with
- *   everything else here, and the planner then refuses the whole plan instead of
- *   the loop crashing.
+ * - **Does not manage inventory** (or has no inventory items) has no meaningful quantity
+ *   in Medusa at all. Publishing 0 would delist it, publishing anything else would be
+ *   fabricated, so it is `no-inventory` and its offer is skipped rather than blocking
+ *   everything else.
+ * - **A read that threw** is `unreadable`: a transient fault must not look like a stock
+ *   level, and its blast radius is unknown, so the plan is refused.
+ * - **No inventory module at all** is `unreadable` for every variant. Medusa always
+ *   registers one, so this is defensive, and refusing the plan is the right answer to a
+ *   catalogue-wide unknown.
  */
 export const readAvailableQuantities = async (
   container: MedusaContainer,
   variants: readonly CatalogVariant[],
   stockLocationIds: readonly string[],
-): Promise<Map<string, number | undefined>> => {
-  const quantities = new Map<string, number | undefined>();
+): Promise<Map<string, VariantQuantity>> => {
+  const quantities = new Map<string, VariantQuantity>();
   if (variants.length === 0) {
     return quantities;
   }
@@ -219,7 +241,7 @@ export const readAvailableQuantities = async (
   }
   if (!inventory) {
     for (const variant of variants) {
-      quantities.set(variant.sku, undefined);
+      quantities.set(variant.sku, { absent: "unreadable" });
     }
     return quantities;
   }
@@ -228,7 +250,7 @@ export const readAvailableQuantities = async (
 
   for (const variant of variants) {
     if (!variant.manageInventory || variant.inventoryItemIds.length === 0) {
-      quantities.set(variant.sku, undefined);
+      quantities.set(variant.sku, { absent: "no-inventory" });
       continue;
     }
     try {
@@ -236,13 +258,29 @@ export const readAvailableQuantities = async (
       // to exhaust a connection pool, and this runs on a schedule where latency is
       // not the constraint.
       let total = 0;
+      let readable = true;
       for (const itemId of variant.inventoryItemIds) {
         const available = await inventory.retrieveAvailableQuantity(itemId, [...locationIds]);
-        total += Number(available ?? 0);
+        // A null or undefined answer for ONE item must not silently contribute 0 to the
+        // sum: that understates the variant's stock by however much that item held, and
+        // an understated quantity on a marketplace is a lost sale at best and a delisting
+        // at worst. The whole VARIANT becomes unreadable instead.
+        const parsed =
+          available === null || available === undefined ? undefined : Number(available);
+        if (parsed === undefined || !Number.isFinite(parsed)) {
+          readable = false;
+          break;
+        }
+        total += parsed;
       }
-      quantities.set(variant.sku, Number.isFinite(total) ? Math.trunc(total) : undefined);
+      quantities.set(
+        variant.sku,
+        readable && Number.isFinite(total)
+          ? { quantity: Math.trunc(total) }
+          : { absent: "unreadable" },
+      );
     } catch {
-      quantities.set(variant.sku, undefined);
+      quantities.set(variant.sku, { absent: "unreadable" });
     }
   }
   return quantities;
@@ -251,9 +289,18 @@ export const readAvailableQuantities = async (
 /**
  * The locations to sum a quantity over: the configured ones, or every location.
  *
- * `retrieveAvailableQuantity` requires an explicit location list, so "all
- * locations" has to be materialised rather than passed as an empty array - an
- * empty list reads as "nowhere" and would report every variant as out of stock.
+ * `retrieveAvailableQuantity` requires an explicit location list, so "all locations" has
+ * to be materialised rather than passed as an empty array.
+ *
+ * An empty resolved list ABORTS the run, and this is the sharpest edge in the stock path.
+ * `InventoryModuleService.retrieveAvailableQuantity` opens with
+ * `if (locationIds.length === 0) return new BigNumber(0)` - verified in
+ * `@medusajs/inventory` - so an empty list does not fail, it answers ZERO. Every variant
+ * would read as available: 0, the planner would see no unresolved quantities, and the run
+ * would push a quantity of 0 across the whole catalogue and report itself clean. That is
+ * a full marketplace delisting presented as a healthy sync.
+ *
+ * A store with no stock locations is a configuration state, not a stock level.
  */
 const resolveStockLocationIds = async (
   container: MedusaContainer,
@@ -264,5 +311,12 @@ const resolveStockLocationIds = async (
   }
   const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
   const { data } = await query.graph({ entity: "stock_location", fields: ["id"] });
-  return data.map((row) => row.id as string).filter(Boolean);
+  const ids = data.map((row) => row.id as string).filter(Boolean);
+  if (ids.length === 0) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "medusa-allegro: no stock locations exist, so available quantity cannot be read for any variant. Refusing the stock run rather than reading every quantity as 0, which would push a zero quantity across the whole catalogue and delist it on Allegro while reporting a clean sync. Create a stock location, or set the `stockLocationIds` option.",
+    );
+  }
+  return ids;
 };
