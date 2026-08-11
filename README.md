@@ -621,6 +621,14 @@ CONSUMING the journal; a store that has shipped an order still wants the buyer t
 it shipped, and suppressing that would leave a real shipment invisible on the
 marketplace with nothing to correct it later.
 
+The residual gap, stated plainly because it is a real one: there is therefore no switch
+that stops this single write while leaving order IMPORT running. Disconnecting the
+account stops every write, import included. If you need to stop the write-back
+specifically - say the mapping is suspect and you are worried about marking the wrong
+Allegro order as shipped - disconnect, fix the mapping, and reconnect; the drain
+bootstraps its cursor rather than replaying, so use the import-window action to bring in
+anything that arrived while it was down.
+
 ## Turning the writers on
 
 The safe order, and why each step comes where it does:
