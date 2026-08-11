@@ -123,26 +123,26 @@ export const readFailureState = (raw: unknown): FailureState => {
 export const isEmptyFailureState = (state: FailureState): boolean =>
   Object.keys(state.streaks).length === 0 && Object.keys(state.quarantined).length === 0;
 
-/** Drop entries older than `ttlMs`, then cap what remains by `order` (kept = first). */ export const pruneEntries =
-  <T extends { since: string }>(
-    entries: [string, T][],
-    ttlMs: number,
-    cap: number,
-    order: (a: T, b: T) => number,
-    now: number = Date.now(),
-  ): Record<string, T> => {
-    const cutoff = now - ttlMs;
-    const live = entries.filter(([, entry]) => {
-      const since = Date.parse(entry.since);
-      // An unparseable `since` is kept rather than dropped: it is corrupt
-      // bookkeeping, and silently discarding it would silently un-quarantine an
-      // item the loop had given up on.
-      return !Number.isFinite(since) || since >= cutoff;
-    });
-    const kept =
-      live.length > cap ? live.toSorted(([, a], [, b]) => order(a, b)).slice(0, cap) : live;
-    return Object.fromEntries(kept);
-  };
+/** Drop entries older than `ttlMs`, then cap what remains by `order` (kept = first). */
+export const pruneEntries = <T extends { since: string }>(
+  entries: [string, T][],
+  ttlMs: number,
+  cap: number,
+  order: (a: T, b: T) => number,
+  now: number = Date.now(),
+): Record<string, T> => {
+  const cutoff = now - ttlMs;
+  const live = entries.filter(([, entry]) => {
+    const since = Date.parse(entry.since);
+    // An unparseable `since` is kept rather than dropped: it is corrupt
+    // bookkeeping, and silently discarding it would silently un-quarantine an
+    // item the loop had given up on.
+    return !Number.isFinite(since) || since >= cutoff;
+  });
+  const kept =
+    live.length > cap ? live.toSorted(([, a], [, b]) => order(a, b)).slice(0, cap) : live;
+  return Object.fromEntries(kept);
+};
 
 /** What one run did to the items it attempted. */
 export interface FailureOutcome {

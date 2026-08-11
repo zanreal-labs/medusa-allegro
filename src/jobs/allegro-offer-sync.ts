@@ -1,6 +1,8 @@
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import { runOfferDiscovery } from "../workflows/discover-allegro-offers";
+import { runPriceAutomationMonitor } from "../workflows/run-price-automation-monitor";
+import { syncAllegroPrices } from "../workflows/sync-allegro-prices";
 
 const JOB_NAME = "allegro-offer-sync";
 
@@ -12,7 +14,10 @@ const JOB_NAME = "allegro-offer-sync";
  *
  * 1. **Offer discovery** reconciles the SKU-to-offer mapping, sweeps promotion
  *    state, and discovers categories. Read-only against Allegro.
- * 2. (wave 3) the price-automation monitor, then the price-sync write loop.
+ * 2. **The price-automation monitor** records what each offer's pricing actually
+ *    looks like, and its drift. Also read-only.
+ * 3. **Price sync** attaches rules and asserts bounds. The only writer here, and
+ *    the only stage with a kill switch.
  *
  * They are separate workflows with separate `allegro_sync_state` rows, separate
  * single-flight claims and separate kill switches, so each is independently
@@ -21,9 +26,15 @@ const JOB_NAME = "allegro-offer-sync";
  * paging a full catalogue is the expensive part of all three, and doing it three
  * times an hour is how a well-behaved integration earns a rate limit.
  *
- * Each stage is independently guarded, so a stage that skips (kill switch, claim
- * held, not connected) does not stop the next one - the state rows say what
- * happened.
+ * The order matters. Discovery establishes which offer owns which SKU and which
+ * mappings are conflicted, and price sync refuses to write to anything conflicted -
+ * so running price sync against a stale mapping is exactly the case where a command
+ * lands on the wrong offer. The monitor runs in between so the observed state the
+ * admin shows is the state price sync then acted on.
+ *
+ * Discovery skipping aborts the chain: nothing downstream can run against a mapping
+ * it has no reason to trust. The later stages are individually guarded, so one of
+ * them skipping (kill switch, claim held) does not stop the other.
  */
 export default async function allegroOfferSyncJob(container: MedusaContainer): Promise<void> {
   const logger = container.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
@@ -31,7 +42,6 @@ export default async function allegroOfferSyncJob(container: MedusaContainer): P
   const discovery = await runOfferDiscovery(container);
   if (discovery.result.skipped) {
     logger.info(`[${JOB_NAME}] offer discovery skipped: ${discovery.result.skipped}`);
-    // Nothing downstream can run without a mapping refresh it can trust.
     return;
   }
 
@@ -44,6 +54,36 @@ export default async function allegroOfferSyncJob(container: MedusaContainer): P
   );
   if (result.error) {
     logger.warn(`[${JOB_NAME}] discovery finished with findings: ${result.error}`);
+  }
+
+  // The listing discovery already verified is passed through, so neither of the
+  // stages below pages the catalogue again.
+  const monitor = await runPriceAutomationMonitor(container, discovery.listing);
+  if (monitor.skipped) {
+    logger.info(`[${JOB_NAME}] price-automation monitor skipped: ${monitor.skipped}`);
+  } else {
+    logger.info(
+      `[${JOB_NAME}] monitor: scanned=${monitor.scanned} drift=${monitor.drift} ` +
+        `updated=${monitor.updated} transitions=${monitor.transitions} ` +
+        `notObserved=${monitor.notObserved}`,
+    );
+    if (monitor.error) {
+      logger.warn(`[${JOB_NAME}] monitor finished with findings: ${monitor.error}`);
+    }
+  }
+
+  const prices = await syncAllegroPrices(container, discovery.listing);
+  if (prices.skipped) {
+    logger.info(`[${JOB_NAME}] price sync skipped: ${prices.skipped}`);
+    return;
+  }
+  logger.info(
+    `[${JOB_NAME}] prices: scanned=${prices.scanned} synced=${prices.synced} ` +
+      `alreadyInSync=${prices.alreadyInSync} pending=${prices.pending} failed=${prices.failed} ` +
+      `capped=${prices.capped} conflicted=${prices.conflicted}`,
+  );
+  if (prices.error) {
+    logger.warn(`[${JOB_NAME}] price sync finished with findings: ${prices.error}`);
   }
 }
 
