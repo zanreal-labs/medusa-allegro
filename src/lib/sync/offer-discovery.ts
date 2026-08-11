@@ -247,6 +247,13 @@ export const planOfferDiscovery = (input: {
   // mapping already points at it - which is the case where an operator can act.
   const noKeyOfferIds = new Set(noKeyOffers.map((offer) => offer.id));
 
+  // A SKU the offers pass already ruled on. The unlink pass must not add a second
+  // conflict for it: a contested SKU would otherwise be recorded as `duplicate-sku`
+  // and then immediately overwritten with `no-offer`, which is both wrong (the
+  // offers are right there in the listing) and strictly less actionable, since the
+  // competing offer ids are what an operator needs.
+  const alreadyConflicted = new Set(conflicts.map((conflict) => conflict.sku));
+
   const unlink: string[] = [];
   if (listingComplete && offers.length > 0) {
     for (const row of stored) {
@@ -258,10 +265,13 @@ export const planOfferDiscovery = (input: {
         continue;
       }
       // Either the offer has gone from the listing, or it now resolves to a
-      // different SKU (a sygnatura rename). Both leave the stored link
-      // misattributed, and a misattributed link is what makes a quantity push
-      // land on someone else's offer.
+      // different SKU (a sygnatura rename), or the SKU has become contested. All
+      // three leave the stored link misattributed, and a misattributed link is what
+      // makes a quantity push land on someone else's offer.
       unlink.push(row.sku);
+      if (alreadyConflicted.has(row.sku)) {
+        continue;
+      }
       if (noKeyOfferIds.has(linked)) {
         conflicts.push({
           conflict: "missing-external-id",

@@ -80,6 +80,26 @@ export interface AllegroSyncStateRow {
 }
 
 /**
+ * The configuration the sync engines read.
+ *
+ * A structural subset of the resolved options, carrying no credential and no OAuth
+ * surface. It lives here rather than in `lib/options` because it is defined by what
+ * the engines need, and that is a property of this module.
+ */
+export interface AllegroSyncOptions {
+  automationRules?: { promoted: string; standard: string };
+  changeCap: number;
+  costsModuleKey: string;
+  marketplaceId: string;
+  regionId?: string;
+  salesChannelId?: string;
+  salesChannelName?: string;
+  srpMetadataKey?: string;
+  srpPriceListId?: string;
+  stockLocationIds: string[];
+}
+
+/**
  * What a loop persists at the end of a run.
  *
  * `counts` is `Record<string, unknown>` rather than a union of the per-provider
@@ -187,6 +207,31 @@ class AllegroModuleService extends MedusaService({
   /** Configuration that is safe to return to a caller. No secret material. */
   getPublicOptions(): Promise<AllegroPublicOptions> {
     return Promise.resolve(toPublicAllegroOptions(this.options_));
+  }
+
+  /**
+   * The configuration the sync engines read.
+   *
+   * Distinct from `getPublicOptions` because the engines need fields the admin has
+   * no business seeing (`costsModuleKey`, `regionId`) and none of the OAuth surface
+   * (`redirectPath`, `scopes`). Both are narrowings of the resolved options, and
+   * neither carries the client secret or the encryption key - `getOptions` stays
+   * protected precisely so nothing outside the service can reach those.
+   */
+  getSyncOptions(): Promise<AllegroSyncOptions> {
+    const o = this.options_;
+    return Promise.resolve({
+      automationRules: o.automationRules,
+      changeCap: o.changeCap,
+      costsModuleKey: o.costsModuleKey,
+      marketplaceId: o.marketplaceId,
+      regionId: o.regionId,
+      salesChannelId: o.salesChannelId,
+      salesChannelName: o.salesChannelName,
+      srpMetadataKey: o.srpMetadataKey,
+      srpPriceListId: o.srpPriceListId,
+      stockLocationIds: o.stockLocationIds,
+    });
   }
 
   /**

@@ -250,6 +250,29 @@ describe("planOfferDiscovery", () => {
     expect(result.unlink).toEqual(["SKU-1"]);
   });
 
+  it("records exactly one conflict for a contested SKU that also had a stored link", () => {
+    // Both passes have an opinion about this SKU. The offers pass wins, because
+    // `duplicate-sku` names the competing offer ids an operator needs, whereas
+    // `no-offer` would claim the offer is absent from a listing it is plainly in.
+    const result = plan({
+      offers: [linked("o1", "SKU-1"), linked("o2", "SKU-1")],
+      stored: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      variants: [variant("v1", "SKU-1")],
+    });
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]).toMatchObject({ conflict: "duplicate-sku", sku: "SKU-1" });
+  });
+
+  it("records exactly one conflict for an unmatched SKU that also had a stored link", () => {
+    const result = plan({
+      offers: [linked("o1", "SKU-GHOST")],
+      stored: [{ id: "row-1", offer_id: "o1", sku: "SKU-GHOST" }],
+      variants: [],
+    });
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]).toMatchObject({ conflict: "no-variant" });
+  });
+
   it("records an unreadable offer quantity as null, not zero", () => {
     const result = plan({
       offers: [linked("o1", "SKU-1", { stock: {} })],
