@@ -27,11 +27,31 @@ const IV_BYTES = 12;
 const TAG_BYTES = 16;
 
 /**
+ * The only two spellings of a 32-byte base64 value.
+ *
+ * 32 bytes encode to 43 payload characters plus one `=` of padding. The standard
+ * alphabet is what `openssl rand -base64 32` emits; the URL-safe one is what
+ * several secret managers hand back, and its padding is conventionally dropped,
+ * hence the optional `=`.
+ *
+ * The encoding has to be checked BEFORE decoding, because `Buffer.from(s,
+ * "base64")` never throws: it silently skips every character outside the
+ * alphabet and stops at the first padding it finds. Without these patterns,
+ * `"not-a-key-!!!$$$" + 40 more junk characters` decodes to something 32 bytes
+ * long and is accepted as a key.
+ */
+const KEY_BASE64_PATTERN = /^[A-Za-z0-9+/]{43}=$/;
+const KEY_BASE64URL_PATTERN = /^[A-Za-z0-9_-]{43}=?$/;
+
+/**
  * Decode and validate the configured key.
  *
- * The key is a base64-encoded 32-byte value. Anything shorter is rejected
- * loudly rather than stretched: silently accepting a weak key is how an
- * integration ends up with tokens that are encrypted in name only.
+ * The key is a base64-encoded 32-byte value. Anything else is rejected loudly
+ * rather than stretched or silently repaired: accepting a weak key is how an
+ * integration ends up with tokens that are encrypted in name only. The
+ * all-zero key gets its own rejection because it is the value a lazily encoded
+ * placeholder (`"A".repeat(43)`) decodes to, and it is a perfectly well-formed
+ * 32 bytes that AES will happily use.
  */
 export const decodeEncryptionKey = (encryptionKey: string): Buffer => {
   const trimmed = (encryptionKey ?? "").trim();
@@ -41,12 +61,13 @@ export const decodeEncryptionKey = (encryptionKey: string): Buffer => {
     );
   }
 
-  let key: Buffer;
-  try {
-    key = Buffer.from(trimmed, "base64");
-  } catch {
-    throw new Error("medusa-allegro: `encryptionKey` must be base64-encoded.");
+  if (!(KEY_BASE64_PATTERN.test(trimmed) || KEY_BASE64URL_PATTERN.test(trimmed))) {
+    throw new Error(
+      `medusa-allegro: \`encryptionKey\` must be a base64-encoded ${KEY_BYTES}-byte value (43 characters plus "="). Generate one with \`openssl rand -base64 32\`.`,
+    );
   }
+
+  const key = Buffer.from(trimmed, "base64");
 
   if (key.length !== KEY_BYTES) {
     throw new Error(
@@ -54,11 +75,30 @@ export const decodeEncryptionKey = (encryptionKey: string): Buffer => {
     );
   }
 
+  if (key.every((byte) => byte === 0)) {
+    throw new Error(
+      `medusa-allegro: \`encryptionKey\` decodes to ${KEY_BYTES} zero bytes, which is a placeholder rather than a key. Generate one with \`openssl rand -base64 32\`.`,
+    );
+  }
+
   return key;
 };
 
-/** Seal a UTF-8 string. Returns the packed base64 envelope. */
+/**
+ * Seal a UTF-8 string. Returns the packed base64 envelope.
+ *
+ * The empty string is rejected rather than sealed. Its envelope is exactly
+ * `IV || tag` with no ciphertext, which `decryptValue` cannot tell apart from a
+ * truncated envelope and therefore refuses - so encrypting it would produce a
+ * value that can never be read back. A caller with nothing to store should
+ * write NULL instead (which is what the nullable token columns are for).
+ */
 export const encryptValue = (plaintext: string, encryptionKey: string): string => {
+  if (!plaintext) {
+    throw new Error(
+      "medusa-allegro: refusing to encrypt an empty value - it would seal into an envelope that cannot be decrypted. Store NULL instead.",
+    );
+  }
   const key = decodeEncryptionKey(encryptionKey);
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv(ALGORITHM, key, iv);

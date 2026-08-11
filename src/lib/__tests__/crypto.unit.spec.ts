@@ -13,9 +13,36 @@ describe("decodeEncryptionKey", () => {
     expect(() => decodeEncryptionKey("")).toThrow(/is required/);
   });
 
+  it("accepts a base64url 32-byte key, padded or not", () => {
+    const raw = randomBytes(32);
+    expect(decodeEncryptionKey(raw.toString("base64url"))).toHaveLength(32);
+    expect(decodeEncryptionKey(`${raw.toString("base64url")}=`)).toHaveLength(32);
+  });
+
   it("rejects a key of the wrong length", () => {
     expect(() => decodeEncryptionKey(randomBytes(16).toString("base64"))).toThrow(
-      /exactly 32 bytes/,
+      /base64-encoded 32-byte value/,
+    );
+  });
+
+  it('rejects the "A".repeat(43) placeholder, which decodes to an all-zero key', () => {
+    // Buffer.from(_, "base64") happily turns this into 32 zero bytes, and AES
+    // will use it. Length alone is not a validity check.
+    expect(() => decodeEncryptionKey("A".repeat(43))).toThrow(/zero bytes/);
+    expect(() => decodeEncryptionKey(`${"A".repeat(43)}=`)).toThrow(/zero bytes/);
+  });
+
+  it("rejects mangled base64 instead of silently dropping the invalid characters", () => {
+    // 44 characters, so a length check would pass; "$" is not in either
+    // alphabet, and Buffer.from would just skip it.
+    const mangled = `$$$${randomBytes(32).toString("base64").slice(3)}`;
+    expect(mangled).toHaveLength(44);
+    expect(() => decodeEncryptionKey(mangled)).toThrow(/base64-encoded 32-byte value/);
+  });
+
+  it("rejects a key that mixes the two alphabets", () => {
+    expect(() => decodeEncryptionKey(`+_${"A".repeat(41)}=`)).toThrow(
+      /base64-encoded 32-byte value/,
     );
   });
 });
@@ -59,6 +86,12 @@ describe("encryptValue / decryptValue", () => {
     expect(() => decryptValue(randomBytes(20).toString("base64"), key)).toThrow(
       /truncated or malformed/,
     );
+  });
+
+  it("refuses to seal an empty value, rather than produce an unreadable envelope", () => {
+    // An empty plaintext packs to iv + tag with no ciphertext, which
+    // decryptValue cannot distinguish from a truncated envelope.
+    expect(() => encryptValue("", key)).toThrow(/empty value/);
   });
 });
 
