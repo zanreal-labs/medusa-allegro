@@ -819,9 +819,45 @@ const toCounts = (summary: PriceSyncSummary): Record<string, unknown> => ({
 export interface SingleOfferPushResult {
   ok: boolean;
   /** What happened, so the admin can phrase it without parsing the message. */
-  status: "synced" | "noop" | "skipped" | "pending" | "error";
+  status: "synced" | "noop" | "skipped" | "pending" | "error" | "rate-limited";
   message: string;
 }
+
+/**
+ * The rolling window the manual-push blast radius is measured over.
+ *
+ * One hour, matched to the hourly scheduled pass, so the two paths respect the same budget
+ * over the same period.
+ */
+export const MANUAL_PUSH_WINDOW_MS = 60 * 60_000;
+
+/**
+ * `pushed_by` values that are this plugin's own loops rather than a human.
+ *
+ * The manual-push cap counts everything that is NOT one of these, so a new automated
+ * writer must be added here or it will consume an operator's budget.
+ */
+export const AUTOMATED_PUSH_SOURCES = ["price-sync", "price-automation-monitor"];
+
+/**
+ * How many manual pushes have landed in the rolling window.
+ *
+ * `take` is the cap itself: the only question is whether the budget is already spent, so
+ * reading one page bounded by the cap answers it without scanning the audit.
+ */
+const countRecentManualPushes = async (
+  allegro: AllegroModuleService,
+  cap: number,
+): Promise<number> => {
+  const rows = (await allegro.listAllegroPricePushes(
+    {
+      pushed_at: { $gte: new Date(Date.now() - MANUAL_PUSH_WINDOW_MS) },
+      pushed_by: { $nin: AUTOMATED_PUSH_SOURCES },
+    },
+    { take: cap },
+  )) as unknown as unknown[];
+  return rows.length;
+};
 
 /**
  * Push one offer, on an explicit operator action.
@@ -834,6 +870,19 @@ export interface SingleOfferPushResult {
  * A SUCCESSFUL manual push is also the quarantine remedy: it clears the offer from
  * both failure maps, so the loop resumes correcting it automatically from the next
  * tick instead of the operator having to repair it twice.
+ *
+ * ## The blast-radius cap
+ *
+ * Each call takes the claim, so calls serialise - but serialising is not bounding. Nothing
+ * stopped an operator, or far more likely a script, from looping over this route and
+ * repricing the entire catalogue: `changeCap` bounds the SCHEDULED loop to a number of
+ * commands per run precisely so a bad plan cannot reprice everything before a human sees it,
+ * and a loop over single-SKU calls walked straight around that. So manual pushes share the
+ * same budget, counted over a rolling hour against `changeCap`, and a caller above it is
+ * refused with `rate-limited` rather than served.
+ *
+ * The count comes from the audit table's `pushed_by`, which already distinguishes a human
+ * from the loop, so the cap needs no new state and survives a restart.
  */
 export const pushSingleAllegroOffer = async (
   container: MedusaContainer,
@@ -930,6 +979,24 @@ export const pushSingleAllegroOffer = async (
             status: "error",
           },
           { lastError: "the `automationRules` option is not configured" },
+        );
+      }
+
+      // Checked BEFORE any planning or Allegro read, so a script hammering this route is
+      // refused as cheaply as possible rather than being allowed to burn the rate limit on
+      // work that will not be used.
+      const recentManual = await countRecentManualPushes(allegro, options.changeCap);
+      if (recentManual >= options.changeCap) {
+        return settle(
+          {
+            message: `Refused: ${recentManual} manual push(es) have already been made in the last hour, which is the \`changeCap\` budget (${options.changeCap}). Manual pushes share the scheduled loop's blast radius on purpose, so a script cannot reprice more of the catalogue than one run is allowed to. Wait for the window to roll, or raise \`changeCap\` deliberately.`,
+            ok: false,
+            status: "rate-limited",
+          },
+          // Explicitly the STANDING line, not a failure line. Nothing is wrong with the
+          // provider - the caller was simply over budget - so this must neither invent a
+          // provider error nor erase whatever the scheduled loop last reported.
+          { lastError: standingLine(priorScopeMissing) },
         );
       }
 

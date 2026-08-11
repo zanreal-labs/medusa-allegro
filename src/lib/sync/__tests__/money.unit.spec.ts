@@ -49,3 +49,33 @@ describe("formatAmount", () => {
     expect(formatAmount(45.5)).toBe("45.50");
   });
 });
+
+describe("parseAmount strictness", () => {
+  it("refuses a partially-numeric string instead of returning its leading digits", () => {
+    // `Number.parseFloat` stops at the first character it cannot use and returns what it has,
+    // so each of these silently became a WRONG number in a money field rather than a refusal -
+    // and downstream a partial parse is indistinguishable from a good one.
+    expect(parseAmount("12abc")).toBeUndefined();
+    expect(parseAmount("1 234,56")).toBeUndefined();
+    expect(parseAmount("12.")).toBeUndefined();
+    expect(parseAmount("199,99")).toBeUndefined();
+    expect(parseAmount("--5")).toBeUndefined();
+    expect(parseAmount("1e3")).toBeUndefined();
+    expect(parseAmount("  ")).toBeUndefined();
+  });
+
+  it("still accepts the decimal strings Allegro actually sends", () => {
+    expect(parseAmount("233.21")).toBe(233.21);
+    expect(parseAmount("0")).toBe(0);
+    expect(parseAmount("-12.50")).toBe(-12.5);
+    expect(parseAmount(" 199.99 ")).toBe(199.99);
+    expect(parseAmount("+8.00")).toBe(8);
+  });
+
+  it("passes finite numbers through and refuses non-finite ones", () => {
+    expect(parseAmount(199.99)).toBe(199.99);
+    expect(parseAmount(0)).toBe(0);
+    expect(parseAmount(Number.NaN)).toBeUndefined();
+    expect(parseAmount(Number.POSITIVE_INFINITY)).toBeUndefined();
+  });
+});

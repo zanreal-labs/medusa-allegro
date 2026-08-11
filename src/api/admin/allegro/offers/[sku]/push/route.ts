@@ -1,5 +1,8 @@
 import type { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http";
-import { pushSingleAllegroOffer } from "../../../../../../workflows/sync-allegro-prices";
+import {
+  MANUAL_PUSH_WINDOW_MS,
+  pushSingleAllegroOffer,
+} from "../../../../../../workflows/sync-allegro-prices";
 
 /**
  * POST /admin/allegro/offers/:sku/push
@@ -15,10 +18,15 @@ import { pushSingleAllegroOffer } from "../../../../../../workflows/sync-allegro
  * audit is append-only and it is the only bounds memory there is, so knowing which
  * pushes were a human and which were the loop is worth the column.
  *
- * Always answers 200 with the outcome, including for a refusal. Every non-success
- * here is an expected, reportable state - the kill switch is on, the claim is held,
- * the offer is ineligible, the token cannot write - and each needs its own sentence
- * on screen rather than a status code the client has to interpret.
+ * Answers 200 with the outcome for every expected refusal - the kill switch is on, the claim
+ * is held, the offer is ineligible, the token cannot write - because each needs its own
+ * sentence on screen rather than a status code the client has to interpret.
+ *
+ * The ONE exception is the blast-radius cap, which answers 429. That refusal exists for
+ * scripts rather than for humans: nothing stopped a loop over this route from repricing the
+ * whole catalogue around `changeCap`, and a script needs a machine-readable signal to back
+ * off on. `Retry-After` is set to the rolling window so a well-behaved client knows how long
+ * to wait.
  */
 export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse): Promise<void> {
   const sku = decodeURIComponent(req.params.sku as string);
@@ -26,5 +34,10 @@ export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse)
 
   const result = await pushSingleAllegroOffer(req.scope, sku, actorId);
 
+  if (result.status === "rate-limited") {
+    res.setHeader("Retry-After", String(Math.ceil(MANUAL_PUSH_WINDOW_MS / 1000)));
+    res.status(429).json(result);
+    return;
+  }
   res.json(result);
 }

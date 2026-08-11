@@ -295,6 +295,23 @@ const AllegroOrdersPage = () => {
                 </Table.Cell>
                 <Table.Cell className="txt-compact-xsmall">
                   {order.total_to_pay ? `${order.total_to_pay} ${order.currency ?? ""}` : "-"}
+                  {/*
+                    A disputed total is shown next to the figure it disputes, not tucked into a
+                    separate column. The order exists and the sale is real; what needs a human
+                    is the disagreement about how much it was for.
+                  */}
+                  {order.conflict ? (
+                    <div className="mt-1">
+                      <Badge color="orange" size="2xsmall">
+                        {order.conflict}
+                      </Badge>
+                      {order.conflict_detail ? (
+                        <div className="text-ui-fg-subtle txt-compact-xsmall mt-1">
+                          {order.conflict_detail}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </Table.Cell>
                 <Table.Cell className="text-ui-fg-subtle txt-compact-xsmall">
                   {formatDate(order.last_event_at)}

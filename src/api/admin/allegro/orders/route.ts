@@ -17,7 +17,12 @@ import type AllegroModuleService from "../../../../modules/allegro/service";
  * operator can decide between repairing it and importing a window.
  *
  * Query parameters: `conflict=1` for orders with an unmapped line, `error=1` for
- * orders carrying a last error, plus `limit` / `offset`.
+ * orders carrying a last error, `totalMismatch=1` for orders whose Medusa total disagrees
+ * with what Allegro says the buyer paid, plus `limit` / `offset`.
+ *
+ * `totalMismatchCount` is returned unconditionally, alongside the quarantine list and for
+ * the same reason: a disputed total is a standing to-do that no run summary preserves, and an
+ * operator has to be able to see there IS one without already filtering for it.
  */
 
 const MAX_LIMIT = 200;
@@ -47,8 +52,13 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
   if (isTruthyFlag(query.error)) {
     filters.last_error = { $ne: null };
   }
+  if (isTruthyFlag(query.totalMismatch)) {
+    // `$ne: null` rather than naming the code, so a code added later shows up here without
+    // anyone remembering to update the filter.
+    filters.conflict = { $ne: null };
+  }
 
-  const [state, [orders, count]] = await Promise.all([
+  const [state, [orders, count], totalMismatchCount] = await Promise.all([
     allegro.getSyncState(ALLEGRO_SYNC_PROVIDERS.ORDERS),
     allegro.listAndCountAllegroOrders(filters, {
       // Newest event first: the orders somebody is looking for are the recent ones.
@@ -56,6 +66,9 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
       skip: offset,
       take: limit,
     }),
+    allegro.listAndCountAllegroOrders({ conflict: { $ne: null } }, { take: 0 }).then(
+      ([, mismatches]) => mismatches,
+    ),
   ]);
 
   res.json({
@@ -68,5 +81,6 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
     orders,
     quarantined: listQuarantined(state?.failures),
     status: state?.status ?? "idle",
+    totalMismatchCount,
   });
 }

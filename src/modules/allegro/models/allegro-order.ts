@@ -40,6 +40,20 @@ const AllegroOrder = model.define("allegro_order", {
    * drain depends on that idempotency.
    */
   checkout_form_id: model.text().unique(),
+  /**
+   * A reconciliation problem with this order, when it has one. Null is healthy.
+   *
+   * - `total-mismatch` - the Medusa order's total does not equal the `totalToPay` Allegro
+   *   recorded for the form, compared to the grosz in the same currency.
+   *
+   * Deliberately NOT a reason to refuse or roll back the order. The sale happened on
+   * Allegro whatever Medusa's arithmetic says, and an order nobody can see is not a safer
+   * outcome than one that is visibly disputed. It is recorded, counted and surfaced so a
+   * human decides, which is the same trade `line_conflicts` makes.
+   */
+  conflict: model.enum(["total-mismatch"]).nullable(),
+  /** Human-readable detail for `conflict`: both figures, and the benign-cause hint. */
+  conflict_detail: model.text().nullable(),
   /** ISO currency of `total_to_pay`, verbatim from Allegro. */
   currency: model.text().nullable(),
   /**

@@ -28,7 +28,19 @@ export const parseAmount = (value?: string | number | null): number | undefined 
   if (value === null || value === undefined || value === "") {
     return undefined;
   }
-  const parsed = typeof value === "number" ? value : Number.parseFloat(value);
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  const trimmed = value.trim();
+  // Validated BEFORE parsing, and strictly. `Number.parseFloat` stops at the first character
+  // it cannot use and returns what it already has, so `"12abc"` parsed as 12, `"1 234,56"` as
+  // 1, and `"12."` as 12. Each of those is a silently WRONG number in a money field rather
+  // than a refusal, and downstream a partial parse is indistinguishable from a good one -
+  // which is the exact failure mode this module exists to prevent.
+  if (!/^[+-]?\d+(\.\d+)?$/u.test(trimmed)) {
+    return undefined;
+  }
+  const parsed = Number.parseFloat(trimmed);
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 

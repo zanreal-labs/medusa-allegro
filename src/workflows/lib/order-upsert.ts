@@ -14,6 +14,7 @@ import {
 import type { DerivedOrderStatus } from "../../lib/sync/order-status";
 import type { AllegroSyncOptions } from "../../modules/allegro/service";
 import type AllegroModuleService from "../../modules/allegro/service";
+import { parseAmount } from "../../lib/sync/money";
 import { readCheckoutForm } from "./checkout-form";
 import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
 
@@ -186,6 +187,8 @@ export interface ApplyFormResult {
   created: boolean;
   medusaOrderId?: string;
   conflicts: LineConflict[];
+  /** Set when the order's total disagrees with the money Allegro says the buyer paid. */
+  totalMismatch?: boolean;
 }
 
 /**
@@ -399,6 +402,89 @@ const linkMedusaOrder = async (
   }
 };
 
+/** A recorded reconciliation problem, as written on the bookkeeping row. */
+interface OrderConflict {
+  conflict: "total-mismatch";
+  conflict_detail: string;
+}
+
+/** Grosz-exact comparison, so a float round-trip cannot invent a mismatch. */
+const toMinorUnits = (value: number): number => Math.round(value * 100);
+
+/**
+ * Compare the Medusa order's total against the `totalToPay` Allegro recorded.
+ *
+ * Never blocks and never rolls back. The sale happened on Allegro whatever Medusa's
+ * arithmetic says, and an order nobody can see is not a safer outcome than one that is
+ * visibly disputed - so a mismatch is a recorded conflict for a human to judge, exactly the
+ * trade `line_conflicts` makes.
+ *
+ * The detail names both figures AND the number of custom lines, because that is the common
+ * benign cause: a line whose sygnatura matched no variant is carried as a title-only item,
+ * which can legitimately move the total. Putting the count in the message is what stops an
+ * operator investigating arithmetic when the real answer is "this order is half-mapped".
+ *
+ * Returns undefined when the totals agree, when Allegro sent no total to compare against, or
+ * when the order's total cannot be read - an unreadable total is not evidence of a mismatch,
+ * and recording one on that basis would be the same fabrication this check exists to catch.
+ */
+const reconcileOrderTotal = async (
+  container: MedusaContainer,
+  logger: Logger,
+  view: CheckoutFormView,
+  medusaOrderId: string,
+  customLineCount: number,
+): Promise<OrderConflict | undefined> => {
+  const expected = view.totalToPay;
+  if (!expected) {
+    return undefined;
+  }
+
+  let order: Record<string, unknown> | undefined;
+  try {
+    const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
+    const { data } = await query.graph({
+      entity: "order",
+      fields: ["id", "total", "currency_code"],
+      filters: { id: medusaOrderId },
+    });
+    order = data[0];
+  } catch (error) {
+    logger.warn(
+      `[allegro-orders] could not read Medusa order ${medusaOrderId} to reconcile its total: ${
+        error instanceof Error ? error.message : String(error)
+      }. No conflict recorded, because an unreadable total is not evidence of a mismatch.`,
+    );
+    return undefined;
+  }
+
+  const actual = parseAmount(order?.total as string | number | null | undefined);
+  if (actual === undefined) {
+    return undefined;
+  }
+
+  const actualCurrency = (order?.currency_code as string | null)?.trim().toLowerCase();
+  const expectedCurrency = expected.currency.trim().toLowerCase();
+  const hint =
+    customLineCount > 0
+      ? ` This order carries ${customLineCount} custom line item(s) whose sygnatura matched no Medusa variant, which is the usual reason a total differs.`
+      : "";
+
+  if (actualCurrency && actualCurrency !== expectedCurrency) {
+    return {
+      conflict: "total-mismatch",
+      conflict_detail: `Currency mismatch: Allegro charged ${expected.amount} ${expected.currency.toUpperCase()} but the Medusa order is in ${actualCurrency.toUpperCase()}, so the totals are not comparable.${hint}`,
+    };
+  }
+  if (toMinorUnits(actual) !== toMinorUnits(expected.amount)) {
+    return {
+      conflict: "total-mismatch",
+      conflict_detail: `Total mismatch: Allegro charged ${expected.amount} ${expected.currency.toUpperCase()} but the Medusa order totals ${actual}. The Allegro figure is what the buyer paid.${hint}`,
+    };
+  }
+  return undefined;
+};
+
 /** Create or update the bookkeeping row, returning its id. */
 const upsertBookkeeping = async (
   allegro: AllegroModuleService,
@@ -535,6 +621,27 @@ export const applyCheckoutForm = async (
     lastError ??= actionError;
   }
 
+  // Step 3b: reconcile the money. Read-only, and deliberately AFTER the order exists rather
+  // than before it is created: the point is to compare what Medusa actually recorded against
+  // what the buyer actually paid, and a mismatch is never a reason to withhold the order.
+  // `undefined` clears any conflict a previous pass recorded, so a repaired order stops being
+  // reported without needing its own action.
+  let totalConflict: OrderConflict | undefined;
+  if (medusaOrderId) {
+    totalConflict = await reconcileOrderTotal(
+      container,
+      logger,
+      view,
+      medusaOrderId,
+      conflicts.length,
+    );
+    if (totalConflict) {
+      logger.warn(
+        `[allegro-orders] checkout form ${view.checkoutFormId} (Medusa order ${medusaOrderId}): ${totalConflict.conflict_detail}`,
+      );
+    }
+  }
+
   // Step 4: the watermark, LAST. A crash before here leaves the row unfinished and
   // the next pass repairs it.
   //
@@ -553,6 +660,15 @@ export const applyCheckoutForm = async (
     {
       id: rowId,
       last_error: lastError ?? null,
+      // Written on every pass that got as far as having an order, including the null that
+      // CLEARS a stale conflict. A reconciliation report that only ever set the column would
+      // leave a repaired order looking broken forever.
+      ...(medusaOrderId
+        ? {
+            conflict: totalConflict?.conflict ?? null,
+            conflict_detail: totalConflict?.conflict_detail ?? null,
+          }
+        : {}),
       ...(landed && write.derived_status ? { derived_status: write.derived_status } : {}),
       ...(landed ? { synced_at: new Date() } : {}),
     },
@@ -572,6 +688,7 @@ export const applyCheckoutForm = async (
     conflicts,
     created,
     medusaOrderId,
+    totalMismatch: Boolean(totalConflict),
     // A brand-new order always counts as a status change; an existing one only when
     // the derived status actually moved. That distinction is what makes the summary's
     // `statusChanged` mean something against a forced refresh that always writes.

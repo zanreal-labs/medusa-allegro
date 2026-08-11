@@ -242,6 +242,13 @@ const setup = (input: {
   orderQueryIgnoresFilter?: boolean;
   /** Simulates the claim being taken over mid-run: every heartbeat reports it lost. */
   claimLost?: boolean;
+  /**
+   * What the created Medusa order totals, by order id, for the reconciliation read.
+   *
+   * Absent means the order cannot be read - which must NOT be reported as a mismatch, since
+   * an unreadable total is not evidence of one.
+   */
+  medusaOrderTotals?: Record<string, { total?: number | string; currency_code?: string }>;
 }) => {
   const client = fakeClient(input);
   const table = orderTable(input.orders ?? []);
@@ -293,6 +300,16 @@ const setup = (input: {
             }
             if (entity === "order") {
               const all = input.existingOrders ?? [];
+              // The total-reconciliation read: by id, asking for `total`/`currency_code`.
+              const byId = (filters?.id as string | undefined) ?? undefined;
+              if (byId !== undefined) {
+                return Promise.resolve({
+                  data:
+                    input.medusaOrderTotals?.[byId] === undefined
+                      ? []
+                      : [{ id: byId, ...input.medusaOrderTotals[byId] }],
+                });
+              }
               const wanted = (
                 filters?.metadata as { allegro_checkout_form_id?: string } | undefined
               )?.allegro_checkout_form_id;
@@ -1223,5 +1240,109 @@ describe("pushAllegroFulfillment", () => {
 
     expect(result.error).toContain("Allegro said no");
     expect(context.table.rows[0]?.last_error).toContain("fulfillment push");
+  });
+});
+
+describe("drainAllegroOrders: reconciling the total against Allegro", () => {
+  const withCursor = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ states: [{ cursor: "e0", provider: "orders", status: "ok" }], ...input });
+
+  /** The form fixture totals 412.97 PLN. */
+  const reconciled = (total: number | string | undefined, over: Parameters<typeof setup>[0] = {}) =>
+    withCursor({
+      forms: [form({ id: "f1" })],
+      medusaOrderTotals: total === undefined ? {} : { order_1: { currency_code: "pln", total } },
+      pages: [[event("e1", "f1")]],
+      ...over,
+    });
+
+  it("records a conflict when the Medusa total disagrees with what the buyer paid", async () => {
+    // Nothing compared the two, so an order could silently disagree with the money Allegro
+    // actually charged. Recorded, never blocking: the sale happened whatever Medusa's
+    // arithmetic says, and an invisible order is not safer than a visibly disputed one.
+    const context = reconciled(399.99);
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    // The order still exists and the form still counts as applied.
+    expect(coreFlows.created).toHaveLength(1);
+    expect(result.failed).toBe(0);
+    expect(result.withTotalMismatch).toBe(1);
+    const row = context.table.rows[0];
+    expect(row).toMatchObject({ conflict: "total-mismatch", synced_at: expect.any(Date) });
+    expect(row?.conflict_detail).toContain("412.97");
+    expect(row?.conflict_detail).toContain("399.99");
+    expect(result.error).toContain("disagrees with the amount Allegro says the buyer paid");
+  });
+
+  it("records no conflict when the totals agree to the grosz", async () => {
+    const context = reconciled(412.97);
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.withTotalMismatch).toBe(0);
+    expect(context.table.rows[0]?.conflict ?? null).toBeNull();
+  });
+
+  it("compares to the grosz, so a float round-trip cannot invent a mismatch", async () => {
+    const context = reconciled("412.970000000001");
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.withTotalMismatch).toBe(0);
+  });
+
+  it("names the custom-line count, because that is the usual benign cause", async () => {
+    // An unmatched sygnatura is carried as a title-only item, which legitimately moves the
+    // total. Putting the count in the message stops an operator investigating arithmetic when
+    // the real answer is "this order is half-mapped".
+    const context = reconciled(399.99, { variants: [] });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(context.table.rows[0]?.conflict_detail).toContain("1 custom line item(s)");
+  });
+
+  it("reports a currency mismatch as its own explanation", async () => {
+    const context = withCursor({
+      forms: [form({ id: "f1" })],
+      medusaOrderTotals: { order_1: { currency_code: "eur", total: 412.97 } },
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(context.table.rows[0]?.conflict_detail).toContain("Currency mismatch");
+    expect(context.table.rows[0]?.conflict_detail).toContain("EUR");
+  });
+
+  it("records nothing when the order's total cannot be read", async () => {
+    // An unreadable total is not evidence of a mismatch, and recording one on that basis
+    // would be the same fabrication this check exists to catch.
+    const context = reconciled(undefined);
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.withTotalMismatch).toBe(0);
+    expect(context.table.rows[0]?.conflict ?? null).toBeNull();
+  });
+
+  it("clears a stale conflict once the totals agree again", async () => {
+    const context = reconciled(412.97, {
+      orders: [
+        {
+          checkout_form_id: "f1",
+          conflict: "total-mismatch",
+          conflict_detail: "an older disagreement",
+          id: "algorder_1",
+          medusa_order_id: "order_1",
+        },
+      ],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(context.table.rows[0]?.conflict ?? null).toBeNull();
+    expect(context.table.rows[0]?.conflict_detail ?? null).toBeNull();
   });
 });

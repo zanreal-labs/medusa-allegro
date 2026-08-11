@@ -57,6 +57,7 @@ export interface PushRowFixture {
   id: string;
   sku: string;
   offer_id?: string | null;
+  pushed_by?: string;
   result: string;
   bound_floor?: string | null;
   bound_ceiling?: string | null;
@@ -221,10 +222,25 @@ export const fakeAllegroService = (seed: {
       return Promise.resolve(config.take === undefined ? rows : rows.slice(0, config.take));
     },
     listAllegroPricePushes: (
-      filters: { result?: string } = {},
+      filters: {
+        result?: string;
+        pushed_at?: { $gte?: Date };
+        pushed_by?: { $nin?: string[] };
+      } = {},
       config: { skip?: number; take?: number; order?: Record<string, "ASC" | "DESC"> } = {},
     ) => {
       let rows = pushes.filter((row) => (filters.result ? row.result === filters.result : true));
+      // The manual-push cap reads this table with a time window and a `$nin` on `pushed_by`.
+      // Honoured, not ignored: a fake that dropped these filters would count every audit row
+      // ever written and make the cap look far tighter than it is.
+      const since = filters.pushed_at?.$gte;
+      if (since) {
+        rows = rows.filter((row) => (row.pushed_at?.getTime() ?? 0) >= since.getTime());
+      }
+      const excluded = filters.pushed_by?.$nin;
+      if (excluded) {
+        rows = rows.filter((row) => !excluded.includes(row.pushed_by as string));
+      }
       if (config.order?.pushed_at) {
         const sign = config.order.pushed_at === "DESC" ? -1 : 1;
         rows = rows.toSorted(

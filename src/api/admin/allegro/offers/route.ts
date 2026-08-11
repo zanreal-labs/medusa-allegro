@@ -49,7 +49,12 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
   }
   const search = typeof query.q === "string" ? query.q.trim() : "";
   if (search) {
-    filters.sku = { $ilike: `%${search}%` };
+    // `%`, `_` and `\` are LIKE metacharacters, so an unescaped search term is a pattern
+    // rather than a substring: a lone `%` matched every SKU in the catalogue, and `_` matched
+    // any single character. Escaping makes the parameter mean what the UI says it means.
+    // `\` goes first, or it would double-escape the escapes added after it.
+    const escaped = search.replace(/\\/gu, "\\\\").replace(/[%_]/gu, (char) => `\\${char}`);
+    filters.sku = { $ilike: `%${escaped}%` };
   }
 
   const [offers, count] = await allegro.listAndCountAllegroOffers(filters, {

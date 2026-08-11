@@ -686,6 +686,40 @@ cannot make things worse.
 If the order is older than Allegro's event retention (roughly 60 days), Repair still
 works - it fetches the form directly rather than through the journal.
 
+### A disputed order total
+
+The drain compares every order's Medusa total against the `totalToPay` Allegro recorded
+for the form, to the grosz and in the same currency. A disagreement is recorded on
+`allegro_order.conflict` as `total-mismatch`, with both figures in `conflict_detail`, and
+the Orders admin page shows it beside the total. `totalMismatch=1` filters the list to
+them, and `totalMismatchCount` on the response is the table-wide count.
+
+**It never blocks or rolls back the order.** The sale happened on Allegro whatever
+Medusa's arithmetic says, and an order nobody can see is not a safer outcome than one that
+is visibly disputed. The conflict clears itself on the next pass once the totals agree, so
+there is no action to take beyond fixing the cause.
+
+The usual benign cause is a line whose sygnatura matched no Medusa variant: it is carried
+as a title-only custom item, which can legitimately move the total. The detail says how
+many custom lines the order has for exactly that reason - check that count before
+investigating arithmetic.
+
+### The manual push budget
+
+`POST /admin/allegro/offers/:sku/push` shares the scheduled loop's blast radius. Manual
+pushes are counted over a rolling hour, and once that count reaches `changeCap` further
+pushes are refused with HTTP **429** and a `Retry-After` of one hour.
+
+This exists for scripts rather than for people. Each call takes the sync claim, so calls
+serialise - but serialising is not bounding, and a loop over this route would otherwise
+reprice the entire catalogue, walking straight around the `changeCap` that exists to stop
+a bad plan doing that before a human sees it. The count comes from `pushed_by` on the
+audit table, so the plugin's own loops never consume an operator's budget and the cap
+survives a restart.
+
+If you legitimately need to push more than that in an hour, raise `changeCap` - which
+raises it for the scheduled loop too, deliberately, because that is the same decision.
+
 ### The write-scope banner
 
 Symptom: a persistent error banner on the settings page, and `write_scope_missing` on

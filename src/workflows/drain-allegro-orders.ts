@@ -36,12 +36,15 @@ export interface OrdersSyncResult extends OrdersSyncSummary {
   created: number;
   /** Orders with at least one line that matched no Medusa variant. */
   withLineConflicts: number;
+  /** Orders whose Medusa total disagrees with what Allegro says the buyer paid. */
+  withTotalMismatch: number;
 }
 
 export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
   ...emptyOrdersSyncSummary(),
   created: 0,
   withLineConflicts: 0,
+  withTotalMismatch: 0,
 });
 
 /** The `last_error` line for the admin, or null when the run was clean. */
@@ -64,6 +67,13 @@ const buildOrdersError = (result: OrdersSyncResult): string | null => {
       `${result.quarantined.length} order(s) quarantined after repeated failures and skipped by the event cursor: ${result.quarantined.join(", ")}. Repair them from the Allegro orders admin.`,
     );
   }
+  if (result.withTotalMismatch > 0) {
+    // Reported, never blocking. The order exists and the sale is real; what needs a human is
+    // the disagreement about how much it was for.
+    parts.push(
+      `${result.withTotalMismatch} order(s) have a Medusa total that disagrees with the amount Allegro says the buyer paid; the conflict is recorded on each row for review`,
+    );
+  }
   if (result.withLineConflicts > 0) {
     parts.push(
       `${result.withLineConflicts} order(s) have a line whose sygnatura matches no Medusa variant; they were created with custom line items, so those lines carry no inventory or cost linkage`,
@@ -84,6 +94,7 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
       const priorFailures = readFailureState(state.failures);
       let created = 0;
       let withLineConflicts = 0;
+      let withTotalMismatch = 0;
 
       const drain = await drainOrderEvents(
         state.cursor,
@@ -96,6 +107,9 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
             }
             if (applied.conflicts.length > 0) {
               withLineConflicts += 1;
+            }
+            if (applied.totalMismatch) {
+              withTotalMismatch += 1;
             }
             return applied.statusChanged;
           },
@@ -133,6 +147,7 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
       result.systemicFailure = drain.systemicFailure;
       result.truncated = drain.truncated;
       result.withLineConflicts = withLineConflicts;
+      result.withTotalMismatch = withTotalMismatch;
 
       if (drain.bootstrapped) {
         logger.warn(

@@ -2,7 +2,11 @@ import { AllegroAuthError } from "../../lib/allegro/auth-error";
 import { AllegroApiError } from "../../lib/allegro/errors";
 import type { AllegroOffer, PriceAutomationRule } from "../../lib/allegro/types";
 import { QUARANTINE_AFTER_FAILURES } from "../../lib/sync/failure-state";
-import { pushSingleAllegroOffer, syncAllegroPrices } from "../sync-allegro-prices";
+import {
+  MANUAL_PUSH_WINDOW_MS,
+  pushSingleAllegroOffer,
+  syncAllegroPrices,
+} from "../sync-allegro-prices";
 import {
   ACCOUNT_RULES,
   fakeAllegroService,
@@ -1135,3 +1139,103 @@ const runWith = async (input: Parameters<typeof setup>[0]) => {
   const summary = await syncAllegroPrices(context.container as never);
   return { ...context, summary };
 };
+
+describe("pushSingleAllegroOffer: the manual blast-radius cap", () => {
+  /** `changeCap` manual pushes already on the audit, inside the rolling window. */
+  const spentBudget = (count: number, over: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      live: [offerFixture({ id: "o1" })],
+      pushes: Array.from({ length: count }, (_, index) => ({
+        id: `algpush_prior_${index}`,
+        offer_id: "o-other",
+        pushed_at: new Date(Date.now() - 60_000),
+        pushed_by: "operator",
+        result: "success",
+        sku: `SKU-OTHER-${index}`,
+      })),
+      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
+      syncOptions: { automationRules: { ...RULES }, changeCap: 3, srpMetadataKey: "srp" },
+      ...over,
+    });
+
+  it("refuses once the rolling hour has spent the changeCap budget", async () => {
+    // Each call takes the claim, so calls serialise - but serialising is not bounding.
+    // Nothing stopped a script looping over this route from repricing the whole catalogue,
+    // walking straight around the `changeCap` that exists to stop the scheduled loop doing
+    // exactly that before a human sees it.
+    const { client, container } = spentBudget(3);
+
+    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+
+    expect(result.status).toBe("rate-limited");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("changeCap");
+    // Refused before any Allegro write.
+    expect(client.commands).toEqual([]);
+  });
+
+  it("allows the push while the budget still has room", async () => {
+    const { client, container } = spentBudget(2);
+
+    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+
+    expect(result.status).toBe("synced");
+    expect(client.commands).toHaveLength(1);
+  });
+
+  it("does not count the scheduled loop's own pushes against an operator", async () => {
+    // `pushed_by` already distinguishes a human from the loop, so the cap needs no new state.
+    // Counting the loop's rows would make an hourly full-catalogue pass lock operators out.
+    const { client, container } = spentBudget(0, {
+      pushes: Array.from({ length: 50 }, (_, index) => ({
+        id: `algpush_loop_${index}`,
+        offer_id: "o-other",
+        pushed_at: new Date(Date.now() - 60_000),
+        pushed_by: "price-sync",
+        result: "success",
+        sku: `SKU-LOOP-${index}`,
+      })),
+    });
+
+    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+
+    expect(result.status).toBe("synced");
+    expect(client.commands).toHaveLength(1);
+  });
+
+  it("does not count manual pushes older than the window", async () => {
+    const { container } = spentBudget(0, {
+      pushes: Array.from({ length: 10 }, (_, index) => ({
+        id: `algpush_old_${index}`,
+        offer_id: "o-other",
+        pushed_at: new Date(Date.now() - MANUAL_PUSH_WINDOW_MS - 60_000),
+        pushed_by: "operator",
+        result: "success",
+        sku: `SKU-OLD-${index}`,
+      })),
+    });
+
+    expect((await pushSingleAllegroOffer(container as never, "SKU-1", "operator")).status).toBe(
+      "synced",
+    );
+  });
+
+  it("leaves the provider row's standing report untouched when it refuses", async () => {
+    // Being over budget says nothing about the provider's health, so the refusal must neither
+    // invent a provider error nor erase what the scheduled loop last reported.
+    const { allegro, container } = spentBudget(3, {
+      states: [
+        {
+          last_error: "WRITE_SCOPE_MISSING: reconnect Allegro with the offer write scope.",
+          provider: "prices",
+          status: "error",
+          write_scope_missing: true,
+        },
+      ],
+    });
+
+    await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+
+    expect(allegro.states.get("prices")?.last_error).toContain("WRITE_SCOPE_MISSING");
+  });
+});

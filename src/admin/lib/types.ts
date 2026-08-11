@@ -149,6 +149,9 @@ export interface AllegroOrderRow {
   line_conflicts?:
     | { sku: string | null; offerId: string | null; name: string; quantity: number }[]
     | null;
+  /** `total-mismatch` when the Medusa total disagrees with what Allegro says was paid. */
+  conflict?: string | null;
+  conflict_detail?: string | null;
 }
 
 export interface QuarantineEntry {
@@ -159,6 +162,8 @@ export interface QuarantineEntry {
 
 export interface OrdersResponse {
   orders: AllegroOrderRow[];
+  /** Orders whose total disagrees with Allegro, across the whole table, not just this page. */
+  totalMismatchCount?: number;
   count: number;
   limit: number;
   offset: number;
