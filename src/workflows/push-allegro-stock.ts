@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { MedusaContainer } from "@medusajs/framework/types";
+import { MedusaError } from "@medusajs/framework/utils";
 import {
   createStep,
   createWorkflow,
@@ -7,15 +8,17 @@ import {
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk";
 import { AllegroAuthError } from "../lib/allegro/auth-error";
-import type { AllegroClient } from "../lib/allegro/client";
+import { AllegroClient } from "../lib/allegro/client";
 import { AllegroApiError } from "../lib/allegro/errors";
+import type { OfferQuantityTask } from "../lib/allegro/types";
 import {
   buildStockCommandChunks,
   isStockCoverageComplete,
   isStockPlanSafe,
   planStockSync,
-  STOCK_COMMAND_SIZE,
   STOCK_POLL_CONCURRENCY,
+  STOCK_TASK_MAX_PAGES,
+  STOCK_TASK_PAGE_SIZE,
 } from "../lib/sync/stock-plan";
 import type { StockChange, StockSyncSummary } from "../lib/sync/stock-plan";
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
@@ -115,11 +118,26 @@ const submitCommands = async (
   const submitted: SubmittedCommand[] = [];
   for (const changes of chunks) {
     const commandId = randomUUID();
+    // The command sets ONE fixed value across every offer it names, so the chunk's
+    // uniformity is a correctness precondition, not a formality - and it was being
+    // taken on trust from `buildStockCommandChunks` via `changes[0]?.desired ?? 0`.
+    // A future grouping change that let two quantities share a chunk would silently
+    // write the first offer's quantity onto up to 1,000 others, and an empty chunk
+    // would DELIST them all via the `?? 0`. Both are asserted instead of assumed.
+    const value = changes[0]?.desired;
+    if (value === undefined || changes.some((change) => change.desired !== value)) {
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        `medusa-allegro: refusing to submit a quantity command whose chunk is empty or mixes target quantities (${[
+          ...new Set(changes.map((change) => change.desired)),
+        ].join(", ")}). One command sets one fixed value across every offer it names.`,
+      );
+    }
     try {
       await client.changeOfferQuantity({
         commandId,
         offerIds: changes.map((change) => change.offerId),
-        value: changes[0]?.desired ?? 0,
+        value,
       });
       submitted.push({ changes, commandId });
     } catch (error) {
@@ -143,12 +161,53 @@ const submitCommands = async (
 };
 
 /**
+ * Read EVERY task page of one quantity command.
+ *
+ * A command naming up to 1,000 offers can emit more than 1,000 tasks: the `field`
+ * discriminator exists precisely because Allegro reports tasks for fields other than
+ * `quantity`. Reading one page of 1,000 and classifying every offer that did not
+ * appear in it as `failed` therefore reported a completely healthy push as broken -
+ * on every subsequent run, because the next run re-derives the same mismatch, pushes
+ * again, and truncates again.
+ *
+ * `truncated` is the honest answer when the page cap is hit: the caller must NOT
+ * classify the offers it never saw, because "absent from a report we did not finish
+ * reading" is not evidence of anything.
+ */
+const readAllQuantityTasks = async (
+  client: AllegroClient,
+  commandId: string,
+): Promise<{ tasks: OfferQuantityTask[]; truncated: boolean }> => {
+  const tasks: OfferQuantityTask[] = [];
+  for (let page = 0; page < STOCK_TASK_MAX_PAGES; page += 1) {
+    // Offset pagination over one command's tasks; each page depends on the previous.
+    const report = await client.getOfferQuantityCommandTasks(commandId, {
+      limit: STOCK_TASK_PAGE_SIZE,
+      offset: page * STOCK_TASK_PAGE_SIZE,
+    });
+    const batch = report.tasks ?? [];
+    tasks.push(...batch);
+    // Allegro's own total wins when present; a short page is the fallback signal, so
+    // the loop terminates correctly whether or not the counts are populated.
+    const total = report.totalCount;
+    if (
+      batch.length < STOCK_TASK_PAGE_SIZE ||
+      (typeof total === "number" && tasks.length >= total)
+    ) {
+      return { tasks, truncated: false };
+    }
+  }
+  return { tasks, truncated: true };
+};
+
+/**
  * Poll each submitted command to terminal and count what Allegro confirmed.
  *
  * Confirmation is per OFFER, from the task report, not per command: a command can
  * report itself complete while individual offers inside it failed, and counting the
  * command as a success would claim quantities that never landed. An offer with no
- * SUCCESS task is `failed`, not silently synced.
+ * SUCCESS task is `failed`, not silently synced - but only once the whole task report
+ * has actually been read (see `readAllQuantityTasks`).
  */
 const collectOutcomes = async (
   client: AllegroClient,
@@ -171,24 +230,19 @@ const collectOutcomes = async (
         const report = await client.pollOfferQuantityCommand(submission.commandId, {
           timeoutMs: 120_000,
         });
-        const tally = report.taskCount;
-        const terminal = Boolean(
-          report.completedAt ||
-          (tally && tally.total > 0 && tally.success + tally.failed >= tally.total),
-        );
-        if (!terminal) {
+        // The SHARED terminality test, not a local copy. This inline duplicate was
+        // the correct one of the two and the price loop's was weaker; collapsing both
+        // onto `AllegroClient.isCommandTerminal` is what stops them drifting again.
+        if (!AllegroClient.isCommandTerminal(report)) {
           // Submitted but unconfirmed. `pending`, not `failed`: the quantities may
           // well have landed, and reporting them as failures would make the next run
           // treat a working push as a broken one.
           return { confirmed: [], failed: 0, pending: submission.changes.length, synced: 0 };
         }
 
-        const tasks = await client.getOfferQuantityCommandTasks(submission.commandId, {
-          limit: STOCK_COMMAND_SIZE,
-          offset: 0,
-        });
+        const { tasks, truncated } = await readAllQuantityTasks(client, submission.commandId);
         const confirmedOfferIds = new Set<string>();
-        for (const task of tasks.tasks ?? []) {
+        for (const task of tasks) {
           const offerId = task.offer?.id;
           // `field === "quantity"` matters: a command report can carry tasks for
           // other fields, and counting one of those as a quantity confirmation would
@@ -200,11 +254,27 @@ const collectOutcomes = async (
         const confirmed = submission.changes
           .map((change) => change.offerId)
           .filter((offerId) => confirmedOfferIds.has(offerId));
+        if (truncated) {
+          // The task report did not fit the page cap, so the offers that did not
+          // appear are UNKNOWN rather than failed. They count as pending - the next
+          // run re-checks their quantity - and the cap is reported loudly, because a
+          // command whose report needs more than this many pages means the assumption
+          // behind the cap is wrong.
+          firstError ??=
+            `the task report for quantity command ${submission.commandId} exceeded ${STOCK_TASK_MAX_PAGES} page(s) of ${STOCK_TASK_PAGE_SIZE}; ` +
+            `${submission.changes.length - confirmed.length} offer(s) could not be classified and are reported as pending rather than failed`;
+          return {
+            confirmed,
+            failed: 0,
+            pending: submission.changes.length - confirmed.length,
+            synced: confirmed.length,
+          };
+        }
         return {
           confirmed,
-          // An offer with no SUCCESS task inside a TERMINAL command is `failed`, not
-          // silently synced: a command can report itself complete while individual
-          // offers inside it were rejected.
+          // An offer with no SUCCESS task inside a TERMINAL command whose report was
+          // read to exhaustion is `failed`, not silently synced: a command can report
+          // itself complete while individual offers inside it were rejected.
           failed: submission.changes.length - confirmed.length,
           pending: 0,
           synced: confirmed.length,

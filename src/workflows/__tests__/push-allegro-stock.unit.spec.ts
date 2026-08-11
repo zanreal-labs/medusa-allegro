@@ -11,6 +11,17 @@ interface QuantityScript {
   pendingCommands?: number[];
   /** Offer ids to REPORT as confirmed; defaults to every offer in the command. */
   confirmOnly?: string[];
+  /**
+   * Non-`quantity` tasks emitted AHEAD of the quantity confirmations.
+   *
+   * This is the shape that broke the single-page read: a command naming N offers can
+   * emit far more than N tasks, because Allegro reports tasks per field. Padding the
+   * front of the report pushes the quantity confirmations onto a later page, so a
+   * reader that stops after page one sees zero of them.
+   */
+  noiseTasks?: number;
+  /** Omit `count`/`totalCount` from the task pages, leaving only the short-page signal. */
+  withoutTaskCounts?: boolean;
 }
 
 const fakeClient = (input: { offers?: AllegroOffer[]; script?: QuantityScript }) => {
@@ -33,17 +44,36 @@ const fakeClient = (input: { offers?: AllegroOffer[]; script?: QuantityScript })
       });
       return Promise.resolve({ id: params.commandId });
     },
-    getOfferQuantityCommandTasks: (commandId: string) => {
+    getOfferQuantityCommandTasks: (
+      commandId: string,
+      params: { limit?: number; offset?: number } = {},
+    ) => {
       const submission = submissions.find((entry) => entry.commandId === commandId);
       const offerIds = (submission?.offerIds ?? []).filter((offerId) =>
         script.confirmOnly ? script.confirmOnly.includes(offerId) : true,
       );
-      return Promise.resolve({
-        tasks: offerIds.map((offerId) => ({
+      // The whole report, in Allegro's order: any non-quantity tasks first, then the
+      // per-offer quantity confirmations.
+      const all = [
+        ...Array.from({ length: script.noiseTasks ?? 0 }, (_, index) => ({
+          field: "description" as const,
+          offer: { id: `noise-${index}` },
+          status: "SUCCESS" as const,
+        })),
+        ...offerIds.map((offerId) => ({
           field: "quantity" as const,
           offer: { id: offerId },
           status: "SUCCESS" as const,
         })),
+      ];
+      // Paginated, and the fake HONOURS limit/offset. A fake that returned the whole
+      // report regardless would let a single-page reader pass.
+      const offset = params.offset ?? 0;
+      const limit = params.limit ?? all.length;
+      const page = all.slice(offset, offset + limit);
+      return Promise.resolve({
+        tasks: page,
+        ...(script.withoutTaskCounts ? {} : { count: page.length, totalCount: all.length }),
       });
     },
     listOffers: () =>
@@ -109,6 +139,99 @@ const healthy = (over: Partial<Parameters<typeof setup>[0]> = {}) =>
     rows: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
     ...over,
   });
+
+describe("pushAllegroStock task-report pagination", () => {
+  /** Two offers heading for the same quantity, so they share ONE command. */
+  const twoOffers = (script: QuantityScript) =>
+    setup({
+      available: { inv_1: 9, inv_2: 9 },
+      live: [
+        offerFixture({ external: { id: "SKU-1" }, id: "o1", stock: { available: 5 } }),
+        offerFixture({ external: { id: "SKU-2" }, id: "o2", stock: { available: 5 } }),
+      ],
+      rows: [
+        { id: "row-1", offer_id: "o1", sku: "SKU-1" },
+        { id: "row-2", offer_id: "o2", sku: "SKU-2" },
+      ],
+      script,
+      variants: [
+        { id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" },
+        { id: "v2", inventoryItemIds: ["inv_2"], sku: "SKU-2" },
+      ],
+    });
+
+  it("confirms successes that only appear on a LATER task page", async () => {
+    // The regression: the confirmation read one page of 1,000 tasks at offset 0. A
+    // command can emit more tasks than the offers it names - Allegro reports tasks per
+    // FIELD - so the quantity confirmations can sit entirely past the first page. The
+    // single-page reader saw none of them and reported both offers as failed, on this
+    // run and on every run after it.
+    const { allegro, container } = twoOffers({ noiseTasks: 1000 });
+
+    const result = await pushAllegroStock(container as never);
+
+    expect(result).toMatchObject({ complete: true, failed: 0, pending: 0, synced: 2 });
+    expect(result.error).toBeUndefined();
+    // Both mapping rows stamped, because both quantities really were confirmed.
+    expect(allegro.offers.map((row) => Boolean(row.stock_synced_at))).toEqual([true, true]);
+  });
+
+  it("pages to exhaustion on the short-page signal alone, with no counts reported", async () => {
+    // `count`/`totalCount` are optional in the response, so the loop must not depend
+    // on Allegro populating them.
+    const { container } = twoOffers({ noiseTasks: 1000, withoutTaskCounts: true });
+
+    const result = await pushAllegroStock(container as never);
+
+    expect(result).toMatchObject({ failed: 0, synced: 2 });
+  });
+
+  it("reports offers it could not classify as PENDING, never failed, when the page cap is hit", async () => {
+    // Ten full pages of tasks before any confirmation: the read is truncated, so the
+    // offers that never appeared are UNKNOWN. Counting them as failed is what turned a
+    // healthy push into a permanently broken-looking one, so they are pending and the
+    // cap is reported loudly.
+    const { allegro, container } = twoOffers({ noiseTasks: 10_000 });
+
+    const result = await pushAllegroStock(container as never);
+
+    expect(result).toMatchObject({ complete: false, failed: 0, pending: 2, synced: 0 });
+    expect(result.error).toContain("exceeded 10 page(s)");
+    expect(result.error).toContain("pending rather than failed");
+    // Nothing may claim a confirmed push.
+    expect(allegro.offers.every((row) => !row.stock_synced_at)).toBe(true);
+  });
+
+  it("still reports a genuinely rejected offer as failed once the whole report is read", async () => {
+    // The other direction: a complete report that simply has no SUCCESS task for one
+    // offer. Pagination must not soften that into pending.
+    const { container } = twoOffers({ confirmOnly: ["o1"], noiseTasks: 1000 });
+
+    const result = await pushAllegroStock(container as never);
+
+    expect(result).toMatchObject({ failed: 1, pending: 0, synced: 1 });
+  });
+});
+
+describe("pushAllegroStock scope warning", () => {
+  it("warns that the whole catalogue is in scope when no sales channel is configured", async () => {
+    // An unset channel makes every SKU-carrying variant eligible for a WRITE, and the
+    // run still reports a clean success. Nothing else says so.
+    const { container, logs } = healthy();
+
+    await pushAllegroStock(container as never);
+
+    expect(logs.some((line) => line.includes("no sales channel is configured"))).toBe(true);
+  });
+
+  it("stays quiet when the integration is scoped to a sales channel", async () => {
+    const { container, logs } = healthy({ syncOptions: { salesChannelId: "sc_1" } });
+
+    await pushAllegroStock(container as never);
+
+    expect(logs.some((line) => line.includes("no sales channel is configured"))).toBe(false);
+  });
+});
 
 describe("pushAllegroStock", () => {
   it("pushes the available quantity Medusa reports", async () => {

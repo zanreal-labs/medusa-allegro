@@ -29,6 +29,18 @@ interface CommandScript {
   tallyFor?: Record<string, { failed: number; success: number; total: number }>;
   /** Offers whose command never reaches a terminal state. */
   pendingFor?: string[];
+  /**
+   * Offers whose command is still IN PROGRESS at the poll budget: Allegro has
+   * scheduled the task and finished none of it (`total: 1, success: 0, failed: 0`)
+   * and `completedAt` is still null.
+   *
+   * Distinct from `pendingFor`, and the distinction is the whole point: this shape
+   * satisfied the loop's old local terminality test (`taskCount.total > 0`) while
+   * failing the SDK's real one, so it was recorded as a confirmed success.
+   */
+  inProgressFor?: string[];
+  /** Offers whose command reports `completedAt` but carries no task tally at all. */
+  noTallyFor?: string[];
 }
 
 const fakeClient = (input: {
@@ -86,6 +98,17 @@ const fakeClient = (input: {
       const offerId = offerIdByCommand.get(commandId) ?? "";
       if (script.pendingFor?.includes(offerId)) {
         return Promise.resolve({ completedAt: null, id: commandId });
+      }
+      if (script.inProgressFor?.includes(offerId)) {
+        // Scheduled, not finished. `total > 0` but `success + failed < total`.
+        return Promise.resolve({
+          completedAt: null,
+          id: commandId,
+          taskCount: { failed: 0, success: 0, total: 1 },
+        });
+      }
+      if (script.noTallyFor?.includes(offerId)) {
+        return Promise.resolve({ completedAt: "2026-06-01T00:00:00.000Z", id: commandId });
       }
       return Promise.resolve({
         completedAt: "2026-06-01T00:00:00.000Z",
@@ -151,6 +174,76 @@ const healthy = (over: Partial<Parameters<typeof setup>[0]> = {}) =>
     rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     ...over,
   });
+
+describe("syncAllegroPrices: command terminality", () => {
+  it("treats an in-progress command at the poll budget as PENDING, not a success", async () => {
+    // The regression this pins is the worst failure mode in the loop. The local test
+    // was `completedAt || taskCount.total > 0`, which an in-progress command satisfies
+    // (total 1, success 0, failed 0). It therefore reached the success path: stamped
+    // `price_synced_at`, wrote `result: "success"` with the bounds, and so taught
+    // `fetchLastSuccessfulBounds` that those bounds had LANDED. `decideSyncAction` then
+    // answered `act: false` on every subsequent run and the offer was never corrected
+    // again - silently, forever.
+    const { allegro, container } = healthy({ script: { inProgressFor: ["o1"] } });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary).toMatchObject({ failed: 0, pending: 1, synced: 0 });
+    // No success row: the bounds memory must not learn these bounds.
+    expect(allegro.pushes.filter((row) => row.result === "success")).toHaveLength(0);
+    expect(allegro.pushes[0]).toMatchObject({
+      allegro_command_id: "cmd-1",
+      error: "not terminal within the poll budget",
+      result: "skipped",
+    });
+    // And no synced stamp, so the admin does not claim a push that was not confirmed.
+    expect(allegro.offers[0]?.price_synced_at).toBeUndefined();
+  });
+
+  it("re-pushes on the next run after a pending command, because nothing was recorded", async () => {
+    // The consequence of the above, and the reason `skipped` is safe: an unconfirmed
+    // push leaves no success bounds, so the next tick plans the same command again.
+    // Re-asserting a rule and a range is idempotent.
+    const { allegro, client, container } = healthy({ script: { inProgressFor: ["o1"] } });
+
+    await syncAllegroPrices(container as never);
+    await syncAllegroPrices(container as never);
+
+    expect(client.commands).toHaveLength(2);
+    expect(allegro.pushes.filter((row) => row.result === "success")).toHaveLength(0);
+  });
+
+  it("treats a terminal command carrying no task tally as pending, not a success", async () => {
+    // `completedAt` set with no `taskCount` is not evidence that the offer's task
+    // succeeded. Success is asserted on positive evidence only.
+    const { allegro, container } = healthy({ script: { noTallyFor: ["o1"] } });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary).toMatchObject({ failed: 0, pending: 1, synced: 0 });
+    expect(allegro.pushes[0]).toMatchObject({ result: "skipped" });
+    expect(allegro.offers[0]?.price_synced_at).toBeUndefined();
+  });
+
+  it("treats a command that scheduled no task at all as failed", async () => {
+    // Terminal, zero failures, and zero successes: the offer criteria matched nothing,
+    // so nothing was attached. Counting it as a success is how an unattached offer
+    // reads as managed.
+    const { allegro, container } = healthy({
+      script: { tallyFor: { o1: { failed: 0, success: 0, total: 0 } } },
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary).toMatchObject({ pending: 0, synced: 0 });
+    expect(summary.failed).toBe(1);
+    expect(allegro.pushes[0]).toMatchObject({
+      error: "command completed without scheduling a task for the offer",
+      result: "failed",
+    });
+    expect(allegro.offers[0]?.price_synced_at).toBeUndefined();
+  });
+});
 
 describe("syncAllegroPrices: the write decision", () => {
   it("attaches the standard rule with the computed bounds", async () => {

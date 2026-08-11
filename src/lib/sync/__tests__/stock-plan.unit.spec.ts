@@ -226,4 +226,19 @@ describe("buildStockCommandChunks", () => {
   it("produces nothing for an empty plan", () => {
     expect(buildStockCommandChunks([])).toEqual([]);
   });
+
+  it("refuses a non-positive command size instead of looping forever", () => {
+    // A zero or negative stride makes the slicing loop never advance, so this hung the
+    // stock run rather than failing it - the hardest failure of the lot to diagnose,
+    // because a wedged loop looks exactly like a slow Allegro.
+    expect(() => buildStockCommandChunks([{ desired: 1, offerId: "o1" }], 0)).toThrow(
+      /positive integer/u,
+    );
+    expect(() => buildStockCommandChunks([{ desired: 1, offerId: "o1" }], -5)).toThrow(
+      /positive integer/u,
+    );
+    expect(() => buildStockCommandChunks([{ desired: 1, offerId: "o1" }], 1.5)).toThrow(
+      /positive integer/u,
+    );
+  });
 });

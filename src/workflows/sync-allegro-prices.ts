@@ -6,7 +6,11 @@ import {
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk";
 import { AllegroAuthError } from "../lib/allegro/auth-error";
-import type { AllegroClient } from "../lib/allegro/client";
+// Value import, not `import type`: `AllegroClient.isCommandTerminal` is called as a
+// static below. A type-only import elides the binding at runtime and the call throws
+// `AllegroClient is not defined`, which `runCommand` catches and reports as a per-offer
+// failure - so every healthy push would look like a failed one.
+import { AllegroClient } from "../lib/allegro/client";
 import { AllegroApiError } from "../lib/allegro/errors";
 import type { AllegroOffer } from "../lib/allegro/types";
 import {
@@ -306,19 +310,55 @@ const runCommand = async (
     const terminal = await client.pollOfferPriceAutomationCommand(report.id);
     const tally = terminal.taskCount;
 
-    if (!(terminal.completedAt || (tally && tally.total > 0))) {
+    // `AllegroClient.isCommandTerminal`, never a local re-derivation. The test this
+    // replaces was `completedAt || taskCount.total > 0`, which is strictly WEAKER than
+    // the poll loop's own exit condition: a command that has SCHEDULED one task and
+    // finished none (total 1, success 0, failed 0) satisfies it. Such a report
+    // arriving at the 15s poll budget therefore fell straight through to
+    // `result: "success"` - which stamps `price_synced_at` and writes the bounds into
+    // the only bounds memory this plugin has. `fetchLastSuccessfulBounds` then
+    // reported bounds that may never have landed, `decideSyncAction` answered
+    // `act: false` on every later run, and the offer was silently never corrected
+    // again. The pending branch below was unreachable for exactly that shape.
+    if (!AllegroClient.isCommandTerminal(terminal)) {
       // Submitted but not confirmed terminal within the poll budget. NOT a failure:
       // a slow command must not build a streak toward quarantining a healthy offer.
-      // The row stays `failed` with the command id, so the bounds are not claimed
-      // as landed and the next run re-pushes - which is idempotent.
+      // Settled as `skipped` - honest about what is known - and crucially NOT
+      // `success`, so the row is invisible to the bounds memory and the next run
+      // re-pushes, which is idempotent.
       await finalize({
         allegro_command_id: report.id,
         error: "not terminal within the poll budget",
+        result: "skipped",
       });
       return { commandId: report.id, error: "command still pending", kind: "pending" };
     }
     if (tally && tally.failed > 0) {
       const detail = await describeCommandFailure(client, report.id);
+      await finalize({ allegro_command_id: report.id, error: detail });
+      return { error: detail, kind: "failed" };
+    }
+    // Success is asserted on POSITIVE evidence, never on the absence of a failure.
+    // Two terminal reports carry no such evidence and both used to read as success:
+    // one with `completedAt` set and no `taskCount` at all, and one whose tally
+    // scheduled nothing (`total: 0`, i.e. the offer criteria matched no offer). The
+    // first is unknown, so it settles as pending and the next run re-checks; the
+    // second is a real failure worth surfacing, because a command that scheduled no
+    // task did not attach anything.
+    if (!tally) {
+      await finalize({
+        allegro_command_id: report.id,
+        error: "command reported terminal without a task tally, so nothing is confirmed",
+        result: "skipped",
+      });
+      return {
+        commandId: report.id,
+        error: "command terminal without a task tally",
+        kind: "pending",
+      };
+    }
+    if (tally.success < 1) {
+      const detail = "command completed without scheduling a task for the offer";
       await finalize({ allegro_command_id: report.id, error: detail });
       return { error: detail, kind: "failed" };
     }

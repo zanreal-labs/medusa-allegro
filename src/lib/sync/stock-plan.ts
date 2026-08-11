@@ -1,3 +1,4 @@
+import { MedusaError } from "@medusajs/framework/utils";
 import type { AllegroOffer } from "../allegro/types";
 
 /**
@@ -71,6 +72,19 @@ export interface StockSyncPlan extends StockSyncSummary {
 export const STOCK_COMMAND_SIZE = 1000;
 /** Concurrent command polls. Four keeps the run brisk without a rate-limit storm. */
 export const STOCK_POLL_CONCURRENCY = 4;
+/** Tasks per page when reading one command's task report. */
+export const STOCK_TASK_PAGE_SIZE = 1000;
+/**
+ * Task pages per command before the read is declared truncated.
+ *
+ * A 1,000-offer command emits at least 1,000 tasks and can emit more, because
+ * Allegro reports tasks for fields other than `quantity` (which is why the task
+ * `field` discriminator exists). Ten pages is far more headroom than any single
+ * command should need; hitting it means the assumption is wrong, so it is reported
+ * rather than silently absorbed - and the offers that went unread are counted as
+ * pending, never as failed.
+ */
+export const STOCK_TASK_MAX_PAGES = 10;
 
 /**
  * Match live offers against variant stock and decide what to write.
@@ -173,6 +187,16 @@ export const buildStockCommandChunks = (
   changes: readonly StockChange[],
   commandSize: number = STOCK_COMMAND_SIZE,
 ): StockChange[][] => {
+  if (!Number.isInteger(commandSize) || commandSize < 1) {
+    // A non-positive stride makes the slicing loop below never advance, so this
+    // would hang the run rather than fail it. Refused loudly instead: the only way
+    // to get here is a caller passing a computed size, and a hung stock loop is the
+    // hardest failure of the lot to diagnose.
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      `buildStockCommandChunks: commandSize must be a positive integer, received ${commandSize}.`,
+    );
+  }
   const byQuantity = new Map<number, StockChange[]>();
   for (const change of changes) {
     const group = byQuantity.get(change.desired) ?? [];
