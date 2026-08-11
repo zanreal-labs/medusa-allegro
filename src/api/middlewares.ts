@@ -12,12 +12,13 @@ import { defineMiddlewares } from "@medusajs/framework/http";
  * by default. That default is what protects the OAuth flow:
  *
  * - `oauth/start` mints the CSRF state, so only a logged-in admin can begin a
- *   connection.
+ *   connection. The state is signed over that admin's `auth_context.actor_id`.
  * - `oauth/callback` keeps the same default. Allegro's redirect back is a
  *   top-level GET navigation, and Medusa's admin session cookie is
  *   `SameSite=Lax`, so the session survives the hop and the callback still
- *   authenticates. Making it public to "fix" a failing callback would trade the
- *   session check for nothing but the state cookie.
+ *   authenticates. Making it public to "fix" a failing callback would break more
+ *   than the session check: with no `auth_context` there is no actor id to verify
+ *   the signed state against, so every flow would fail `state_mismatch` instead.
  * - `disconnect` deletes a credential, so it is admin-only for the obvious
  *   reason.
  *

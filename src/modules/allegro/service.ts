@@ -20,6 +20,8 @@ import type {
   AllegroPublicOptions,
   ResolvedAllegroOptions,
 } from "../../lib/options";
+import { mintOAuthState, verifyOAuthState } from "../../lib/oauth-state";
+import type { OAuthStateVerification } from "../../lib/oauth-state";
 import AllegroAuth from "./models/allegro-auth";
 import AllegroCategoryRate from "./models/allegro-category-rate";
 import AllegroOffer from "./models/allegro-offer";
@@ -131,6 +133,31 @@ class AllegroModuleService extends MedusaService({
   /** An unauthenticated OAuth helper for the connect/callback/revoke flow. */
   getOAuth(): Promise<AllegroOAuth> {
     return Promise.resolve(this.buildOAuth());
+  }
+
+  /**
+   * Mint the signed OAuth `state` for an admin user.
+   *
+   * The signing key is the plugin's `encryptionKey`, which is why minting and
+   * verification live on the service rather than in the route: the routes never
+   * see the key. `actorId` is `req.auth_context.actor_id`, the authenticated
+   * admin user.
+   */
+  mintOAuthState(actorId: string): Promise<string> {
+    return Promise.resolve(mintOAuthState(actorId, this.options_.encryptionKey));
+  }
+
+  /**
+   * Verify a state echoed back by Allegro against the admin completing the flow.
+   *
+   * Returns the rejection reason so the caller can log it; the browser only ever
+   * sees the opaque `state_mismatch` code.
+   */
+  verifyOAuthState(
+    state: string | undefined,
+    actorId: string | undefined,
+  ): Promise<OAuthStateVerification> {
+    return Promise.resolve(verifyOAuthState(state, actorId, this.options_.encryptionKey));
   }
 
   /** Synchronous inner form, so the service can use it without awaiting itself. */
