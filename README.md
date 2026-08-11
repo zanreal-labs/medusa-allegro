@@ -72,19 +72,19 @@ npx medusa db:migrate
 
 ## Options
 
-| Option              | Type                        | Required | Default                                                                                | Notes                                                                                                                         |
-| ------------------- | --------------------------- | -------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `clientId`          | `string`                    | yes      | -                                                                                      | Allegro application client id.                                                                                                |
-| `clientSecret`      | `string`                    | yes      | -                                                                                      | Allegro application client secret.                                                                                            |
-| `environment`       | `"production" \| "sandbox"` | no       | `"production"`                                                                         | Sandbox talks to `api.allegro.pl.allegrosandbox.pl`.                                                                          |
-| `appName`           | `string`                    | yes      | -                                                                                      | Must match the registered app name. No whitespace or HTTP separators.                                                         |
-| `appVersion`        | `string`                    | yes      | -                                                                                      | Your integration version, e.g. `"1.0.0"`.                                                                                     |
-| `docsUrl`           | `string`                    | yes      | -                                                                                      | Public http(s) URL documenting or contacting the integration.                                                                 |
-| `encryptionKey`     | `string`                    | yes      | -                                                                                      | Base64-encoded 32 bytes. Seals the stored tokens. Rotating it makes existing tokens unreadable: reconnect after a rotation.   |
-| `redirectPath`      | `string`                    | no       | `"/admin/allegro/oauth/callback"`                                                      | Must match the redirect URI registered for the app, character for character.                                                  |
-| `scopes`            | `string`                    | no       | `"allegro:api:sale:offers:read allegro:api:sale:offers:write allegro:api:orders:read"` | Space-separated. Drop `:write` if you only ever want read access; the plugin then reports the missing write scope in the UI.  |
-| `priceSyncDisabled` | `boolean`                   | no       | `false`                                                                                | Kill-switch for every price-affecting write.                                                                                  |
-| `backendUrl`        | `string`                    | no       | derived                                                                                | Absolute base URL of this backend. Set it when a proxy rewrites `Host`. Falls back to `MEDUSA_BACKEND_URL`, then the request. |
+| Option              | Type                        | Required | Default                                                                                | Notes                                                                                                                                                                             |
+| ------------------- | --------------------------- | -------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `clientId`          | `string`                    | yes      | -                                                                                      | Allegro application client id.                                                                                                                                                    |
+| `clientSecret`      | `string`                    | yes      | -                                                                                      | Allegro application client secret.                                                                                                                                                |
+| `environment`       | `"production" \| "sandbox"` | no       | `"production"`                                                                         | Sandbox talks to `api.allegro.pl.allegrosandbox.pl`.                                                                                                                              |
+| `appName`           | `string`                    | yes      | -                                                                                      | Must match the registered app name. No whitespace or HTTP separators.                                                                                                             |
+| `appVersion`        | `string`                    | yes      | -                                                                                      | Your integration version, e.g. `"1.0.0"`.                                                                                                                                         |
+| `docsUrl`           | `string`                    | yes      | -                                                                                      | Public http(s) URL documenting or contacting the integration.                                                                                                                     |
+| `encryptionKey`     | `string`                    | yes      | -                                                                                      | Base64-encoded 32 bytes. Seals the stored tokens. Rotating it makes existing tokens unreadable: reconnect after a rotation.                                                       |
+| `redirectPath`      | `string`                    | no       | `"/admin/allegro/oauth/callback"`                                                      | A rooted path on this backend, matching the redirect URI registered for the app character for character. `//host/...` is rejected: it is a protocol-relative URL, not a path.     |
+| `scopes`            | `string`                    | no       | `"allegro:api:sale:offers:read allegro:api:sale:offers:write allegro:api:orders:read"` | Space-separated. Drop `:write` if you only ever want read access; the plugin then reports the missing write scope in the UI.                                                      |
+| `priceSyncDisabled` | `boolean`                   | no       | `false`                                                                                | Kill-switch for every price-affecting write. Must be a real boolean: a string throws at boot rather than failing open. Use `ALLEGRO_PRICE_SYNC_DISABLED` for the env-driven case. |
+| `backendUrl`        | `string`                    | no       | derived                                                                                | Absolute base URL of this backend. Set it when a proxy rewrites `Host`. Falls back to `MEDUSA_BACKEND_URL`, then the request.                                                     |
 
 All options are validated in a module loader, so a misconfiguration fails at boot
 with a specific message instead of surfacing as an opaque Allegro error later.
@@ -132,8 +132,16 @@ with a specific message instead of surfacing as an opaque Allegro error later.
 openssl rand -base64 32
 ```
 
-Put it in `ALLEGRO_ENCRYPTION_KEY`. The plugin refuses to boot if the key does
-not decode to exactly 32 bytes, rather than silently stretching a weak one.
+Put it in `ALLEGRO_ENCRYPTION_KEY`. The plugin refuses to boot unless the value is
+canonical base64 (standard or URL-safe) for exactly 32 bytes, rather than
+silently accepting a weak one. The check is deliberately strict about the
+encoding and not only the length, because `Buffer.from(value, "base64")` never
+throws: it drops every character outside the alphabet, so a length test alone
+accepts mangled input, and `"A".repeat(43)` decodes to a well-formed all-zero
+key. Both are rejected.
+
+The key also signs the OAuth `state` (see below), so rotating it invalidates any
+connection flow that is mid-air as well as the stored tokens.
 
 ### 3. Connect from the admin
 
@@ -141,17 +149,42 @@ Open **Settings -> Allegro** in the Medusa Admin and click **Connect Allegro**.
 You land on Allegro's consent screen, approve, and come back to the settings page
 with the account login, granted scopes, and token expiry filled in.
 
+The page distinguishes three unhealthy states from a working connection, because
+each needs a different response: a missing refresh token (reconnect before the
+access token expires), an unreadable token envelope (the `encryptionKey` no longer
+opens what is stored - restore the old key or reconnect), and price sync disabled.
+A row whose envelope will not open is reported as such rather than as a green
+"Connected", which would send you looking at Allegro instead of at your own
+configuration.
+
 ### How the flow is protected
 
-- `GET /admin/allegro/oauth/start` mints a random `state`, parks it in an
-  httpOnly `SameSite=Lax` cookie with a 10-minute lifetime, and returns the
-  authorization URL for the admin to navigate to.
-- `GET /admin/allegro/oauth/callback` requires that `state` to match what Allegro
-  echoes back, compared in constant time.
+- `GET /admin/allegro/oauth/start` mints a `state`, parks it in an httpOnly
+  `SameSite=Lax` cookie with a 10-minute lifetime, and returns the authorization
+  URL for the admin to navigate to. Over https the cookie carries the `__Host-`
+  prefix, so a sibling subdomain cannot shadow it; over plain http it does not,
+  because a `__Host-` cookie without `Secure` is dropped and local development
+  would break.
+- The `state` is not an opaque nonce. It is `v1.<issuedAt>.<nonce>.<mac>`, where
+  the MAC is HMAC-SHA256 over the mint time, the nonce and the admin user's
+  `actor_id`, keyed by `encryptionKey`. The admin id itself is not in the value,
+  because the value travels through Allegro's authorize URL and into browser
+  history and access logs.
+- `GET /admin/allegro/oauth/callback` requires that `state` to match the cookie,
+  compared in constant time, **and** to verify against the actor completing the
+  flow. The cookie proves same-browser; the signature proves same-server, same
+  admin, and minted within the last ten minutes. A state planted in someone
+  else's browser fails the second check.
+- The state cookie is cleared only once the authorization code has actually been
+  handed to Allegro - which is when the state is spent, so it stays single-use.
+  Branches that run before the state is verified (`?error=...`, a missing code, a
+  state mismatch) deliberately leave it alone, so a lured GET to the callback
+  cannot destroy a flow the operator legitimately started in another tab.
 - Both routes live under `/admin`, which Medusa authenticates by default. The
   callback keeps that default: Allegro's redirect back is a top-level GET
   navigation and Medusa's admin session cookie is `SameSite=Lax`, so the session
-  survives the hop.
+  survives the hop. Making it public would also remove the `actor_id` the signed
+  state is verified against, so every flow would fail instead.
 
 If your deployment authenticates the admin with a bearer token in local storage
 rather than a session cookie, the callback will 401, because the browser has no
@@ -164,6 +197,12 @@ origin with session auth; do not make the callback public.
 and then deletes the stored row. Revocation is best-effort - if Allegro is
 unreachable the local connection is still removed, because refusing to disconnect
 would leave an operator unable to remove access they asked to remove.
+
+When revocation is skipped or fails, the response carries a `warning` and the
+settings page shows it. That matters here more than in most places: the stored
+rows are the only copy of the tokens, so after this call there is nothing left to
+revoke with, and the refresh token stays valid at Allegro until it expires unless
+you remove the application's access by hand in the developer panel.
 
 ## The sygnatura / SKU mapping principle
 
@@ -242,13 +281,28 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 `getClient()` returns an SDK client whose refreshes are persisted back to the
 database, and whose app-token fallback is deliberately off: every call this plugin
 makes is seller-scoped, and an app-only token would return empty result sets that
-read as "this seller has no offers" instead of failing.
+read as "this seller has no offers" instead of failing. The client is memoized per
+service instance, which is what makes the SDK's refresh de-duplication apply; it
+is dropped whenever the stored connection is replaced or deleted.
+
+Every call has a 60-second wall-clock budget by default (`timeoutMs`), and that
+budget covers a token refresh triggered on the way, not just the API request that
+follows it. The OAuth token and revoke calls carry the same timeout. Both are
+deliberate divergences from the reference Allegro SDK, marked as such in
+`src/lib/allegro/`: without them a black-holed Allegro hangs a Medusa request or a
+sync loop for as long as the platform's socket default allows.
+
+`getPublicOptions()` answers "how is this configured?" - environment, app
+identity, callback path, requested scopes, and the effective price-sync
+kill-switch. The fully resolved options are protected on purpose, because they
+carry `clientSecret` and `encryptionKey` and nothing outside the service needs
+them.
 
 ### Known limitation: refresh de-duplication is per process
 
-The SDK collapses concurrent refreshes into one in-flight promise, which covers
-the common case of many parallel calls in a single Medusa instance. It does **not**
-coordinate across processes. Allegro rotates the refresh token on every use, so a
+The SDK collapses concurrent refreshes into one in-flight promise, and the module
+service keeps one client per instance so that promise is actually shared. Neither
+coordinates across processes. Allegro rotates the refresh token on every use, so a
 server and a worker refreshing at the same moment can invalidate each other's
 token and force a reconnect. Until a cross-process lock lands (wave 3, alongside
 worker-mode support), run the sync loops in exactly one instance.
@@ -315,7 +369,7 @@ change anything.
 
 ```bash
 npm install
-npm test                       # typecheck + 111 unit tests
+npm test                       # typecheck + 235 unit tests
 npx medusa plugin:build        # compile to .medusa/server
 npx medusa plugin:db:generate  # regenerate migrations after a model change
 npx medusa lint
