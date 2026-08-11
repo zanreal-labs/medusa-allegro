@@ -309,15 +309,25 @@ class AllegroModuleService extends MedusaService({
    *
    * Shape: read the row, decide LOCALLY whether a non-stale run holds the claim,
    * then update conditioned on `updated_at` still being the value that was read.
-   * Mikro-ORM bumps `updated_at` on every update, so a concurrent claimant
-   * invalidates the match and the loser's update affects zero rows. That count is
-   * the answer - `updateAllegroSyncStates` with a selector returns the rows it
-   * touched, so an empty result means somebody else won.
+   * A concurrent claimant bumps `updated_at`, which invalidates the match, so the
+   * loser's update affects zero rows. That count is the answer -
+   * `updateAllegroSyncStates` with a selector returns the rows it touched, so an
+   * empty result means somebody else won.
+   *
+   * The bump is ORM-managed, and it is worth naming precisely because the whole
+   * claim rests on it: Medusa's DML declares `updated_at` with
+   * `onUpdate: () => new Date()` (see `@medusajs/utils`,
+   * `dml/helpers/entity-builder/define-property.js`), so Mikro-ORM writes a fresh
+   * value on every update flush. The `default now()` in the DDL is NOT what does
+   * it - a column default only applies on insert - so a future change that
+   * replaced the DML-defined timestamp with a plain column would silently break
+   * single-flight while every test that fakes the table still passed.
    *
    * This is the Medusa equivalent of the trigger-plus-optimistic-filter pattern
-   * used against Postgres directly: there is no trigger to write here, but the
-   * ORM's own `updated_at` maintenance plays the same role, and the verification
-   * is on affected rows rather than on trusting the filter.
+   * used against Postgres directly. There is no trigger to write here; the ORM's
+   * own `updated_at` maintenance plays that role, the `WHERE updated_at = X` is
+   * what makes it atomic at the database, and the verification is on affected rows
+   * rather than on trusting the filter.
    */
   async claimSyncRun(
     provider: AllegroSyncProvider,
