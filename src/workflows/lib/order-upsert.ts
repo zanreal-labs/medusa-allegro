@@ -292,6 +292,138 @@ const applyMedusaAction = async (
   }
 };
 
+/** Orders scanned per page by the adoption fallback. */
+const ADOPTION_PAGE_SIZE = 100;
+/** Pages the adoption fallback scans before giving up. */
+const ADOPTION_MAX_PAGES = 5;
+
+/**
+ * Find a Medusa order already created for this checkout form, so it can be adopted
+ * instead of duplicated.
+ *
+ * The link between the two lives in `order.metadata.allegro_checkout_form_id`, written
+ * when the order is created. `buildWhere` in Medusa's query layer recurses into plain
+ * objects, so a nested filter reaches Mikro-ORM as a JSON property query.
+ *
+ * The in-memory re-check is not redundant: it is what makes this safe if the query layer
+ * ever ignores or mis-translates the nested filter. A filter that silently matched
+ * everything would otherwise hand back an unrelated order and this function would
+ * "adopt" somebody else's sale into an Allegro form. Only an exact metadata match is
+ * ever accepted, so a broken filter degrades to "not found" rather than to corruption.
+ *
+ * The fallback scan exists because the JSON filter is the one part of this that depends
+ * on query-layer behaviour the plugin does not own. If it throws, a bounded newest-first
+ * sweep still finds an order created minutes ago by a crashed pass, which is the only
+ * realistic case. Both paths use the same exact-match verification.
+ */
+const findExistingMedusaOrder = async (
+  container: MedusaContainer,
+  logger: Logger,
+  checkoutFormId: string,
+): Promise<string | undefined> => {
+  const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
+  const matches = (row: Record<string, unknown>): boolean =>
+    (row.metadata as Record<string, unknown> | null)?.allegro_checkout_form_id === checkoutFormId;
+
+  try {
+    const { data } = await query.graph({
+      entity: "order",
+      fields: ["id", "metadata"],
+      filters: { metadata: { allegro_checkout_form_id: checkoutFormId } },
+    });
+    const found = data.find(matches);
+    if (found) {
+      return found.id as string;
+    }
+    // A populated response with no exact match means the filter did not do what it says.
+    // Fall through to the scan rather than concluding "no order exists".
+    if (data.length === 0) {
+      return undefined;
+    }
+    logger.warn(
+      `[allegro-orders] the metadata filter for checkout form ${checkoutFormId} returned ${data.length} order(s) but none carried a matching \`allegro_checkout_form_id\`; falling back to a bounded scan before creating anything.`,
+    );
+  } catch (error) {
+    logger.warn(
+      `[allegro-orders] could not query orders by \`metadata.allegro_checkout_form_id\` (${
+        error instanceof Error ? error.message : String(error)
+      }); falling back to a bounded newest-first scan so a duplicate order is not created.`,
+    );
+  }
+
+  for (let page = 0; page < ADOPTION_MAX_PAGES; page += 1) {
+    // Offset pagination, newest first: a duplicate can only have been created by a
+    // recent pass, so the newest orders are where it is.
+    const { data } = await query.graph({
+      entity: "order",
+      fields: ["id", "metadata"],
+      pagination: { skip: page * ADOPTION_PAGE_SIZE, take: ADOPTION_PAGE_SIZE },
+    });
+    const found = data.find(matches);
+    if (found) {
+      return found.id as string;
+    }
+    if (data.length < ADOPTION_PAGE_SIZE) {
+      return undefined;
+    }
+  }
+  logger.warn(
+    `[allegro-orders] scanned ${ADOPTION_MAX_PAGES * ADOPTION_PAGE_SIZE} recent orders without finding one for checkout form ${checkoutFormId}; proceeding to create it.`,
+  );
+  return undefined;
+};
+
+/**
+ * Record the Medusa order id on the bookkeeping row.
+ *
+ * Wrapped so a failed link write cannot pass silently: the order EXISTS at this point, so
+ * losing the link is what the next pass would read as "no order yet". The adoption lookup
+ * above recovers from it automatically, but the id is logged loudly regardless so a
+ * manual repair is possible without trawling for it.
+ */
+const linkMedusaOrder = async (
+  allegro: AllegroModuleService,
+  logger: Logger,
+  rowId: string,
+  medusaOrderId: string,
+  checkoutFormId: string,
+): Promise<void> => {
+  try {
+    await allegro.updateAllegroOrders([{ id: rowId, medusa_order_id: medusaOrderId }] as never);
+  } catch (error) {
+    logger.error(
+      `[allegro-orders] created or adopted Medusa order ${medusaOrderId} for checkout form ${checkoutFormId} but FAILED to record the link on allegro_order ${rowId}: ${
+        error instanceof Error ? error.message : String(error)
+      }. The next pass adopts it by \`metadata.allegro_checkout_form_id\`; set \`medusa_order_id\` by hand if that does not happen.`,
+    );
+  }
+};
+
+/** Create or update the bookkeeping row, returning its id. */
+const upsertBookkeeping = async (
+  allegro: AllegroModuleService,
+  checkoutFormId: string,
+  patch: Record<string, unknown>,
+  known?: AllegroOrderRow,
+): Promise<string> => {
+  const existing =
+    known ??
+    ((
+      (await allegro.listAllegroOrders(
+        { checkout_form_id: checkoutFormId },
+        { take: 1 },
+      )) as unknown as AllegroOrderRow[]
+    )[0] as AllegroOrderRow | undefined);
+  if (existing) {
+    await allegro.updateAllegroOrders([{ id: existing.id, ...patch }] as never);
+    return existing.id;
+  }
+  const [created] = (await allegro.createAllegroOrders([patch] as never)) as unknown as {
+    id: string;
+  }[];
+  return created.id;
+};
+
 /**
  * Apply one checkout form: bookkeeping row, Medusa order, status, watermark.
  *
@@ -305,8 +437,36 @@ export const applyCheckoutForm = async (
   options: AllegroSyncOptions,
   form: AllegroCheckoutForm,
 ): Promise<ApplyFormResult> => {
-  const view = readCheckoutForm(form);
+  const read = readCheckoutForm(form);
   const derived = mapCheckoutFormStatus(form);
+
+  if (!read.ok) {
+    // The form's money could not be read, so it is NOT applied. Recording the Allegro
+    // statuses and the precise reason still happens - the form has to stay visible - but
+    // no Medusa order is created and no `derived_status` is advanced. The throw feeds the
+    // streak/quarantine machinery exactly like any other per-form failure, so a transient
+    // shape glitch retries and a permanently malformed form is eventually set aside with
+    // its reason on the row.
+    //
+    // Creating the order anyway was the old behaviour, and it produced orders whose
+    // totals silently disagreed with the Allegro total stored beside them.
+    await upsertBookkeeping(allegro, read.facts.checkoutFormId, {
+      allegro_status: read.facts.allegroStatus ?? null,
+      buyer_login: read.facts.buyerLogin ?? null,
+      checkout_form_id: read.facts.checkoutFormId,
+      currency: read.facts.currency ?? null,
+      fulfillment_status: read.facts.fulfillmentStatus ?? null,
+      last_error: `unusable checkout form: ${read.problems.join("; ")}`,
+      last_event_at: read.facts.updatedAt ? new Date(read.facts.updatedAt) : null,
+      total_to_pay: read.facts.totalToPayAmount ?? null,
+    });
+    throw new MedusaError(
+      MedusaError.Types.UNEXPECTED_STATE,
+      `checkout form ${read.facts.checkoutFormId} was not applied: ${read.problems.join("; ")}`,
+    );
+  }
+
+  const { view } = read;
 
   const [existing] = (await allegro.listAllegroOrders(
     { checkout_form_id: view.checkoutFormId },
@@ -335,36 +495,41 @@ export const applyCheckoutForm = async (
     fulfillment_status: view.fulfillmentStatus ?? null,
     last_event_at: view.updatedAt ? new Date(view.updatedAt) : null,
     line_conflicts: conflicts.length > 0 ? conflicts : null,
-    total_to_pay: form.summary?.totalToPay?.amount ?? null,
+    total_to_pay: view.totalToPayAmount ?? null,
   };
 
-  let rowId: string;
-  if (existing) {
-    rowId = existing.id;
-    await allegro.updateAllegroOrders([{ id: rowId, ...bookkeeping }] as never);
-  } else {
-    const [created] = (await allegro.createAllegroOrders([bookkeeping] as never)) as unknown as {
-      id: string;
-    }[];
-    rowId = created.id;
-  }
+  const rowId = await upsertBookkeeping(allegro, view.checkoutFormId, bookkeeping, existing);
 
   // Step 2: the Medusa order, if this form has none.
   let medusaOrderId = existing?.medusa_order_id ?? undefined;
   let created = false;
   let lastError: string | undefined;
   if (!medusaOrderId) {
-    const outcome = await createMedusaOrder(container, logger, options, view, items, derived);
-    if (outcome.id) {
-      medusaOrderId = outcome.id;
-      created = true;
-      await allegro.updateAllegroOrders([{ id: rowId, medusa_order_id: medusaOrderId }] as never);
+    // ADOPT before creating. The bookkeeping row's `medusa_order_id` is written in a
+    // separate statement from the order creation, so a crash (or a failed link write) in
+    // between leaves a real Medusa order that this row does not know about - and the next
+    // pass, seeing a null, created a SECOND one. Nothing reconciled them, so a marketplace
+    // order silently became two Medusa orders, each pickable and shippable.
+    const adopted = await findExistingMedusaOrder(container, logger, view.checkoutFormId);
+    if (adopted) {
+      medusaOrderId = adopted;
+      logger.warn(
+        `[allegro-orders] adopted existing Medusa order ${adopted} for checkout form ${view.checkoutFormId}; a previous pass created it but did not record the link. No duplicate was created.`,
+      );
+      await linkMedusaOrder(allegro, logger, rowId, medusaOrderId, view.checkoutFormId);
     } else {
-      lastError = outcome.error;
+      const outcome = await createMedusaOrder(container, logger, options, view, items, derived);
+      if (outcome.id) {
+        medusaOrderId = outcome.id;
+        created = true;
+        await linkMedusaOrder(allegro, logger, rowId, medusaOrderId, view.checkoutFormId);
+      } else {
+        lastError = outcome.error;
+      }
     }
   }
 
-  // Step 3: the status action, and `derived_status` written with it.
+  // Step 3: the status action.
   if (medusaOrderId && write.status) {
     const actionError = await applyMedusaAction(container, logger, medusaOrderId, write.status);
     lastError ??= actionError;
@@ -372,12 +537,24 @@ export const applyCheckoutForm = async (
 
   // Step 4: the watermark, LAST. A crash before here leaves the row unfinished and
   // the next pass repairs it.
+  //
+  // `derived_status` is gated on the pass having LANDED, exactly like `synced_at`. It used
+  // to be written unconditionally, which permanently suppressed the retry: `derived_status`
+  // is the comparison basis, so once it had advanced, `resolveStatusWrite` saw no
+  // transition and returned no `status` - and the cancel or complete that had just failed
+  // was never attempted again. The order froze mid-ladder with a stale Medusa status.
+  //
+  // Gating on the whole `lastError` rather than only on the action's own error is
+  // deliberate and strictly safer: when the order CREATE failed no action ran at all, so
+  // an action-only gate would still advance `derived_status` and suppress the action on
+  // the later pass that does create the order.
+  const landed = !lastError;
   await allegro.updateAllegroOrders([
     {
       id: rowId,
       last_error: lastError ?? null,
-      ...(write.derived_status ? { derived_status: write.derived_status } : {}),
-      ...(lastError ? {} : { synced_at: new Date() }),
+      ...(landed && write.derived_status ? { derived_status: write.derived_status } : {}),
+      ...(landed ? { synced_at: new Date() } : {}),
     },
   ] as never);
 

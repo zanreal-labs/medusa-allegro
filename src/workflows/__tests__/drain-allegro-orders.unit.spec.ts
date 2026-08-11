@@ -41,6 +41,8 @@ var coreFlows: {
    * a per-form failure has to be injected here rather than at the fetch.
    */
   failCreateForForms: Set<string>;
+  /** Makes `cancelOrderWorkflow` reject, e.g. an order with live fulfillments. */
+  cancelError?: Error;
   sequence: number;
 } = {
   cancelled: [],
@@ -53,6 +55,9 @@ var coreFlows: {
 jest.mock("@medusajs/medusa/core-flows", () => ({
   cancelOrderWorkflow: () => ({
     run: ({ input }: { input: { order_id: string } }) => {
+      if (coreFlows.cancelError) {
+        return Promise.reject(coreFlows.cancelError);
+      }
       coreFlows.cancelled.push(input.order_id);
       return Promise.resolve({ result: undefined });
     },
@@ -223,6 +228,18 @@ const setup = (input: {
   variants?: { id: string; sku: string }[];
   ordersSyncDisabled?: boolean;
   regions?: { id: string; currency_code: string }[];
+  /** Medusa orders that already exist, for the duplicate-adoption path. */
+  existingOrders?: { id: string; metadata?: Record<string, unknown> }[];
+  /**
+   * Make the `metadata` JSON filter throw, so the bounded fallback scan is exercised.
+   *
+   * Worth having as a switch: the nested-metadata filter is the one part of adoption that
+   * depends on query-layer behaviour this plugin does not own, and the fallback is what
+   * keeps a duplicate order from being created if it is ever unsupported.
+   */
+  orderQueryThrows?: boolean;
+  /** Make the filter match everything, as a filter that silently does nothing would. */
+  orderQueryIgnoresFilter?: boolean;
 }) => {
   const client = fakeClient(input);
   const table = orderTable(input.orders ?? []);
@@ -256,12 +273,41 @@ const setup = (input: {
       }
       if (key === "query") {
         return {
-          graph: ({ entity }: { entity: string }) => {
+          graph: ({
+            entity,
+            filters,
+            pagination,
+          }: {
+            entity: string;
+            filters?: Record<string, unknown>;
+            pagination?: { skip: number; take: number };
+          }) => {
             if (entity === "product_variant") {
               return Promise.resolve({ data: variants });
             }
             if (entity === "region") {
               return Promise.resolve({ data: regions });
+            }
+            if (entity === "order") {
+              const all = input.existingOrders ?? [];
+              const wanted = (
+                filters?.metadata as { allegro_checkout_form_id?: string } | undefined
+              )?.allegro_checkout_form_id;
+              if (wanted !== undefined) {
+                if (input.orderQueryThrows) {
+                  return Promise.reject(new Error("json filters are not supported here"));
+                }
+                // A filter that "works" narrows; one that silently does nothing returns
+                // everything, which is the case the in-memory re-check has to survive.
+                return Promise.resolve({
+                  data: input.orderQueryIgnoresFilter
+                    ? all
+                    : all.filter((order) => order.metadata?.allegro_checkout_form_id === wanted),
+                });
+              }
+              const skip = pagination?.skip ?? 0;
+              const take = pagination?.take ?? all.length;
+              return Promise.resolve({ data: all.slice(skip, skip + take) });
             }
             return Promise.resolve({ data: [] });
           },
@@ -279,6 +325,7 @@ beforeEach(() => {
   coreFlows.cancelled.length = 0;
   coreFlows.completed.length = 0;
   coreFlows.createError = undefined;
+  coreFlows.cancelError = undefined;
   coreFlows.sequence = 0;
   coreFlows.failCreateForForms.clear();
 });
@@ -296,6 +343,201 @@ describe("drainAllegroOrders: bootstrap", () => {
     expect(context.allegro.states.get("orders")).toMatchObject({ cursor: "e-newest" });
     expect(context.table.rows).toEqual([]);
     expect(context.logs.some((line) => line.includes("cursor bootstrapped"))).toBe(true);
+  });
+});
+
+describe("drainAllegroOrders: never duplicating a Medusa order", () => {
+  const withCursor = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ states: [{ cursor: "e0", provider: "orders", status: "ok" }], ...input });
+
+  /** The state a crash between order creation and the link write leaves behind. */
+  const orphaned = (over: Parameters<typeof setup>[0] = {}) =>
+    withCursor({
+      existingOrders: [{ id: "order_pre", metadata: { allegro_checkout_form_id: "f1" } }],
+      forms: [form({ id: "f1" })],
+      // The bookkeeping row exists but never learned the order id.
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: null }],
+      pages: [[event("e1", "f1")]],
+      ...over,
+    });
+
+  it("adopts the existing order instead of creating a second one", async () => {
+    // The regression: `medusa_order_id` is written in a separate statement from the order
+    // creation, so a crash in between leaves a real Medusa order this row does not know
+    // about. The next pass saw a null and created ANOTHER one, with nothing reconciling
+    // them - so one marketplace sale silently became two Medusa orders, each pickable and
+    // each shippable.
+    const context = orphaned();
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toEqual([]);
+    expect(context.table.rows[0]).toMatchObject({ medusa_order_id: "order_pre" });
+    expect(context.logs.some((line) => line.includes("adopted existing Medusa order"))).toBe(true);
+  });
+
+  it("falls back to a bounded scan when the metadata filter is unsupported", async () => {
+    // The JSON filter is the one part of adoption that depends on query-layer behaviour
+    // the plugin does not own. If it throws, creating a duplicate is not an acceptable
+    // degradation, so a bounded newest-first scan verifies in memory instead.
+    const context = orphaned({ orderQueryThrows: true });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toEqual([]);
+    expect(context.table.rows[0]).toMatchObject({ medusa_order_id: "order_pre" });
+  });
+
+  it("never adopts an order belonging to a different checkout form", async () => {
+    // The safety property that makes adoption sound at all: only an EXACT metadata match
+    // is accepted. Here the filter is broken in the most dangerous way - it matches
+    // everything - and the order on offer belongs to another form. Adopting it would
+    // attach somebody else's sale to this one.
+    const context = withCursor({
+      existingOrders: [{ id: "order_other", metadata: { allegro_checkout_form_id: "f-OTHER" } }],
+      forms: [form({ id: "f1" })],
+      orderQueryIgnoresFilter: true,
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    // A fresh order was created, and the unrelated one was left alone.
+    expect(coreFlows.created).toHaveLength(1);
+    expect(context.table.rows[0]?.medusa_order_id).toBe("order_1");
+  });
+
+  it("creates the order normally when nothing exists to adopt", async () => {
+    const context = withCursor({ forms: [form({ id: "f1" })], pages: [[event("e1", "f1")]] });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toHaveLength(1);
+  });
+});
+
+describe("drainAllegroOrders: a malformed form is refused, not fabricated", () => {
+  const withCursor = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ states: [{ cursor: "e0", provider: "orders", status: "ok" }], ...input });
+
+  const malformed = (over: Partial<AllegroCheckoutForm>) =>
+    withCursor({ forms: [form({ id: "f1", ...over })], pages: [[event("e1", "f1")]] });
+
+  it("refuses a line whose unit price cannot be parsed", async () => {
+    // This became `unit_price: 0` - a free sale - while `total_to_pay` recorded what
+    // Allegro actually charged. The order disagreed with its own stored total and nothing
+    // said so.
+    const context = malformed({
+      lineItems: [
+        {
+          offer: { external: { id: "SKU-1" }, id: "o1", name: "A product" },
+          price: { amount: "not-a-number", currency: "PLN" },
+          quantity: 2,
+        },
+      ],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toEqual([]);
+    expect(result.failed).toBe(1);
+    // The form stays VISIBLE with a precise reason, and unsynced so the drain retries it.
+    expect(context.table.rows[0]?.last_error).toContain("no parseable unit price");
+    expect(context.table.rows[0]?.synced_at ?? null).toBeNull();
+    expect(context.table.rows[0]?.derived_status ?? null).toBeNull();
+  });
+
+  it("refuses a line with no quantity", async () => {
+    // This became `quantity: 1`, which is a short shipment on any multi-unit order.
+    const context = malformed({
+      lineItems: [
+        {
+          offer: { external: { id: "SKU-1" }, id: "o1", name: "A product" },
+          price: { amount: "199.99", currency: "PLN" },
+        },
+      ],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toEqual([]);
+    expect(result.failed).toBe(1);
+    expect(context.table.rows[0]?.last_error).toContain("no usable quantity");
+  });
+
+  it("refuses an order with no currency", async () => {
+    // This became PLN, so a foreign order was priced as a Polish one.
+    const context = malformed({ summary: { totalToPay: { amount: "412.97" } } as never });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toEqual([]);
+    expect(result.failed).toBe(1);
+    expect(context.table.rows[0]?.last_error).toContain("carries no currency");
+  });
+
+  it("refuses a line with no currency", async () => {
+    const context = malformed({
+      lineItems: [
+        {
+          offer: { external: { id: "SKU-1" }, id: "o1", name: "A product" },
+          price: { amount: "199.99" } as never,
+          quantity: 1,
+        },
+      ],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toEqual([]);
+    expect(context.table.rows[0]?.last_error).toContain("has no currency");
+  });
+
+  it("refuses a present-but-unreadable delivery cost", async () => {
+    // Money the buyer paid. Silently dropping it understates the order total.
+    const context = malformed({
+      delivery: { cost: { amount: "??", currency: "PLN" }, method: { name: "Kurier" } },
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toEqual([]);
+    expect(context.table.rows[0]?.last_error).toContain("delivery cost");
+  });
+
+  it("holds the event cursor on a malformed form, so it is retried", async () => {
+    // The refusal has to behave like any other per-form failure: the throw is what holds
+    // the cursor, and five consecutive failures are what eventually quarantine it.
+    const context = malformed({
+      lineItems: [
+        {
+          offer: { external: { id: "SKU-1" }, id: "o1", name: "A product" },
+          price: { amount: "oops", currency: "PLN" },
+          quantity: 1,
+        },
+      ],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(context.allegro.states.get("orders")).toMatchObject({ cursor: "e0" });
+  });
+
+  it("still records a missing SKU as a line conflict rather than refusing the sale", async () => {
+    // The distinction that matters: money versus mapping. An unmatched sygnatura is a
+    // catalogue gap, and the sale really did happen, so it is carried as a title-only
+    // line item and recorded. Only unreadable MONEY refuses the form.
+    const context = withCursor({
+      forms: [form({ id: "f1" })],
+      pages: [[event("e1", "f1")]],
+      variants: [],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toHaveLength(1);
+    expect(result.failed).toBe(0);
+    expect(context.table.rows[0]?.line_conflicts).toHaveLength(1);
   });
 });
 
@@ -416,6 +658,67 @@ describe("drainAllegroOrders: applying a form", () => {
 
     expect(coreFlows.cancelled).toEqual(["order_1"]);
     expect(context.table.rows[0]?.derived_status).toBe("cancelled");
+  });
+
+  it("leaves derived_status stale when the Medusa action failed, so the retry happens", async () => {
+    // The regression: `derived_status` was written unconditionally, in the same operation
+    // as the watermark, even when the cancel or complete had just thrown. But
+    // `derived_status` IS the comparison basis - `resolveStatusWrite` compares against it -
+    // so once it had advanced, the next pass saw no transition, returned no `status`, and
+    // the failed action was NEVER attempted again. The order froze mid-ladder: cancelled
+    // on Allegro, still open in Medusa, with nothing retrying it.
+    coreFlows.cancelError = new Error("order has live fulfillments");
+    const context = withCursor({
+      forms: [form({ id: "f1", status: "CANCELLED" })],
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_1" }],
+      pages: [[event("e1", "f1", "BUYER_CANCELLED")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.cancelled).toEqual([]);
+    // Unchanged, so the next pass still sees a transition and tries again.
+    expect(context.table.rows[0]?.derived_status ?? null).toBeNull();
+    expect(context.table.rows[0]?.synced_at ?? null).toBeNull();
+    expect(context.table.rows[0]?.last_error).toContain("cancel failed");
+  });
+
+  it("retries the failed action on the next pass, and lands it once it succeeds", async () => {
+    // The consequence of the above, and the whole point of the gate.
+    coreFlows.cancelError = new Error("order has live fulfillments");
+    const context = withCursor({
+      forms: [form({ id: "f1", status: "CANCELLED" })],
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_1" }],
+      pages: [[event("e1", "f1", "BUYER_CANCELLED")], [event("e1", "f1", "BUYER_CANCELLED")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+    expect(coreFlows.cancelled).toEqual([]);
+
+    // The cause is fixed; the cursor held, so the same event replays.
+    coreFlows.cancelError = undefined;
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.cancelled).toEqual(["order_1"]);
+    expect(context.table.rows[0]?.derived_status).toBe("cancelled");
+    expect(context.table.rows[0]?.synced_at).toBeInstanceOf(Date);
+  });
+
+  it("does not advance derived_status when the order could not be created", async () => {
+    // The reason the gate is on the whole `lastError` and not just the action's own error:
+    // when the CREATE fails, no action runs at all, so an action-only gate would still
+    // advance `derived_status` - and suppress the complete on the later pass that does
+    // manage to create the order.
+    coreFlows.failCreateForForms.add("f1");
+    const context = withCursor({
+      forms: [form({ fulfillment: { status: "PICKED_UP" }, id: "f1" })],
+      pages: [[event("e1", "f1", "FULFILLMENT_STATUS_CHANGED")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(context.table.rows[0]?.derived_status ?? null).toBeNull();
+    expect(context.table.rows[0]?.synced_at ?? null).toBeNull();
   });
 
   it("completes the Medusa order for a picked-up form", async () => {
