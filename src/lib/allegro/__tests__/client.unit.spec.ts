@@ -580,3 +580,190 @@ describe("AllegroClient", () => {
     }
   });
 });
+
+describe("AllegroClient timeout budget", () => {
+  it("arms the abort signal before the refresh, so a hung /token cannot outlast timeoutMs", async () => {
+    // The signal handed to the API call has to already be aborted by the time
+    // the (slow) refresh returns. If the timer were armed after ensureToken,
+    // the refresh would sit outside the budget entirely.
+    let apiSignal: AbortSignal | undefined;
+    const fetchImpl: FetchMock = jest.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/auth/oauth/token")) {
+        await sleep(30);
+        return tokenResponse();
+      }
+      apiSignal = init?.signal ?? undefined;
+      return apiJson(200, {});
+    });
+    const c = new AllegroClient({
+      appName: "TestApp",
+      appVersion: "1.0",
+      clientId: "cid",
+      clientSecret: "sec",
+      docsUrl: "https://example.com/docs",
+      fetch: fetchImpl as unknown as typeof fetch,
+      timeoutMs: 10,
+    });
+
+    await c.me();
+
+    expect(apiSignal?.aborted).toBe(true);
+  });
+
+  it("passes its timeout down to the OAuth helper it builds", async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const fetchImpl: FetchMock = jest.fn((url: string, init?: RequestInit) => {
+      seen.push(init?.signal ?? undefined);
+      if (url.includes("/auth/oauth/token")) {
+        return Promise.resolve(tokenResponse());
+      }
+      return Promise.resolve(apiJson(200, {}));
+    });
+    const c = new AllegroClient({
+      appName: "TestApp",
+      appVersion: "1.0",
+      clientId: "cid",
+      clientSecret: "sec",
+      docsUrl: "https://example.com/docs",
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+
+    await c.me();
+
+    // Both the token request and the API request carry an abort signal.
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+    expect(seen[1]).toBeInstanceOf(AbortSignal);
+  });
+
+  it("keeps an auth failure typed as AllegroAuthError through the send wrapper", async () => {
+    // ensureToken now runs inside send's try/catch; without the re-throw an
+    // auth failure would be relabelled as a transport error.
+    const fetchImpl: FetchMock = jest.fn(() => Promise.resolve(apiJson(200, {})));
+    const c = new AllegroClient({
+      appName: "TestApp",
+      appVersion: "1.0",
+      clientId: "cid",
+      clientSecret: "sec",
+      docsUrl: "https://example.com/docs",
+      fetch: fetchImpl as unknown as typeof fetch,
+      useClientCredentials: false,
+    });
+
+    await expect(c.me()).rejects.toMatchObject({
+      code: "no_credentials",
+      name: "AllegroAuthError",
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("AllegroClient token rotation", () => {
+  it("hands the persistence hook the refresh token this exchange produced", async () => {
+    const fetchImpl: FetchMock = jest.fn((url: string) => {
+      if (url.includes("/auth/oauth/token")) {
+        return Promise.resolve(
+          Response.json({
+            access_token: "NEW",
+            expires_in: 43_200,
+            refresh_token: "ROTATED",
+            scope: "allegro:api:sale:offers:read",
+            token_type: "Bearer",
+          }),
+        );
+      }
+      return Promise.resolve(apiJson(200, {}));
+    });
+    const onTokenRefresh = jest.fn();
+    const c = new AllegroClient({
+      accessToken: "OLD",
+      accessTokenExpiresAt: Date.now() - 1000,
+      appName: "TestApp",
+      appVersion: "1.0",
+      clientId: "cid",
+      clientSecret: "sec",
+      docsUrl: "https://example.com/docs",
+      fetch: fetchImpl as unknown as typeof fetch,
+      onTokenRefresh,
+      refreshToken: "ORIGINAL",
+    });
+
+    await c.me();
+
+    expect(onTokenRefresh).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accessToken: "NEW",
+        refreshToken: "ROTATED",
+        scope: "allegro:api:sale:offers:read",
+      }),
+    );
+  });
+
+  it("carries the previous refresh token forward when Allegro omits one", async () => {
+    const fetchImpl: FetchMock = jest.fn((url: string) => {
+      if (url.includes("/auth/oauth/token")) {
+        // No refresh_token in the response.
+        return Promise.resolve(tokenResponse());
+      }
+      return Promise.resolve(apiJson(200, {}));
+    });
+    const onTokenRefresh = jest.fn();
+    const c = new AllegroClient({
+      accessToken: "OLD",
+      accessTokenExpiresAt: Date.now() - 1000,
+      appName: "TestApp",
+      appVersion: "1.0",
+      clientId: "cid",
+      clientSecret: "sec",
+      docsUrl: "https://example.com/docs",
+      fetch: fetchImpl as unknown as typeof fetch,
+      onTokenRefresh,
+      refreshToken: "ORIGINAL",
+    });
+
+    await c.me();
+
+    expect(onTokenRefresh).toHaveBeenCalledWith(
+      expect.objectContaining({ accessToken: "AT", refreshToken: "ORIGINAL" }),
+    );
+    expect(c.getToken()?.refreshToken).toBe("ORIGINAL");
+  });
+
+  it("never puts the refresh token in the refresh_rejected message", async () => {
+    // The message ends up in logs and in an admin-facing error; a rotated
+    // refresh token in it would be a credential leak with a long shelf life.
+    const secret = "super-secret-refresh-token-value";
+    const fetchImpl: FetchMock = jest.fn((url: string) => {
+      if (url.includes("/auth/oauth/token")) {
+        return Promise.resolve(
+          Response.json(
+            { error: "invalid_grant", error_description: "token revoked" },
+            { status: 400 },
+          ),
+        );
+      }
+      return Promise.resolve(apiJson(401, { error: "invalid_token" }));
+    });
+    const c = new AllegroClient({
+      accessToken: "STALE",
+      accessTokenExpiresAt: Date.now() + 3_600_000,
+      appName: "TestApp",
+      appVersion: "1.0",
+      clientId: "cid",
+      clientSecret: "sec",
+      docsUrl: "https://example.com/docs",
+      fetch: fetchImpl as unknown as typeof fetch,
+      refreshToken: secret,
+    });
+
+    try {
+      await c.me();
+      throw new Error("expected me() to throw");
+    } catch (error) {
+      const {message} = (error as Error);
+      expect(message).toContain("refresh token could not be exchanged");
+      expect(message).not.toContain(secret);
+      expect(JSON.stringify(error)).not.toContain(secret);
+    }
+  });
+});

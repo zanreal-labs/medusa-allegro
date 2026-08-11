@@ -30,11 +30,24 @@ const basicAuth = (clientId: string, clientSecret: string): string => {
   return `Basic ${utf8ToBase64(raw)}`;
 };
 
+/**
+ * Wall-clock budget for a single token or revoke call, in milliseconds.
+ *
+ * DIVERGENCE FROM THE REFERENCE SDK: upstream `AllegroOAuth` has no timeout at
+ * all, so a token or revoke request against a black-holed Allegro hangs for as
+ * long as the platform's socket default allows. Inside a Medusa request that is
+ * a wedged admin route, and inside a background refresh it is a wedged sync
+ * loop. Matches `AllegroClient`'s default so the two layers behave alike.
+ */
+const DEFAULT_OAUTH_TIMEOUT_MS = 60_000;
+
 export interface AllegroOAuthOptions extends AllegroAppIdentity {
   clientId: string;
   clientSecret: string;
   environment?: AllegroEnvironment;
   fetch?: typeof fetch;
+  /** Per-request timeout for /token and /revoke. Defaults to 60s. */
+  timeoutMs?: number;
 }
 
 export class AllegroOAuth {
@@ -43,6 +56,7 @@ export class AllegroOAuth {
   private readonly userAgent: string;
   private readonly env: AllegroEnvironment;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
 
   constructor(opts: AllegroOAuthOptions) {
     if (!(opts.clientId && opts.clientSecret)) {
@@ -53,6 +67,7 @@ export class AllegroOAuth {
     this.clientSecret = opts.clientSecret;
     this.env = opts.environment ?? "production";
     this.fetchImpl = opts.fetch ?? fetch;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_OAUTH_TIMEOUT_MS;
   }
 
   /** Composed User-Agent header value (read-only). */
@@ -122,6 +137,10 @@ export class AllegroOAuth {
         "User-Agent": this.userAgent,
       },
       method: "POST",
+      // `AbortSignal.timeout` rather than a manual controller plus
+      // `clearTimeout`: the timer it arms is unref'd, so it never holds the
+      // process open, and there is nothing to clean up on the success path.
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) {
       throw new AllegroAuthError(
@@ -143,6 +162,8 @@ export class AllegroOAuth {
         "User-Agent": this.userAgent,
       },
       method: "POST",
+      // See `revoke` for why this is `AbortSignal.timeout`.
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
 
     let parsed: unknown;

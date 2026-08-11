@@ -124,6 +124,9 @@ export class AllegroClient {
       docsUrl: opts.docsUrl,
       environment: this.env,
       fetch: this.fetchImpl,
+      // The token endpoint gets the same budget as an API call, so a
+      // black-holed /token cannot outlast the request that triggered it.
+      timeoutMs: this.timeoutMs,
     });
   }
 
@@ -611,18 +614,25 @@ export class AllegroClient {
     // Held in locals as well as on the instance: the persistence hook must be
     // handed the tokens this refresh produced, not whatever the instance happens
     // to hold by the time the hook runs.
+    //
+    // DIVERGENCE FROM THE REFERENCE SDK: upstream localises only the access
+    // token and the expiry, then reads `this.refreshToken` back off the instance
+    // when calling the hook. Allegro rotates the refresh token on every use, so
+    // a concurrent refresh landing between the assignment and the hook would
+    // make the hook persist the *other* refresh of the pair - the stored token
+    // and the live one drift apart and the next exchange gets `invalid_grant`.
+    // All three values are localised, and the hook is handed the locals.
     const accessToken = fresh.access_token;
+    const refreshToken = fresh.refresh_token ?? this.refreshToken;
     const expiresAt = Date.now() + fresh.expires_in * 1000;
     this.accessToken = accessToken;
-    if (fresh.refresh_token) {
-      this.refreshToken = fresh.refresh_token;
-    }
+    this.refreshToken = refreshToken;
     this.accessTokenExpiresAt = expiresAt;
     if (this.onTokenRefresh) {
       await this.onTokenRefresh({
         accessToken,
         expiresAt,
-        refreshToken: this.refreshToken,
+        refreshToken,
         scope: fresh.scope,
       });
     }
@@ -735,10 +745,15 @@ export class AllegroClient {
     if (opts.body !== undefined && method !== "GET" && method !== "DELETE") {
       headers["Content-Type"] = media;
     }
-    if (!opts.skipAuth) {
-      headers.Authorization = `Bearer ${await this.ensureToken()}`;
-    }
 
+    // DIVERGENCE FROM THE REFERENCE SDK: the timer is armed BEFORE
+    // `ensureToken()`, not after it. Upstream starts the clock once the token is
+    // in hand, so a slow or hung token refresh sits outside the timeout budget
+    // entirely and a "60 second" call could take arbitrarily long. Arming it
+    // first makes `timeoutMs` mean what it says: the whole exchange, refresh
+    // included. The trade-off is deliberate - a request that spends most of its
+    // budget refreshing has less left for the call itself, and should fail
+    // rather than silently extend.
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const signal = opts.signal
@@ -747,6 +762,9 @@ export class AllegroClient {
 
     let res: Response;
     try {
+      if (!opts.skipAuth) {
+        headers.Authorization = `Bearer ${await this.ensureToken()}`;
+      }
       res = await this.fetchImpl(url, {
         body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
         headers,
@@ -754,6 +772,12 @@ export class AllegroClient {
         signal,
       });
     } catch (error) {
+      // An auth failure has to keep its own type: `request` maps a rejected
+      // refresh onto `refresh_rejected`, and callers distinguish "reconnect the
+      // account" from "Allegro is unreachable".
+      if (error instanceof AllegroAuthError) {
+        throw error;
+      }
       const reason = error instanceof Error ? error.message : String(error);
       throw new AllegroApiError({
         httpStatus: 0,

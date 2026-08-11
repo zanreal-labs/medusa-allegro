@@ -54,6 +54,24 @@ describe("changeOfferQuantity", () => {
     ).rejects.toThrow("between 1 and 1,000");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it("rejects a fractional quantity, which Allegro would round silently", async () => {
+    const fetchImpl = jest.fn() as unknown as typeof fetch;
+
+    await expect(
+      client(fetchImpl).changeOfferQuantity({ commandId: "c", offerIds: ["o"], value: 1.5 }),
+    ).rejects.toThrow("non-negative integer");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty offer list, which would send a command that matches nothing", async () => {
+    const fetchImpl = jest.fn() as unknown as typeof fetch;
+
+    await expect(
+      client(fetchImpl).changeOfferQuantity({ commandId: "c", offerIds: [], value: 1 }),
+    ).rejects.toThrow("between 1 and 1,000");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });
 
 describe("pollOfferQuantityCommand", () => {

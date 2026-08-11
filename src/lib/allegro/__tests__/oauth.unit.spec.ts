@@ -301,3 +301,53 @@ describe("AllegroOAuth.revoke", () => {
     });
   });
 });
+
+describe("AllegroOAuth timeouts", () => {
+  const withTimeout = (fetchImpl: typeof fetch, timeoutMs?: number) =>
+    new AllegroOAuth({
+      appName: "TestApp",
+      appVersion: "1.0",
+      clientId: "cid",
+      clientSecret: "sec",
+      docsUrl: "https://example.com/docs",
+      fetch: fetchImpl,
+      timeoutMs,
+    });
+
+  it("arms an abort signal on the token request", async () => {
+    const spy = jest.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(Response.json({ access_token: "AT", expires_in: 43_200 })),
+    );
+
+    await withTimeout(spy as unknown as typeof fetch).clientCredentials();
+
+    expect(spy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("arms an abort signal on the revoke request", async () => {
+    const spy = jest.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 200 })),
+    );
+
+    await withTimeout(spy as unknown as typeof fetch).revoke("TOKEN");
+
+    expect(spy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("aborts a token request that outlives the budget", async () => {
+    // Without a timeout a black-holed /token hangs for the platform socket
+    // default, wedging whatever asked for the refresh.
+    const spy = jest.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new Error("aborted by signal"));
+          });
+        }),
+    );
+
+    await expect(
+      withTimeout(spy as unknown as typeof fetch, 10).clientCredentials(),
+    ).rejects.toThrow(/abort/i);
+  });
+});
