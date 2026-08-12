@@ -40,6 +40,7 @@ export interface KillSwitches {
   priceSyncDisabled: boolean;
   stockSyncDisabled: boolean;
   ordersSyncDisabled: boolean;
+  invoiceAttachDisabled: boolean;
 }
 
 export interface PublicOptions {

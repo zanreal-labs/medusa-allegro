@@ -2,7 +2,9 @@ import { randomBytes } from "node:crypto";
 import {
   DEFAULT_CHANGE_CAP,
   DEFAULT_COSTS_MODULE_KEY,
+  DEFAULT_INVOICE_MODULE_KEY,
   DEFAULT_MARKETPLACE_ID,
+  isInvoiceAttachDisabledByEnv,
   isOrdersSyncDisabledByEnv,
   isStockSyncDisabledByEnv,
   resolveAllegroOptions,
@@ -52,6 +54,11 @@ describe("sync defaults", () => {
     expect(resolved).toMatchObject({
       changeCap: DEFAULT_CHANGE_CAP,
       costsModuleKey: DEFAULT_COSTS_MODULE_KEY,
+      // Attaching is on by default: the invoice already exists as a legal document
+      // by the time this plugin hears about it, so refusing to deliver it cannot be
+      // the out-of-the-box behaviour.
+      invoiceAttachDisabled: false,
+      invoiceModuleKey: DEFAULT_INVOICE_MODULE_KEY,
       marketplaceId: DEFAULT_MARKETPLACE_ID,
       ordersSyncDisabled: false,
       stockLocationIds: [],
@@ -71,7 +78,7 @@ describe("sync defaults", () => {
 });
 
 describe("kill switches", () => {
-  it.each(["stockSyncDisabled", "ordersSyncDisabled"] as const)(
+  it.each(["stockSyncDisabled", "ordersSyncDisabled", "invoiceAttachDisabled"] as const)(
     "honours %s from the config",
     (field) => {
       const resolved = resolveAllegroOptions(validOptions({ [field]: true }));
@@ -82,6 +89,7 @@ describe("kill switches", () => {
   it.each([
     ["stockSyncDisabled", "ALLEGRO_STOCK_SYNC_DISABLED"],
     ["ordersSyncDisabled", "ALLEGRO_ORDERS_SYNC_DISABLED"],
+    ["invoiceAttachDisabled", "ALLEGRO_INVOICE_ATTACH_DISABLED"],
   ] as const)("lets %s be forced on by %s", (field, envVar) => {
     withEnv(envVar, "1", () => {
       expect(resolveAllegroOptions(validOptions({ [field]: false }))[field]).toBe(true);
@@ -91,6 +99,7 @@ describe("kill switches", () => {
   it.each([
     ["stockSyncDisabled", "ALLEGRO_STOCK_SYNC_DISABLED"],
     ["ordersSyncDisabled", "ALLEGRO_ORDERS_SYNC_DISABLED"],
+    ["invoiceAttachDisabled", "ALLEGRO_INVOICE_ATTACH_DISABLED"],
   ] as const)("rejects a boolean-looking string for %s", (field, envVar) => {
     // The mistake: `stockSyncDisabled: process.env.SOMETHING` yields "true", which
     // a truthiness test honours but a `=== true` test ignores - the switch reads as
@@ -106,11 +115,13 @@ describe("kill switches", () => {
   it.each(["1", "true", "TRUE", " Yes "])("reads %p as disabled from the env", (value) => {
     expect(isStockSyncDisabledByEnv({ ALLEGRO_STOCK_SYNC_DISABLED: value })).toBe(true);
     expect(isOrdersSyncDisabledByEnv({ ALLEGRO_ORDERS_SYNC_DISABLED: value })).toBe(true);
+    expect(isInvoiceAttachDisabledByEnv({ ALLEGRO_INVOICE_ATTACH_DISABLED: value })).toBe(true);
   });
 
   it.each(["0", "false", "no", "", undefined])("reads %p as enabled from the env", (value) => {
     expect(isStockSyncDisabledByEnv({ ALLEGRO_STOCK_SYNC_DISABLED: value })).toBe(false);
     expect(isOrdersSyncDisabledByEnv({ ALLEGRO_ORDERS_SYNC_DISABLED: value })).toBe(false);
+    expect(isInvoiceAttachDisabledByEnv({ ALLEGRO_INVOICE_ATTACH_DISABLED: value })).toBe(false);
   });
 });
 
@@ -248,6 +259,7 @@ describe("toPublicAllegroOptions", () => {
     expect(publicOptions).toMatchObject({
       automationRules: { promoted: "Store Sale", standard: "Store" },
       changeCap: 25,
+      invoiceAttachDisabled: false,
       marketplaceId: DEFAULT_MARKETPLACE_ID,
       ordersSyncDisabled: false,
       salesChannelId: "sc_1",
@@ -258,5 +270,9 @@ describe("toPublicAllegroOptions", () => {
     for (const secret of ["clientId", "clientSecret", "encryptionKey", "backendUrl", "docsUrl"]) {
       expect(publicOptions[secret]).toBeUndefined();
     }
+    // `invoiceModuleKey` stays out for the same reason `costsModuleKey` does: a
+    // container key is wiring the admin has no use for, and every field in the public
+    // type is one the UI actually renders.
+    expect(publicOptions.invoiceModuleKey).toBeUndefined();
   });
 });

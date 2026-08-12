@@ -53,6 +53,31 @@ export interface AllegroPluginOptions {
    */
   ordersSyncDisabled?: boolean;
   /**
+   * Kill-switch for attaching invoice PDFs to Allegro orders.
+   *
+   * Deliberately NOT folded into `ordersSyncDisabled`. That switch stops the drain
+   * from CONSUMING the journal, and an operator reaches for it to stop a runaway
+   * import. Delivering an invoice the marketplace order needs is a different
+   * decision with different consequences, and one switch covering both would mean
+   * pausing an import silently stops issued invoices reaching buyers.
+   *
+   * Defaults to enabled (`false`) for the same reason: by the time this plugin
+   * hears about an invoice it already exists as a legal document, so the only
+   * sensible default is to deliver it.
+   */
+  invoiceAttachDisabled?: boolean;
+  /**
+   * Container key of the invoicing module that issues the documents, resolved
+   * lazily and optionally. Defaults to `"infakt"`
+   * (`@zanreal/medusa-infakt`).
+   *
+   * A SOFT dependency, duck-typed on the two reads the attach path makes, so a
+   * store that invoices somewhere else - or nowhere - is a supported configuration
+   * rather than a boot failure. Without the module the invoice chain is simply
+   * inert: nothing subscribes usefully and the sweep finds nothing to do.
+   */
+  invoiceModuleKey?: string;
+  /**
    * The two named price-automation rules this plugin attaches, by promotion
    * state. These MUST already exist on the Allegro account: the plugin resolves
    * them by name on every run and refuses to write anything when a name is
@@ -137,6 +162,7 @@ export interface ResolvedAllegroOptions {
   priceSyncDisabled: boolean;
   stockSyncDisabled: boolean;
   ordersSyncDisabled: boolean;
+  invoiceAttachDisabled: boolean;
   automationRules?: { promoted: string; standard: string };
   changeCap: number;
   salesChannelId?: string;
@@ -145,6 +171,7 @@ export interface ResolvedAllegroOptions {
   srpMetadataKey?: string;
   srpPriceListId?: string;
   costsModuleKey: string;
+  invoiceModuleKey: string;
   marketplaceId: string;
   regionId?: string;
   backendUrl?: string;
@@ -171,6 +198,7 @@ export interface AllegroPublicOptions {
   priceSyncDisabled: boolean;
   stockSyncDisabled: boolean;
   ordersSyncDisabled: boolean;
+  invoiceAttachDisabled: boolean;
   /**
    * The configured rule names, so the admin can say which two rules the account
    * must carry. Names, not ids - a name is what an operator sees in the seller
@@ -193,6 +221,7 @@ export const toPublicAllegroOptions = (options: ResolvedAllegroOptions): Allegro
   automationRules: options.automationRules,
   changeCap: options.changeCap,
   environment: options.environment,
+  invoiceAttachDisabled: options.invoiceAttachDisabled,
   marketplaceId: options.marketplaceId,
   ordersSyncDisabled: options.ordersSyncDisabled,
   priceSyncDisabled: options.priceSyncDisabled,
@@ -222,6 +251,8 @@ const PRICE_SYNC_DISABLED_ENV = "ALLEGRO_PRICE_SYNC_DISABLED";
 const STOCK_SYNC_DISABLED_ENV = "ALLEGRO_STOCK_SYNC_DISABLED";
 /** Same contract again, for the order event drain. */
 const ORDERS_SYNC_DISABLED_ENV = "ALLEGRO_ORDERS_SYNC_DISABLED";
+/** Same contract again, for attaching invoice PDFs to Allegro orders. */
+const INVOICE_ATTACH_DISABLED_ENV = "ALLEGRO_INVOICE_ATTACH_DISABLED";
 /** Comma-separated stock location ids, overriding `stockLocationIds`. */
 const STOCK_LOCATION_IDS_ENV = "ALLEGRO_STOCK_LOCATION_IDS";
 
@@ -239,10 +270,15 @@ export const isStockSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): 
 export const isOrdersSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
   truthyEnv(env[ORDERS_SYNC_DISABLED_ENV]);
 
+export const isInvoiceAttachDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
+  truthyEnv(env[INVOICE_ATTACH_DISABLED_ENV]);
+
 /** Default price-automation marketplace: a single-account PL seller lives here. */
 export const DEFAULT_MARKETPLACE_ID = "allegro-pl";
 /** Default container key of the optional `@zanreal/medusa-product-costs` module. */
 export const DEFAULT_COSTS_MODULE_KEY = "productCosts";
+/** Default container key of the optional `@zanreal/medusa-infakt` module. */
+export const DEFAULT_INVOICE_MODULE_KEY = "infakt";
 /** Default per-run cap on price-automation commands. */
 export const DEFAULT_CHANGE_CAP = 100;
 
@@ -408,6 +444,11 @@ export const resolveAllegroOptions = (
   requireBooleanSwitch(options.priceSyncDisabled, "priceSyncDisabled", PRICE_SYNC_DISABLED_ENV);
   requireBooleanSwitch(options.stockSyncDisabled, "stockSyncDisabled", STOCK_SYNC_DISABLED_ENV);
   requireBooleanSwitch(options.ordersSyncDisabled, "ordersSyncDisabled", ORDERS_SYNC_DISABLED_ENV);
+  requireBooleanSwitch(
+    options.invoiceAttachDisabled,
+    "invoiceAttachDisabled",
+    INVOICE_ATTACH_DISABLED_ENV,
+  );
 
   const redirectPath = (options.redirectPath ?? DEFAULT_REDIRECT_PATH).trim();
   if (!redirectPath.startsWith("/")) {
@@ -461,6 +502,8 @@ export const resolveAllegroOptions = (
     docsUrl,
     encryptionKey,
     environment,
+    invoiceAttachDisabled: options.invoiceAttachDisabled === true || isInvoiceAttachDisabledByEnv(),
+    invoiceModuleKey: optionalString(options.invoiceModuleKey) ?? DEFAULT_INVOICE_MODULE_KEY,
     marketplaceId: optionalString(options.marketplaceId) ?? DEFAULT_MARKETPLACE_ID,
     ordersSyncDisabled: options.ordersSyncDisabled === true || isOrdersSyncDisabledByEnv(),
     priceSyncDisabled: options.priceSyncDisabled === true || isPriceSyncDisabledByEnv(),

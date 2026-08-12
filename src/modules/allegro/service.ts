@@ -11,6 +11,7 @@ import { AllegroOAuth } from "../../lib/allegro/oauth";
 import type { PersistedToken } from "../../lib/allegro/types";
 import { decryptValue, encryptValue } from "../../lib/crypto";
 import {
+  isInvoiceAttachDisabledByEnv,
   isOrdersSyncDisabledByEnv,
   isPriceSyncDisabledByEnv,
   isStockSyncDisabledByEnv,
@@ -112,6 +113,7 @@ export interface AllegroSyncOptions {
   automationRules?: { promoted: string; standard: string };
   changeCap: number;
   costsModuleKey: string;
+  invoiceModuleKey: string;
   marketplaceId: string;
   regionId?: string;
   salesChannelId?: string;
@@ -248,6 +250,7 @@ class AllegroModuleService extends MedusaService({
       automationRules: o.automationRules,
       changeCap: o.changeCap,
       costsModuleKey: o.costsModuleKey,
+      invoiceModuleKey: o.invoiceModuleKey,
       marketplaceId: o.marketplaceId,
       regionId: o.regionId,
       salesChannelId: o.salesChannelId,
@@ -280,23 +283,43 @@ class AllegroModuleService extends MedusaService({
   }
 
   /**
+   * Effective invoice-attach kill-switch. Same env-wins contract as prices.
+   *
+   * Its own switch rather than a reading of `ordersSyncDisabled`: pausing the import
+   * of orders and refusing to deliver an already-issued invoice are different
+   * decisions, and conflating them means one incident response silently causes the
+   * other problem.
+   */
+  isInvoiceAttachDisabled(): Promise<boolean> {
+    return Promise.resolve(this.options_.invoiceAttachDisabled || isInvoiceAttachDisabledByEnv());
+  }
+
+  /**
    * Every kill switch in one read, for the admin.
    *
-   * One method rather than three calls from the route because the three are only
-   * ever meaningful together: "price sync is off" reads as "nothing is written",
-   * which is wrong while stock sync is on.
+   * One method rather than four calls from the route because they are only ever
+   * meaningful together: "price sync is off" reads as "nothing is written", which is
+   * wrong while stock sync is on.
    */
   async getKillSwitches(): Promise<{
     priceSyncDisabled: boolean;
     stockSyncDisabled: boolean;
     ordersSyncDisabled: boolean;
+    invoiceAttachDisabled: boolean;
   }> {
-    const [priceSyncDisabled, stockSyncDisabled, ordersSyncDisabled] = await Promise.all([
-      this.isPriceSyncDisabled(),
-      this.isStockSyncDisabled(),
-      this.isOrdersSyncDisabled(),
-    ]);
-    return { ordersSyncDisabled, priceSyncDisabled, stockSyncDisabled };
+    const [priceSyncDisabled, stockSyncDisabled, ordersSyncDisabled, invoiceAttachDisabled] =
+      await Promise.all([
+        this.isPriceSyncDisabled(),
+        this.isStockSyncDisabled(),
+        this.isOrdersSyncDisabled(),
+        this.isInvoiceAttachDisabled(),
+      ]);
+    return {
+      invoiceAttachDisabled,
+      ordersSyncDisabled,
+      priceSyncDisabled,
+      stockSyncDisabled,
+    };
   }
 
   // ─── Sync-state: single-flight claim and health ───

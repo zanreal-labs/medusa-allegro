@@ -547,6 +547,7 @@ describe("getPublicOptions", () => {
       automationRules: undefined,
       changeCap: 100,
       environment: "production",
+      invoiceAttachDisabled: false,
       marketplaceId: "allegro-pl",
       ordersSyncDisabled: false,
       priceSyncDisabled: false,
@@ -559,6 +560,52 @@ describe("getPublicOptions", () => {
       stockLocationIds: [],
       stockSyncDisabled: false,
     });
+  });
+});
+
+describe("kill switches", () => {
+  it("reports all four, so the admin cannot read one as all of them", async () => {
+    // The whole reason `getKillSwitches` is one method: "price sync is off" reads as
+    // "nothing is written", which is wrong while any of the other three is on.
+    expect(await makeService(fakeTable()).getKillSwitches()).toEqual({
+      invoiceAttachDisabled: false,
+      ordersSyncDisabled: false,
+      priceSyncDisabled: false,
+      stockSyncDisabled: false,
+    });
+  });
+
+  it("keeps invoice attach independent of the order drain", async () => {
+    // Not a reading of `ordersSyncDisabled`. Pausing the import to stop a runaway must
+    // not also stop an issued invoice reaching the buyer, and vice versa.
+    const service = makeService(fakeTable(), validOptions({ ordersSyncDisabled: true }));
+
+    expect(await service.isOrdersSyncDisabled()).toBe(true);
+    expect(await service.isInvoiceAttachDisabled()).toBe(false);
+  });
+
+  it("honours the invoice-attach switch on its own", async () => {
+    const service = makeService(fakeTable(), validOptions({ invoiceAttachDisabled: true }));
+
+    expect(await service.isInvoiceAttachDisabled()).toBe(true);
+    expect(await service.isOrdersSyncDisabled()).toBe(false);
+  });
+
+  it("re-reads the environment rather than the value captured at boot", async () => {
+    const service = makeService(fakeTable());
+    const previous = process.env.ALLEGRO_INVOICE_ATTACH_DISABLED;
+    process.env.ALLEGRO_INVOICE_ATTACH_DISABLED = "1";
+    try {
+      // An operator setting this is responding to an incident, and a value read once at
+      // construction would ignore them until a restart.
+      expect(await service.isInvoiceAttachDisabled()).toBe(true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.ALLEGRO_INVOICE_ATTACH_DISABLED;
+      } else {
+        process.env.ALLEGRO_INVOICE_ATTACH_DISABLED = previous;
+      }
+    }
   });
 });
 

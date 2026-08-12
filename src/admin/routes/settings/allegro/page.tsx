@@ -268,7 +268,7 @@ const AllegroSettingsPage = () => {
           Writers
         </Heading>
         <Text className="text-ui-fg-subtle mb-3" size="small">
-          Three loops write to Allegro, each with its own switch. They are listed separately because
+          Four writers reach Allegro, each with its own switch. They are listed separately because
           "price sync is off" does not mean nothing is written.
         </Text>
         <div className="flex flex-wrap gap-2">
@@ -286,6 +286,11 @@ const AllegroSettingsPage = () => {
             disabled={data?.kill_switches.ordersSyncDisabled}
             envVar="ALLEGRO_ORDERS_SYNC_DISABLED"
             label="Order drain"
+          />
+          <KillSwitch
+            disabled={data?.kill_switches.invoiceAttachDisabled}
+            envVar="ALLEGRO_INVOICE_ATTACH_DISABLED"
+            label="Invoice attach"
           />
         </div>
         {data && !data.options.automationRules ? (
