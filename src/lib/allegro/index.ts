@@ -7,6 +7,8 @@ export {
   ALLEGRO_BETA_MEDIA_TYPE,
   ALLEGRO_DEFAULT_MARKETPLACE_ID,
   ALLEGRO_ENDPOINTS,
+  ALLEGRO_INVOICE_MAX_BYTES,
+  ALLEGRO_MAX_INVOICES_PER_ORDER,
   ALLEGRO_MEDIA_TYPE,
 } from "./types";
 export type {
@@ -38,10 +40,12 @@ export type {
   ChangeOfferQuantityParams,
   CheckoutFormInvoice,
   CheckoutFormInvoices,
+  CreatedCheckoutFormInvoice,
   ListCheckoutFormsParams,
   ListOffersParams,
   ListOrderEventsParams,
   ListPriceAutomationRulesResponse,
+  NewCheckoutFormInvoice,
   OfferFeePreviewResponse,
   OfferPriceAutomationBounds,
   OfferPriceAutomationCommandReport,

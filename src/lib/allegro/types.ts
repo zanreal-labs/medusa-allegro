@@ -382,6 +382,42 @@ export interface CheckoutFormInvoices {
 }
 
 /**
+ * Body of `POST /order/checkout-forms/{id}/invoices`.
+ *
+ * Registers the document and returns the id the file is then uploaded against.
+ * `file.name` is what the buyer sees in the Allegro order view, so it has to be a
+ * filename rather than a title; `invoiceNumber` is optional to Allegro but is what
+ * makes the create idempotent for a caller - see the dedupe note on
+ * `AllegroClient.createCheckoutFormInvoice`.
+ */
+export interface NewCheckoutFormInvoice {
+  file: { name: string };
+  invoiceNumber?: string;
+}
+
+/** Response of `POST /order/checkout-forms/{id}/invoices`. */
+export interface CreatedCheckoutFormInvoice {
+  id: string;
+}
+
+/**
+ * Allegro's size ceiling for one uploaded invoice file, in bytes.
+ *
+ * Documented as 3 MB, and enforced as a rejection rather than a truncation, so a
+ * caller that checks first turns a failed upload into a recorded, actionable state.
+ */
+export const ALLEGRO_INVOICE_MAX_BYTES = 3 * 1024 * 1024;
+
+/**
+ * How many invoice documents Allegro accepts on one order.
+ *
+ * Worth knowing for any caller that creates documents: the eleventh create fails,
+ * and a create whose file upload never followed still occupies one of the ten. That
+ * is the reason the attach path checks the PDF before registering anything.
+ */
+export const ALLEGRO_MAX_INVOICES_PER_ORDER = 10;
+
+/**
  * Query parameters of `GET /order/checkout-forms`.
  *
  * Allegro spells its filters with dots (`fulfillment.status`, `buyer.login`,

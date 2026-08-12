@@ -15,10 +15,12 @@ import type {
   AssignOfferPriceAutomationParams,
   ChangeOfferQuantityParams,
   CheckoutFormInvoices,
+  CreatedCheckoutFormInvoice,
   ListCheckoutFormsParams,
   ListOffersParams,
   ListOrderEventsParams,
   ListPriceAutomationRulesResponse,
+  NewCheckoutFormInvoice,
   OfferFeePreviewResponse,
   OfferPriceAutomationCommandReport,
   OfferPriceAutomationState,
@@ -37,6 +39,17 @@ const REFRESH_LEEWAY_MS = 30_000;
 interface RequestOptions {
   query?: Record<string, string | number | boolean | string[] | undefined>;
   body?: unknown;
+  /**
+   * Raw (non-JSON) request body, sent verbatim. Takes precedence over `body`.
+   *
+   * The one escape hatch from "every request is JSON", and it exists for exactly
+   * one endpoint: Allegro takes an invoice PDF as the whole request body. Keeping
+   * it separate from `body` is what stops a binary from reaching
+   * `JSON.stringify`, which would upload the string `{}` and be accepted.
+   */
+  rawBody?: BodyInit;
+  /** Content-Type for the request body. Defaults to the media type. */
+  contentType?: string;
   /** Override Accept/Content-Type, e.g. for beta endpoints. */
   mediaType?: string;
   /** Bypass auto-auth (used by internals only). */
@@ -509,6 +522,55 @@ export class AllegroClient {
   }
 
   /**
+   * POST /order/checkout-forms/{id}/invoices - register an invoice document on an
+   * order. Returns the attachment id; the PDF is uploaded afterwards via
+   * `uploadCheckoutFormInvoiceFile`. At most 10 invoices per order
+   * (`ALLEGRO_MAX_INVOICES_PER_ORDER`).
+   *
+   * SANCTIONED EXTENSION of the ported SDK: this and the file upload below are the
+   * two write methods the reference client carries that the initial port left out,
+   * brought over verbatim for the invoice chain. They keep the SDK's conventions -
+   * the vendor media type for the JSON call, the shared User-Agent, and
+   * `AllegroApiError` classification through `request`.
+   *
+   * THERE IS NO IDEMPOTENCY KEY. A second call with the same `invoiceNumber`
+   * creates a second document rather than returning the first, so a caller that
+   * crashed between a successful create and persisting the returned id must look
+   * the existing document up (`getCheckoutFormInvoices`, matched on
+   * `invoiceNumber`) before creating another. That guard is the caller's, not the
+   * client's, because only the caller knows which number it issued.
+   */
+  createCheckoutFormInvoice(
+    id: string,
+    invoice: NewCheckoutFormInvoice,
+  ): Promise<CreatedCheckoutFormInvoice> {
+    return this.request("POST", `/order/checkout-forms/${encodeURIComponent(id)}/invoices`, {
+      body: invoice,
+    });
+  }
+
+  /**
+   * PUT /order/checkout-forms/{id}/invoices/{invoiceId}/file - upload the invoice
+   * file as a raw PDF binary. Allegro answers with an empty success status.
+   *
+   * The body is the PDF itself, not a JSON envelope and not multipart, which is why
+   * `request` grew `rawBody`: handing the bytes to `JSON.stringify` produces `{}`
+   * and Allegro accepts it, so the order ends up carrying an invoice document with
+   * a two-byte file. Max `ALLEGRO_INVOICE_MAX_BYTES`; check the size before calling
+   * rather than after, since a rejected upload leaves the registered document in
+   * place and it still counts against the per-order limit.
+   */
+  uploadCheckoutFormInvoiceFile(id: string, invoiceId: string, pdf: Uint8Array): Promise<void> {
+    return this.request(
+      "PUT",
+      `/order/checkout-forms/${encodeURIComponent(id)}/invoices/${encodeURIComponent(invoiceId)}/file`,
+      // `Uint8Array<ArrayBufferLike>` narrows outside lib.dom's `BodyInit` union,
+      // but fetch accepts any ArrayBufferView at runtime.
+      { contentType: "application/pdf", rawBody: pdf as BodyInit },
+    );
+  }
+
+  /**
    * GET /order/events - the seller's order event journal.
    *
    * The authoritative feed for order state changes. A fulfillment update does
@@ -759,8 +821,11 @@ export class AllegroClient {
       "User-Agent": this.userAgent,
       ...opts.headers,
     };
-    if (opts.body !== undefined && method !== "GET" && method !== "DELETE") {
-      headers["Content-Type"] = media;
+    // `rawBody` counts as a body: the invoice-file upload sends no JSON at all, and
+    // a PUT with no Content-Type is rejected by Allegro rather than sniffed.
+    const hasBody = opts.rawBody !== undefined || opts.body !== undefined;
+    if (hasBody && method !== "GET" && method !== "DELETE") {
+      headers["Content-Type"] = opts.contentType ?? media;
     }
 
     // DIVERGENCE FROM THE REFERENCE SDK: the timer is armed BEFORE
@@ -777,13 +842,21 @@ export class AllegroClient {
       ? composeSignals([controller.signal, opts.signal])
       : controller.signal;
 
+    // Verbatim when raw, stringified otherwise. Resolved before the request rather
+    // than inline so the precedence is stated once: a caller that passes both gets
+    // the raw bytes, never a JSON envelope around them.
+    let requestBody: BodyInit | undefined = opts.rawBody;
+    if (requestBody === undefined && opts.body !== undefined) {
+      requestBody = JSON.stringify(opts.body);
+    }
+
     let res: Response;
     try {
       if (!opts.skipAuth) {
         headers.Authorization = `Bearer ${await this.ensureToken()}`;
       }
       res = await this.fetchImpl(url, {
-        body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+        body: requestBody,
         headers,
         method,
         signal,
