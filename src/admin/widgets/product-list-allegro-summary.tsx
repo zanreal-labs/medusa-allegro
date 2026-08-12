@@ -7,12 +7,20 @@ import type { AllegroSummary, SummaryResponse } from "../lib/types";
 /**
  * A compact Allegro health line above the products table.
  *
- * Medusa does not let a plugin add a column to the core products data table, so
- * a true per-row "Allegro status" while browsing is not on offer. This is the
- * best-supported approximation: one roll-up line that answers "is anything
- * wrong with my Allegro catalogue?" at a glance, with each count linking into
- * the Allegro offers route filtered to exactly those rows. The authoritative
- * per-product view lives on each product's own detail page.
+ * Medusa 2.18's admin SDK exposes widget injection zones (`product.list.before`,
+ * `product.details.*`) but NO way for a plugin to add a column to the CORE products
+ * data table - that table is not extensible from a widget. So a true per-row "Allegro
+ * status" while browsing the stock products list is not on offer here, and this is the
+ * best-supported approximation: one roll-up line that answers "is anything wrong with
+ * my Allegro catalogue?" at a glance, with each count linking into the Allegro offers
+ * route filtered to exactly those rows. The authoritative per-product view lives on
+ * each product's own detail page (the `product.details.after` widget).
+ *
+ * TODO(medusa-admin-kit): the real per-row "Allegro status" column will be contributed
+ * through @zanreal/medusa-admin-kit's extensible products list once it ships. This
+ * plugin will register that column there rather than building a competing full products
+ * list of its own; this summary line stays as the zero-dependency fallback. See the
+ * README "Admin surfaces" section.
  *
  * It renders nothing until at least one SKU is mapped, so a store that does not
  * use Allegro never sees it.
