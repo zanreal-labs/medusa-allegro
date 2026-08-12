@@ -29,6 +29,11 @@ export default async function allegroOrdersSyncJob(container: MedusaContainer): 
   logger.info(
     `[${JOB_NAME}] ${summarizeOrdersSync(result)} - created: ${result.created}${
       result.withLineConflicts > 0 ? `, lineConflicts: ${result.withLineConflicts}` : ""
+    }${
+      // Conditional, unlike the drain counters above: a store that does not invoice
+      // through a module never sweeps anything, and a permanent ", invoicesAttached: 0"
+      // would be noise on all 1440 ticks of the day.
+      result.invoicesAttached > 0 ? `, invoicesAttached: ${result.invoicesAttached}` : ""
     }`,
   );
   if (result.error) {

@@ -9,6 +9,17 @@
  */
 
 export {
+  attachAllegroInvoice,
+  emptyInvoiceSweepResult,
+  INVOICE_SWEEP_BATCH,
+  sweepUnattachedInvoices,
+} from "./attach-allegro-invoice";
+export type {
+  AttachInvoiceInput,
+  AttachInvoiceResult,
+  InvoiceSweepResult,
+} from "./attach-allegro-invoice";
+export {
   discoverAllegroOffersWorkflow,
   emptyDiscoverOffersResult,
   runOfferDiscovery,

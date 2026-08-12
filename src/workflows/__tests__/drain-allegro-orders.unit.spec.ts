@@ -169,6 +169,21 @@ const orderTable = (seed: OrderRowFixture[] = []) => {
     list: (filters: Record<string, unknown>, config: { take?: number } = {}) => {
       let out = rows.map((row) => ({ ...row }));
       for (const [key, value] of Object.entries(filters)) {
+        // An ARRAY as well as a scalar, because the generated CRUD surface accepts both
+        // (Mikro-ORM turns a list into `$in`) and the invoice sweep looks its candidates up
+        // in bulk by `medusa_order_id`. A fake that only understood the scalar form would
+        // silently return nothing for that read and make the sweep look inert.
+        if (Array.isArray(value)) {
+          out = out.filter((row) => value.includes(row[key]));
+          continue;
+        }
+        // `null` means IS NULL in Mikro-ORM, and the sweep asks for `invoice_attached_at:
+        // null`. Strict equality would only match a row carrying a literal null, not one
+        // where the column was never written - which is every unattached order.
+        if (value === null) {
+          out = out.filter((row) => row[key] === null || row[key] === undefined);
+          continue;
+        }
         out = out.filter((row) => row[key] === value);
       }
       return Promise.resolve(config.take === undefined ? out : out.slice(0, config.take));
@@ -198,8 +213,14 @@ const fakeClient = (input: {
 }) => {
   let page = 0;
   const fulfillmentCalls: { id: string; status: string }[] = [];
+  const invoiceUploads: { formId: string; invoiceId: string }[] = [];
   let checkoutPage = 0;
+  let invoiceSequence = 0;
   return {
+    createCheckoutFormInvoice: () => {
+      invoiceSequence += 1;
+      return Promise.resolve({ id: `inv-${invoiceSequence}` });
+    },
     fulfillmentCalls,
     getCheckoutForm: (id: string) => {
       const failure = input.formError?.[id];
@@ -209,8 +230,10 @@ const fakeClient = (input: {
       const found = (input.forms ?? []).find((entry) => entry.id === id);
       return Promise.resolve(found ?? form({ id }));
     },
+    getCheckoutFormInvoices: () => Promise.resolve({ invoices: [] }),
     getOrderEventStats: () =>
       Promise.resolve(input.latest ? { latestEvent: { id: input.latest } } : {}),
+    invoiceUploads,
     listCheckoutForms: () => {
       const forms = input.checkoutFormPages?.[checkoutPage] ?? [];
       checkoutPage += 1;
@@ -230,6 +253,10 @@ const fakeClient = (input: {
         return Promise.reject(input.fulfillmentError);
       }
       fulfillmentCalls.push({ id, status });
+      return Promise.resolve();
+    },
+    uploadCheckoutFormInvoiceFile: (formId: string, invoiceId: string) => {
+      invoiceUploads.push({ formId, invoiceId });
       return Promise.resolve();
     },
   };
@@ -270,6 +297,15 @@ const setup = (input: {
   medusaOrderTotals?: Record<string, { total?: number | string; currency_code?: string }>;
   /** Live `order.status` for orders that already existed before this run. */
   medusaOrderStatuses?: Record<string, string>;
+  /**
+   * Issued invoices the invoicing module would report, registering the module under
+   * `infakt` so the drain's post-drain sweep has something to find.
+   *
+   * Omitted in every other case here, and that is the point: the key then resolves to a
+   * throw, exactly as it does in a store with no invoicing module, so the sweep is inert
+   * and the rest of the drain's behaviour is unchanged by its existence.
+   */
+  issuedInvoices?: { order_id: string; invoice_uuid: string; invoice_number?: string }[];
 }) => {
   const client = fakeClient(input);
   const table = orderTable(input.orders ?? []);
@@ -290,10 +326,25 @@ const setup = (input: {
   const variants = input.variants ?? [{ id: "v1", sku: "SKU-1" }];
   const regions = input.regions ?? [{ currency_code: "pln", id: "reg_pl" }];
 
+  const invoicePdfCalls: string[] = [];
   const container = {
     resolve: (key: string) => {
       if (key === "allegro") {
         return allegro;
+      }
+      if (key === "infakt") {
+        if (!input.issuedInvoices) {
+          throw new Error("infakt is not registered");
+        }
+        return {
+          apiClient: {
+            getInvoicePdf: (uuid: string) => {
+              invoicePdfCalls.push(uuid);
+              return Promise.resolve(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+            },
+          },
+          listInfaktInvoices: () => Promise.resolve(input.issuedInvoices ?? []),
+        };
       }
       if (key === "logger") {
         return {
@@ -360,7 +411,7 @@ const setup = (input: {
     },
   };
 
-  return { allegro, client, container, logs, table };
+  return { allegro, client, container, invoicePdfCalls, logs, table };
 };
 
 beforeEach(() => {
@@ -1304,8 +1355,15 @@ describe("drainAllegroOrders: reconciling the total against Allegro", () => {
   const withCursor = (input: Parameters<typeof setup>[0] = {}) =>
     setup({ states: [{ cursor: "e0", provider: "orders", status: "ok" }], ...input });
 
-  /** The form fixture totals 412.97 PLN. */
-  const reconciled = (total: number | string | undefined, over: Parameters<typeof setup>[0] = {}) =>
+  /**
+   * The form fixture totals 412.97 PLN.
+   *
+   * `total` is spelled with `?` rather than `| undefined` because omitting it is a real
+   * case here ("the order's total cannot be read"), and the formatter's
+   * no-useless-undefined fix rewrites `reconciled(undefined)` into `reconciled()` - which
+   * a `| undefined` parameter rejects as a missing argument.
+   */
+  const reconciled = (total?: number | string, over: Parameters<typeof setup>[0] = {}) =>
     withCursor({
       forms: [form({ id: "f1" })],
       medusaOrderTotals: total === undefined ? {} : { order_1: { currency_code: "pln", total } },
@@ -1376,7 +1434,7 @@ describe("drainAllegroOrders: reconciling the total against Allegro", () => {
   it("records nothing when the order's total cannot be read", async () => {
     // An unreadable total is not evidence of a mismatch, and recording one on that basis
     // would be the same fabrication this check exists to catch.
-    const context = reconciled(undefined);
+    const context = reconciled();
 
     const result = await drainAllegroOrders(context.container as never);
 
@@ -1517,5 +1575,76 @@ describe("drainAllegroOrders: an already-satisfied action must not latch", () =>
     await drainAllegroOrders(context.container as never);
 
     expect(coreFlows.completed).toEqual([["order_pre"]]);
+  });
+});
+
+describe("drainAllegroOrders: the invoice-attach sweep", () => {
+  const quiet = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ pages: [[]], states: [{ cursor: "e0", provider: "orders", status: "ok" }], ...input });
+
+  it("attaches an issued invoice the event never landed for", async () => {
+    // The retry path. The subscriber may have run while Allegro was unreachable, or the
+    // event may have been lost outright - either way "issued but not attached" is a
+    // comparable state, so a sweep can finish the job.
+    const context = quiet({
+      issuedInvoices: [
+        { invoice_number: "FV/2026/08/001", invoice_uuid: "uuid-1", order_id: "order_1" },
+      ],
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_1" }],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.invoicesAttached).toBe(1);
+    expect(result.invoiceAttachFailures).toBe(0);
+    expect(context.invoicePdfCalls).toEqual(["uuid-1"]);
+    expect(context.client.invoiceUploads).toEqual([{ formId: "f1", invoiceId: "inv-1" }]);
+    expect(context.table.rows[0]?.invoice_attached_at).toBeInstanceOf(Date);
+  });
+
+  it("runs after the drain, so a form imported this tick is already sweepable", async () => {
+    const context = quiet({
+      forms: [form({ id: "f1" })],
+      issuedInvoices: [{ invoice_uuid: "uuid-1", order_id: "order_1" }],
+      pages: [[event("e1", "f1")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    // The form was created by this run, and the sweep found it in the same tick.
+    expect(result.created).toBe(1);
+    expect(result.invoicesAttached).toBe(1);
+  });
+
+  it("is inert in a store with no invoicing module", async () => {
+    // The `infakt` key resolves to a throw here, exactly as in a store that does not
+    // invoice through a module. Nothing is attempted and nothing is logged about it.
+    const context = quiet({
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_1" }],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.invoicesAttached).toBe(0);
+    expect(context.client.invoiceUploads).toEqual([]);
+    expect(context.logs.some((line) => line.includes("invoice"))).toBe(false);
+  });
+
+  it("reports a persistent attach failure in the run's own error line", async () => {
+    // Named separately from the drain's failures because the remedy differs: the order is
+    // fine, and what is missing is the document the buyer expects to find on it.
+    const context = quiet({
+      issuedInvoices: [{ invoice_uuid: "uuid-1", order_id: "order_1" }],
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_1" }],
+    });
+    context.client.uploadCheckoutFormInvoiceFile = () =>
+      Promise.reject(new Error("Allegro is unreachable"));
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.invoiceAttachFailures).toBe(1);
+    expect(result.error).toMatch(/could not be attached/);
+    expect(context.allegro.states.get("orders")).toMatchObject({ status: "error" });
+    expect(context.table.rows[0]?.last_error).toContain("Allegro is unreachable");
   });
 });

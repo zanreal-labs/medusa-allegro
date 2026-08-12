@@ -16,6 +16,7 @@ import {
 import { drainOrderEvents, emptyOrdersSyncSummary } from "../lib/sync/order-events";
 import type { OrdersSyncSummary } from "../lib/sync/order-events";
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
+import { sweepUnattachedInvoices } from "./attach-allegro-invoice";
 import { applyCheckoutForm } from "./lib/order-upsert";
 import { runUnderSyncClaim } from "./lib/run";
 
@@ -38,11 +39,17 @@ export interface OrdersSyncResult extends OrdersSyncSummary {
   withLineConflicts: number;
   /** Orders whose Medusa total disagrees with what Allegro says the buyer paid. */
   withTotalMismatch: number;
+  /** Invoice PDFs the retry sweep attached this run. */
+  invoicesAttached: number;
+  /** Issued invoices the sweep tried and could still not attach. */
+  invoiceAttachFailures: number;
 }
 
 export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
   ...emptyOrdersSyncSummary(),
   created: 0,
+  invoiceAttachFailures: 0,
+  invoicesAttached: 0,
   withLineConflicts: 0,
   withTotalMismatch: 0,
 });
@@ -79,6 +86,14 @@ const buildOrdersError = (result: OrdersSyncResult): string | null => {
       `${result.withLineConflicts} order(s) have a line whose sygnatura matches no Medusa variant; they were created with custom line items, so those lines carry no inventory or cost linkage`,
     );
   }
+  if (result.invoiceAttachFailures > 0) {
+    // Named separately from the drain's own failures because the remedy is different: the
+    // order itself is fine, and what is missing is the invoice document the buyer expects
+    // to find on it. The per-order reason is on each row.
+    parts.push(
+      `${result.invoiceAttachFailures} issued invoice(s) could not be attached to their Allegro order; each row carries the reason and the next tick retries`,
+    );
+  }
   return parts.length > 0 ? parts.join("; ") : null;
 };
 
@@ -89,7 +104,7 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.ORDERS,
-    async ({ allegro, client, heartbeat, logger, state }) => {
+    async ({ allegro, client, heartbeat, logger, mayContinue, state }) => {
       const options = await allegro.getSyncOptions();
       const priorFailures = readFailureState(state.failures);
       let created = 0;
@@ -154,6 +169,24 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
           `[allegro-orders] event cursor bootstrapped at ${drain.cursor ?? "(no events)"}; earlier events are not replayed. Use the import-window action to bring in history.`,
         );
       }
+
+      // AFTER the drain, in the same claim. Attaching writes to the same rows the drain
+      // does, so it belongs under the same single-flight lock; running it second means a
+      // form imported this tick is already in the table when the sweep looks for it.
+      //
+      // Gated on its own switch inside `sweepUnattachedInvoices`, not on
+      // `ordersSyncDisabled`: the sweep is only reached at all when the drain ran, which
+      // is a limitation worth naming - an operator who pauses the drain also pauses the
+      // retry. The event-driven path is unaffected, so a newly issued invoice still lands.
+      const swept = await sweepUnattachedInvoices(
+        container,
+        allegro,
+        logger,
+        options.invoiceModuleKey,
+        mayContinue,
+      );
+      result.invoicesAttached = swept.attached;
+      result.invoiceAttachFailures = swept.failed;
 
       const errorLine = buildOrdersError(result);
       result.error = errorLine ?? undefined;

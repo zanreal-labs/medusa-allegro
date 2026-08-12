@@ -96,6 +96,7 @@ export const fakeAllegroService = (seed: {
   priceSyncDisabled?: boolean;
   stockSyncDisabled?: boolean;
   ordersSyncDisabled?: boolean;
+  invoiceAttachDisabled?: boolean;
   /**
    * Trip a kill switch only AFTER this many reads, simulating an operator flipping it
    * mid-run.
@@ -160,25 +161,6 @@ export const fakeAllegroService = (seed: {
         token,
       });
     },
-    /**
-     * The fencing check, honoured rather than stubbed true.
-     *
-     * `claimLost` simulates the run being taken over: the stored token stops matching, which
-     * is exactly what the real conditional update reports by affecting zero rows.
-     */
-    touchSyncClaim: (provider: string, token: string) => {
-      heartbeats.push({ provider, token });
-      if (seed.claimLost) {
-        return Promise.resolve(false);
-      }
-      const row = states.get(provider);
-      const held = row?.claim_token === token;
-      if (held) {
-        states.set(provider, { ...row, claim_heartbeat_at: new Date() } as StateRowFixture);
-      }
-      return Promise.resolve(held);
-    },
-    heartbeats,
     claims,
     createAllegroCategoryRates: (rows: Omit<CategoryRateFixture, "id">[]) => {
       const created = rows.map((row, index) => ({ ...row, id: `algcatrate_${index + 1}` }));
@@ -211,10 +193,22 @@ export const fakeAllegroService = (seed: {
       Promise.resolve({
         changeCap: 100,
         costsModuleKey: "productCosts",
+        invoiceModuleKey: "infakt",
         marketplaceId: "allegro-pl",
         stockLocationIds: [],
         ...seed.syncOptions,
       }),
+    heartbeats,
+    /**
+     * The invoice-attach switch, deliberately NOT routed through `tripped`.
+     *
+     * `tripped` counts reads, and `killSwitchTripsAfterReads` expresses "flipped after N
+     * reads" against that counter for the LOOP switches. Folding a fourth switch into it
+     * would silently move every one of those thresholds, so this one answers from the
+     * seed directly - which also matches the real service, where it is independent of the
+     * three loop switches rather than a reading of them.
+     */
+    isInvoiceAttachDisabled: () => Promise.resolve(seed.invoiceAttachDisabled === true),
     isOrdersSyncDisabled: () => Promise.resolve(tripped(seed.ordersSyncDisabled)),
     isPriceSyncDisabled: () => Promise.resolve(tripped(seed.priceSyncDisabled)),
     isStockSyncDisabled: () => Promise.resolve(tripped(seed.stockSyncDisabled)),
@@ -280,8 +274,27 @@ export const fakeAllegroService = (seed: {
       );
     },
     offers,
+    preClaimWritesSkipped,
     pushes,
     states,
+    /**
+     * The fencing check, honoured rather than stubbed true.
+     *
+     * `claimLost` simulates the run being taken over: the stored token stops matching, which
+     * is exactly what the real conditional update reports by affecting zero rows.
+     */
+    touchSyncClaim: (provider: string, token: string) => {
+      heartbeats.push({ provider, token });
+      if (seed.claimLost) {
+        return Promise.resolve(false);
+      }
+      const row = states.get(provider);
+      const held = row?.claim_token === token;
+      if (held) {
+        states.set(provider, { ...row, claim_heartbeat_at: new Date() } as StateRowFixture);
+      }
+      return Promise.resolve(held);
+    },
     updateAllegroOffers: (rows: (Partial<OfferRowFixture> & { id: string })[]) => {
       for (const row of rows) {
         const index = offers.findIndex((existing) => existing.id === row.id);
@@ -330,7 +343,6 @@ export const fakeAllegroService = (seed: {
       } as StateRowFixture);
       return Promise.resolve(true);
     },
-    preClaimWritesSkipped,
   };
   return service;
 };
