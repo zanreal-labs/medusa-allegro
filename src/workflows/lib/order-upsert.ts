@@ -11,7 +11,7 @@ import {
   medusaActionForStatus,
   resolveStatusWrite,
 } from "../../lib/sync/order-status";
-import type { DerivedOrderStatus } from "../../lib/sync/order-status";
+import type { DerivedOrderStatus, MedusaOrderAction } from "../../lib/sync/order-status";
 import type { AllegroSyncOptions } from "../../modules/allegro/service";
 import type AllegroModuleService from "../../modules/allegro/service";
 import { parseAmount } from "../../lib/sync/money";
@@ -269,15 +269,76 @@ const createMedusaOrder = async (
  * who already did it by hand is the common case. Failing the whole form over it
  * would hold the event cursor on something that is arguably already correct.
  */
+/** The Medusa `order.status` that each action is trying to reach. */
+const TARGET_ORDER_STATUS: Record<Exclude<MedusaOrderAction, "none">, string> = {
+  cancel: "canceled",
+  complete: "completed",
+};
+
+/**
+ * Whether the action has already been achieved, so attempting it is pointless.
+ *
+ * Read from the order's own status rather than inferred. The deterministic case is a form
+ * first seen as CANCELLED: `createMedusaOrder` creates it with `status: "canceled"`, and
+ * then step 3 immediately tries to cancel it - so the action could NEVER succeed for the
+ * one status where it matters most.
+ */
+const isAlreadyAchieved = (
+  orderStatus: string | undefined,
+  action: Exclude<MedusaOrderAction, "none">,
+): boolean => orderStatus === TARGET_ORDER_STATUS[action];
+
+/**
+ * Whether a thrown action error means "already in the target state" rather than "failed".
+ *
+ * Matched against what the core workflows actually throw, read from `@medusajs/core-flows`
+ * rather than guessed:
+ *
+ * - `throwIfOrderIsCancelled` (order/utils/order-validation) throws
+ *   `MedusaError(INVALID_DATA, "Order with id X has been canceled.")`, which is what a
+ *   cancel of an already-cancelled order produces.
+ * - `completeOrdersStep` has no equivalent validation - it calls `completeOrder` directly -
+ *   so completing an already-completed order does not currently throw at all. The
+ *   completed-side pattern is defensive, for the day that changes.
+ *
+ * Deliberately narrow. "Cannot cancel a completed order" is NOT satisfied: the order is not
+ * cancelled, a retry will never fix it, and a human has to decide - so it stays a failure
+ * and the quarantine machinery makes it visible, which is exactly what that machinery is
+ * for.
+ */
+const isActionAlreadySatisfied = (
+  action: Exclude<MedusaOrderAction, "none">,
+  message: string,
+): boolean =>
+  action === "cancel"
+    ? /has been canceled|already canceled|already cancelled/iu.test(message)
+    : /has been completed|already completed/iu.test(message);
+
+/** What one attempt at the status action did. */
+type ActionOutcome =
+  | { kind: "done" }
+  /** Nothing to do, or already in the target state. Counts as LANDED. */
+  | { kind: "satisfied"; note?: string }
+  | { kind: "failed"; error: string };
+
 const applyMedusaAction = async (
   container: MedusaContainer,
   logger: Logger,
   orderId: string,
   derived: DerivedOrderStatus,
-): Promise<string | undefined> => {
+  orderStatus: string | undefined,
+): Promise<ActionOutcome> => {
   const action = medusaActionForStatus(derived);
   if (action === "none") {
-    return undefined;
+    return { kind: "satisfied" };
+  }
+  // Cheap pre-check, so the deterministic already-satisfied case costs no workflow run at
+  // all rather than costing a thrown error that has to be classified.
+  if (isAlreadyAchieved(orderStatus, action)) {
+    return {
+      kind: "satisfied",
+      note: `Medusa order ${orderId} is already ${TARGET_ORDER_STATUS[action]}`,
+    };
   }
   try {
     if (action === "cancel") {
@@ -285,13 +346,22 @@ const applyMedusaAction = async (
     } else {
       await completeOrderWorkflow(container).run({ input: { orderIds: [orderId] } });
     }
-    return undefined;
+    return { kind: "done" };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (isActionAlreadySatisfied(action, message)) {
+      // The state Allegro is asking for already holds - a staff member cancelled by hand, or
+      // our status snapshot was a moment stale. Treating this as a failure was a permanent
+      // latch: `derived_status` is gated on the pass having landed, so it never advanced,
+      // every subsequent pass retried the same impossible action, the form quarantined after
+      // five, and `repairAllegroOrder` could not clear it either because the condition never
+      // changes.
+      return { kind: "satisfied", note: `${action} was already satisfied: ${message}` };
+    }
     logger.warn(
       `[allegro-orders] could not ${action} Medusa order ${orderId} for Allegro status "${derived}": ${message}. The Allegro-derived status is still recorded.`,
     );
-    return `${action} failed: ${message}`;
+    return { error: `${action} failed: ${message}`, kind: "failed" };
   }
 };
 
@@ -428,42 +498,67 @@ const toMinorUnits = (value: number): number => Math.round(value * 100);
  * when the order's total cannot be read - an unreadable total is not evidence of a mismatch,
  * and recording one on that basis would be the same fabrication this check exists to catch.
  */
-const reconcileOrderTotal = async (
+/**
+ * The Medusa order as this pass needs to see it: its status, for the action pre-check, and
+ * its total, for reconciliation.
+ *
+ * One read for both. Cancel and complete do not alter a total, so the pre-action snapshot is
+ * as good as a post-action one for the money comparison, and the alternative was two round
+ * trips per form.
+ */
+interface MedusaOrderSnapshot {
+  status?: string;
+  total?: number;
+  currency?: string;
+}
+
+const readMedusaOrder = async (
   container: MedusaContainer,
   logger: Logger,
-  view: CheckoutFormView,
   medusaOrderId: string,
+): Promise<MedusaOrderSnapshot | undefined> => {
+  try {
+    const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
+    const { data } = await query.graph({
+      entity: "order",
+      fields: ["id", "status", "total", "currency_code"],
+      filters: { id: medusaOrderId },
+    });
+    const order = data[0];
+    if (!order) {
+      return undefined;
+    }
+    return {
+      currency: (order.currency_code as string | null)?.trim().toLowerCase() || undefined,
+      status: (order.status as string | null) ?? undefined,
+      total: parseAmount(order.total as string | number | null | undefined),
+    };
+  } catch (error) {
+    logger.warn(
+      `[allegro-orders] could not read Medusa order ${medusaOrderId}: ${
+        error instanceof Error ? error.message : String(error)
+      }. The status action falls back to attempting the workflow, and no total conflict is recorded - an unreadable total is not evidence of a mismatch.`,
+    );
+    return undefined;
+  }
+};
+
+const reconcileOrderTotal = (
+  view: CheckoutFormView,
+  snapshot: MedusaOrderSnapshot | undefined,
   customLineCount: number,
-): Promise<OrderConflict | undefined> => {
+): OrderConflict | undefined => {
   const expected = view.totalToPay;
   if (!expected) {
     return undefined;
   }
 
-  let order: Record<string, unknown> | undefined;
-  try {
-    const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
-    const { data } = await query.graph({
-      entity: "order",
-      fields: ["id", "total", "currency_code"],
-      filters: { id: medusaOrderId },
-    });
-    order = data[0];
-  } catch (error) {
-    logger.warn(
-      `[allegro-orders] could not read Medusa order ${medusaOrderId} to reconcile its total: ${
-        error instanceof Error ? error.message : String(error)
-      }. No conflict recorded, because an unreadable total is not evidence of a mismatch.`,
-    );
-    return undefined;
-  }
-
-  const actual = parseAmount(order?.total as string | number | null | undefined);
+  const actual = snapshot?.total;
   if (actual === undefined) {
     return undefined;
   }
 
-  const actualCurrency = (order?.currency_code as string | null)?.trim().toLowerCase();
+  const actualCurrency = snapshot?.currency;
   const expectedCurrency = expected.currency.trim().toLowerCase();
   const hint =
     customLineCount > 0
@@ -615,31 +710,46 @@ export const applyCheckoutForm = async (
     }
   }
 
+  // One read of the order, serving both of the steps below: its status decides whether the
+  // action is already achieved, and its total is what the money reconciliation compares.
+  const snapshot = medusaOrderId
+    ? await readMedusaOrder(container, logger, medusaOrderId)
+    : undefined;
+
   // Step 3: the status action.
   if (medusaOrderId && write.status) {
-    const actionError = await applyMedusaAction(container, logger, medusaOrderId, write.status);
-    lastError ??= actionError;
-  }
-
-  // Step 3b: reconcile the money. Read-only, and deliberately AFTER the order exists rather
-  // than before it is created: the point is to compare what Medusa actually recorded against
-  // what the buyer actually paid, and a mismatch is never a reason to withhold the order.
-  // `undefined` clears any conflict a previous pass recorded, so a repaired order stops being
-  // reported without needing its own action.
-  let totalConflict: OrderConflict | undefined;
-  if (medusaOrderId) {
-    totalConflict = await reconcileOrderTotal(
+    const outcome = await applyMedusaAction(
       container,
       logger,
-      view,
       medusaOrderId,
-      conflicts.length,
+      write.status,
+      snapshot?.status,
     );
-    if (totalConflict) {
-      logger.warn(
-        `[allegro-orders] checkout form ${view.checkoutFormId} (Medusa order ${medusaOrderId}): ${totalConflict.conflict_detail}`,
+    if (outcome.kind === "failed") {
+      lastError ??= outcome.error;
+    } else if (outcome.kind === "satisfied" && outcome.note) {
+      // An already-satisfied action counts as LANDED, so `derived_status` advances and the
+      // form stops being retried. Reporting it as a failure was a permanent latch: the gate
+      // on `derived_status` meant it never advanced, every pass retried the same impossible
+      // action, and the form quarantined after five with no repair able to clear it - which
+      // was GUARANTEED for any form first seen as CANCELLED, because `createMedusaOrder`
+      // creates it already cancelled and step 3 then tries to cancel it again.
+      logger.info(
+        `[allegro-orders] checkout form ${view.checkoutFormId}: ${outcome.note}. Treated as applied.`,
       );
     }
+  }
+
+  // Step 3b: reconcile the money. Read-only, and never a reason to withhold the order.
+  // `undefined` clears any conflict a previous pass recorded, so a repaired order stops being
+  // reported without needing its own action.
+  const totalConflict = medusaOrderId
+    ? reconcileOrderTotal(view, snapshot, conflicts.length)
+    : undefined;
+  if (totalConflict) {
+    logger.warn(
+      `[allegro-orders] checkout form ${view.checkoutFormId} (Medusa order ${medusaOrderId}): ${totalConflict.conflict_detail}`,
+    );
   }
 
   // Step 4: the watermark, LAST. A crash before here leaves the row unfinished and

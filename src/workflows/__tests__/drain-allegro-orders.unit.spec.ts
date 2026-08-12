@@ -43,6 +43,16 @@ var coreFlows: {
   failCreateForForms: Set<string>;
   /** Makes `cancelOrderWorkflow` reject, e.g. an order with live fulfillments. */
   cancelError?: Error;
+  /**
+   * Live `order.status` per created order id, so the already-satisfied pre-check has
+   * something real to read.
+   *
+   * Tracked rather than stubbed: `createOrderWorkflow` records the status it was asked to
+   * create with, and cancel/complete move it. That is what makes the deterministic case
+   * expressible - a form first seen CANCELLED is created ALREADY cancelled, and step 3 then
+   * tries to cancel it again.
+   */
+  statusById: Record<string, string>;
   sequence: number;
 } = {
   cancelled: [],
@@ -50,6 +60,7 @@ var coreFlows: {
   created: [],
   failCreateForForms: new Set(),
   sequence: 0,
+  statusById: {},
 };
 
 jest.mock("@medusajs/medusa/core-flows", () => ({
@@ -59,12 +70,16 @@ jest.mock("@medusajs/medusa/core-flows", () => ({
         return Promise.reject(coreFlows.cancelError);
       }
       coreFlows.cancelled.push(input.order_id);
+      coreFlows.statusById[input.order_id] = "canceled";
       return Promise.resolve({ result: undefined });
     },
   }),
   completeOrderWorkflow: () => ({
     run: ({ input }: { input: { orderIds: string[] } }) => {
       coreFlows.completed.push(input.orderIds);
+      for (const id of input.orderIds) {
+        coreFlows.statusById[id] = "completed";
+      }
       return Promise.resolve({ result: [] });
     },
   }),
@@ -80,7 +95,11 @@ jest.mock("@medusajs/medusa/core-flows", () => ({
       }
       coreFlows.sequence += 1;
       coreFlows.created.push(input);
-      return Promise.resolve({ result: { id: `order_${coreFlows.sequence}` } });
+      const id = `order_${coreFlows.sequence}`;
+      // The status the order is CREATED with, verbatim. For a form first seen CANCELLED that
+      // is already "canceled", which is exactly why cancelling it afterwards can never work.
+      coreFlows.statusById[id] = (input.status as string | undefined) ?? "pending";
+      return Promise.resolve({ result: { id } });
     },
   }),
 }));
@@ -249,6 +268,8 @@ const setup = (input: {
    * an unreadable total is not evidence of one.
    */
   medusaOrderTotals?: Record<string, { total?: number | string; currency_code?: string }>;
+  /** Live `order.status` for orders that already existed before this run. */
+  medusaOrderStatuses?: Record<string, string>;
 }) => {
   const client = fakeClient(input);
   const table = orderTable(input.orders ?? []);
@@ -303,11 +324,13 @@ const setup = (input: {
               // The total-reconciliation read: by id, asking for `total`/`currency_code`.
               const byId = (filters?.id as string | undefined) ?? undefined;
               if (byId !== undefined) {
+                const seeded = input.medusaOrderTotals?.[byId];
+                const status = coreFlows.statusById[byId] ?? input.medusaOrderStatuses?.[byId];
+                if (seeded === undefined && status === undefined) {
+                  return Promise.resolve({ data: [] });
+                }
                 return Promise.resolve({
-                  data:
-                    input.medusaOrderTotals?.[byId] === undefined
-                      ? []
-                      : [{ id: byId, ...input.medusaOrderTotals[byId] }],
+                  data: [{ id: byId, ...(status ? { status } : {}), ...seeded }],
                 });
               }
               const wanted = (
@@ -346,6 +369,7 @@ beforeEach(() => {
   coreFlows.completed.length = 0;
   coreFlows.createError = undefined;
   coreFlows.cancelError = undefined;
+  coreFlows.statusById = {};
   coreFlows.sequence = 0;
   coreFlows.failCreateForForms.clear();
 });
@@ -1344,5 +1368,121 @@ describe("drainAllegroOrders: reconciling the total against Allegro", () => {
 
     expect(context.table.rows[0]?.conflict ?? null).toBeNull();
     expect(context.table.rows[0]?.conflict_detail ?? null).toBeNull();
+  });
+});
+
+describe("drainAllegroOrders: an already-satisfied action must not latch", () => {
+  const withCursor = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ states: [{ cursor: "e0", provider: "orders", status: "ok" }], ...input });
+
+  it("lands a form first seen as CANCELLED on the FIRST pass", async () => {
+    // The guaranteed case. `createMedusaOrder` creates the order with `status: "canceled"`
+    // for a cancelled form, and step 3 then tried to cancel it - which `throwIfOrderIsCancelled`
+    // rejects with "has been canceled". Reported as a failure, that was a permanent latch:
+    // `derived_status` is gated on the pass landing, so it never advanced, every pass retried
+    // the same impossible action, the form quarantined after five, and `repairAllegroOrder`
+    // could not clear it because the condition never changes.
+    const context = withCursor({
+      forms: [form({ id: "f1", status: "CANCELLED" })],
+      pages: [[event("e1", "f1", "BUYER_CANCELLED")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.failed).toBe(0);
+    expect(result.quarantined).toEqual([]);
+    // Created already cancelled, so the redundant cancel is never even attempted.
+    expect(coreFlows.created[0]).toMatchObject({ status: "canceled" });
+    expect(coreFlows.cancelled).toEqual([]);
+    // Landed: the ladder advanced and the watermark stamped, so it is not retried.
+    expect(context.table.rows[0]).toMatchObject({ derived_status: "cancelled" });
+    expect(context.table.rows[0]?.synced_at).toBeInstanceOf(Date);
+    expect(context.table.rows[0]?.last_error ?? null).toBeNull();
+    expect(context.allegro.states.get("orders")?.cursor).toBe("e1");
+  });
+
+  it("lands a staff-cancelled order when the Allegro CANCELLED event arrives later", async () => {
+    // Staff cancelled by hand, then Allegro reports it too. The action cannot succeed and
+    // never will, but the outcome Allegro is asking for already holds.
+    const context = withCursor({
+      forms: [form({ id: "f1", status: "CANCELLED" })],
+      medusaOrderStatuses: { order_pre: "canceled" },
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_pre" }],
+      pages: [[event("e1", "f1", "BUYER_CANCELLED")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.failed).toBe(0);
+    expect(coreFlows.cancelled).toEqual([]);
+    expect(context.table.rows[0]).toMatchObject({ derived_status: "cancelled" });
+    expect(context.table.rows[0]?.synced_at).toBeInstanceOf(Date);
+  });
+
+  it("classifies the core workflow's own already-canceled error as satisfied", async () => {
+    // The race the pre-check cannot cover: the snapshot said pending, the workflow disagreed.
+    // Matched against what `throwIfOrderIsCancelled` actually throws, read from
+    // @medusajs/core-flows rather than guessed.
+    coreFlows.cancelError = new Error("Order with id order_1 has been canceled.");
+    const context = withCursor({
+      forms: [form({ id: "f1", status: "CANCELLED" })],
+      medusaOrderStatuses: { order_pre: "pending" },
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_pre" }],
+      pages: [[event("e1", "f1", "BUYER_CANCELLED")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.failed).toBe(0);
+    expect(context.table.rows[0]).toMatchObject({ derived_status: "cancelled" });
+    expect(context.table.rows[0]?.synced_at).toBeInstanceOf(Date);
+  });
+
+  it("still retries a cancel that failed for a real reason", async () => {
+    // The contrast, so "satisfied" cannot become a blanket excuse. An order with live
+    // fulfillments is a genuine conflict: the order is NOT cancelled, so the ladder must not
+    // advance and the next pass must try again.
+    coreFlows.cancelError = new Error("order has live fulfillments");
+    const context = withCursor({
+      forms: [form({ id: "f1", status: "CANCELLED" })],
+      medusaOrderStatuses: { order_pre: "pending" },
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_pre" }],
+      pages: [[event("e1", "f1", "BUYER_CANCELLED")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.failed).toBe(1);
+    expect(context.table.rows[0]?.derived_status ?? null).toBeNull();
+    expect(context.table.rows[0]?.synced_at ?? null).toBeNull();
+    expect(context.table.rows[0]?.last_error).toContain("cancel failed");
+  });
+
+  it("does not re-complete an order Medusa already reports as completed", async () => {
+    const context = withCursor({
+      forms: [form({ fulfillment: { status: "PICKED_UP" }, id: "f1" })],
+      medusaOrderStatuses: { order_pre: "completed" },
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_pre" }],
+      pages: [[event("e1", "f1", "FULFILLMENT_STATUS_CHANGED")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.completed).toEqual([]);
+    expect(result.failed).toBe(0);
+    expect(context.table.rows[0]).toMatchObject({ derived_status: "delivered" });
+  });
+
+  it("still completes an order that is not yet completed", async () => {
+    const context = withCursor({
+      forms: [form({ fulfillment: { status: "PICKED_UP" }, id: "f1" })],
+      medusaOrderStatuses: { order_pre: "pending" },
+      orders: [{ checkout_form_id: "f1", id: "algorder_1", medusa_order_id: "order_pre" }],
+      pages: [[event("e1", "f1", "FULFILLMENT_STATUS_CHANGED")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.completed).toEqual([["order_pre"]]);
   });
 });
