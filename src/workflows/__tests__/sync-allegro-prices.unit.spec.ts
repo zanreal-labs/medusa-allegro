@@ -140,6 +140,8 @@ const setup = (input: {
   rulesError?: Error;
   syncOptions?: Record<string, unknown>;
   priceSyncDisabled?: boolean;
+  /** Trip the kill switch only after N reads, i.e. mid-run. */
+  killSwitchTripsAfterReads?: number;
   noCosts?: boolean;
   /** Simulates the claim being taken over mid-run: every heartbeat reports it lost. */
   claimLost?: boolean;
@@ -155,6 +157,7 @@ const setup = (input: {
     claimLost: input.claimLost,
     client,
     offers: input.rows ?? [],
+    killSwitchTripsAfterReads: input.killSwitchTripsAfterReads,
     priceSyncDisabled: input.priceSyncDisabled,
     pushes: input.pushes ?? [],
     states: input.states ?? [],
@@ -1237,5 +1240,53 @@ describe("pushSingleAllegroOffer: the manual blast-radius cap", () => {
     await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
 
     expect(allegro.states.get("prices")?.last_error).toContain("WRITE_SCOPE_MISSING");
+  });
+});
+
+describe("syncAllegroPrices: the kill switch is re-read mid-run", () => {
+  it("stops before the next command when the switch is flipped during the run", async () => {
+    // The switch is a predicate rather than a boolean precisely so it is re-read at the moment
+    // of the run - and the README sells it as the way to stop a runaway NOW. But it was only
+    // ever evaluated once, before the claim, so a full-catalogue push kept issuing price
+    // commands for its whole remaining duration after an operator had flipped it. The
+    // per-command fence checked the claim and not the switch.
+    const { allegro, client, container } = setup({
+      costs: { "SKU-1": 100, "SKU-2": 100, "SKU-3": 100 },
+      // Clear for the pre-claim read; tripped by the first per-command fence.
+      killSwitchTripsAfterReads: 1,
+      live: [
+        offerFixture({ id: "o1" }),
+        offerFixture({ id: "o2" }),
+        offerFixture({ id: "o3" }),
+      ],
+      rows: [
+        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+        { category_id: "cat-1", id: "row-2", offer_id: "o2", promoted: false, sku: "SKU-2" },
+        { category_id: "cat-1", id: "row-3", offer_id: "o3", promoted: false, sku: "SKU-3" },
+      ],
+      variants: [
+        { id: "v1", metadata: { srp: 500 }, sku: "SKU-1" },
+        { id: "v2", metadata: { srp: 500 }, sku: "SKU-2" },
+        { id: "v3", metadata: { srp: 500 }, sku: "SKU-3" },
+      ],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    // The run started (it was not skipped pre-claim) but issued nothing.
+    expect(summary.skipped).toBeUndefined();
+    expect(client.commands).toEqual([]);
+    expect(summary.synced).toBe(0);
+    expect(summary.error).toContain("stopped mid-flight");
+    // Nothing claims a push that was stopped.
+    expect(allegro.offers.every((row) => !row.price_synced_at)).toBe(true);
+  });
+
+  it("still pushes the whole batch while the switch stays clear", async () => {
+    const { client, container } = healthy();
+
+    await syncAllegroPrices(container as never);
+
+    expect(client.commands).toHaveLength(1);
   });
 });

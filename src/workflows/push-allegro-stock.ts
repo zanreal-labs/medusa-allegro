@@ -121,16 +121,19 @@ interface SubmittedCommand {
 const submitCommands = async (
   client: AllegroClient,
   chunks: readonly StockChange[][],
-  heartbeat: () => Promise<boolean>,
-): Promise<{ submitted: SubmittedCommand[]; error?: string }> => {
+  mayContinue: () => Promise<boolean>,
+): Promise<{ submitted: SubmittedCommand[]; error?: string; stopped?: boolean }> => {
   const submitted: SubmittedCommand[] = [];
   for (const changes of chunks) {
-    // Between chunks: a catalogue-wide reconciliation can be many commands, and a claim
-    // taken over mid-submission means two runs setting quantities on the same offers.
-    if (!(await heartbeat())) {
+    // Between chunks, checking BOTH the claim and the kill switch. A catalogue-wide
+    // reconciliation can be many commands: a claim taken over mid-submission means two runs
+    // setting quantities on the same offers, and a kill switch flipped mid-submission is an
+    // operator stopping a runaway - which was being ignored until the run finished.
+    if (!(await mayContinue())) {
       return {
         error:
-          "the sync claim was taken over mid-run, so the remaining quantity commands were abandoned rather than submitted concurrently with the run that replaced this one",
+          "the run was stopped mid-flight (the sync claim was taken over, or the kill switch was flipped), so the remaining quantity commands were abandoned",
+        stopped: true,
         submitted,
       };
     }
@@ -401,8 +404,22 @@ const recordStockConflicts = async (
   allegro: AllegroModuleService,
   logger: Logger,
   conflicts: readonly StockConflictRecord[],
+  mayContinue: () => Promise<boolean>,
 ): Promise<void> => {
   if (conflicts.length === 0) {
+    return;
+  }
+  // Ownership re-checked before writing to the mapping table. This runs before any Allegro
+  // command, but it is still a WRITE, and a run whose claim was taken over must not touch
+  // shared rows the successor is also reconciling. The conflicts are logged either way, so the
+  // signal is never lost by declining to persist it.
+  if (!(await mayContinue())) {
+    for (const conflict of conflicts) {
+      logger.warn(`[allegro-stock] ${conflict.conflict_detail}`);
+    }
+    logger.warn(
+      `[allegro-stock] not recording ${conflicts.length} sku-mismatch conflict(s) on their mapping rows: the run was stopped mid-flight and must make no further writes.`,
+    );
     return;
   }
   for (const conflict of conflicts) {
@@ -456,7 +473,7 @@ export const pushAllegroStock = async (
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.STOCK,
-    async ({ allegro, client, heartbeat, logger }) => {
+    async ({ allegro, client, heartbeat, logger, mayContinue }) => {
       const options = await allegro.getSyncOptions();
       warnOnUnscopedCatalogue(logger, options, "stock");
       const variants = await listEligibleVariants(container, options);
@@ -506,7 +523,7 @@ export const pushAllegroStock = async (
       // summary is gone by the next tick; on the row it is visible in the admin, it holds
       // the offer out of the PRICE path too, and discovery clears it on the next healthy
       // upsert.
-      await recordStockConflicts(allegro, logger, conflicts);
+      await recordStockConflicts(allegro, logger, conflicts, mayContinue);
 
       if (!isStockPlanSafe(plan)) {
         // Refused as a whole. See the class comment: a partial push leaves some
@@ -539,7 +556,11 @@ export const pushAllegroStock = async (
       }
 
       const chunks = buildStockCommandChunks(changes);
-      const { error: submitError, submitted } = await submitCommands(client, chunks, heartbeat);
+      const {
+        error: submitError,
+        stopped,
+        submitted,
+      } = await submitCommands(client, chunks, mayContinue);
       result.commands = submitted.length;
 
       const submittedCount = submitted.reduce((sum, item) => sum + item.changes.length, 0);
@@ -560,7 +581,18 @@ export const pushAllegroStock = async (
       // Stamped per confirmed offer, not per run: on a partly-confirmed run the
       // offers that landed are exactly the ones whose `stock_synced_at` should move,
       // and stamping the rest would claim a push that did not happen.
-      await stampSyncedOffers(allegro, outcomes.confirmed);
+      //
+      // Skipped entirely when the run was stopped mid-flight: a taken-over claim means this
+      // row belongs to the successor, and a flipped kill switch means the operator asked for
+      // no further writes. The quantities that did land are re-derived as already-in-sync next
+      // run, so nothing is lost.
+      if (stopped) {
+        logger.warn(
+          `[allegro-stock] not stamping stock_synced_at for ${outcomes.confirmed.length} confirmed offer(s): the run was stopped mid-flight and must make no further writes.`,
+        );
+      } else {
+        await stampSyncedOffers(allegro, outcomes.confirmed);
+      }
 
       const firstError = submitError ?? outcomes.error;
       const errorLine = buildStockError(result, firstError);

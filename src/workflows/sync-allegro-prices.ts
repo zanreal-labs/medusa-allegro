@@ -614,7 +614,7 @@ export const syncAllegroPrices = async (
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.PRICES,
-    async ({ allegro, client, heartbeat, logger, state }) => {
+    async ({ allegro, client, logger, mayContinue, state }) => {
       const options = await allegro.getSyncOptions();
       const priorFailures = readFailureState(state.failures);
       const priorScopeMissing = state.write_scope_missing;
@@ -704,18 +704,22 @@ export const syncAllegroPrices = async (
       const succeeded = new Set<string>();
       const failed = new Map<string, string>();
       let systemic = false;
+      let stoppedEarly = false;
       let systemicError: string | undefined;
       let scopeObserved: "present" | "missing" | "unknown" = "unknown";
 
       for (const plan of batch) {
-        // Before each command, not just at the start of the run. A full-catalogue push is
-        // minutes of sequential commands, each with its own 15s poll, so the claim has to
-        // be re-asserted as the run proceeds - and if it has been taken over, stopping HERE
-        // is what prevents two runs issuing price commands for the same offers at once.
-        if (!(await heartbeat())) {
+        // Before each command, not just at the start of the run, and checking BOTH the claim
+        // and the kill switch. A full-catalogue push is minutes of sequential commands, each
+        // with its own 15s poll: the claim has to be re-asserted as the run proceeds, and the
+        // switch has to be re-read because stopping a runaway mid-flight is the entire reason
+        // it exists. Checking only the claim meant an operator who flipped the switch was
+        // ignored until the run finished pushing everything.
+        if (!(await mayContinue())) {
+          stoppedEarly = true;
           systemic = true;
           systemicError =
-            "the sync claim was taken over mid-run, so the remaining commands were abandoned to avoid pushing concurrently with the run that replaced this one";
+            "the run was stopped mid-flight (the sync claim was taken over, or the kill switch was flipped), so the remaining commands were abandoned";
           break;
         }
         // Sequential on purpose: it keeps Allegro and database load flat, and the
@@ -769,7 +773,18 @@ export const syncAllegroPrices = async (
 
       const errorLine = buildPriceSyncError(summary, systemicError);
       summary.error = errorLine ?? undefined;
-      await stampSyncedOffers(allegro, batch, succeeded);
+      // Skipped when the run was stopped mid-flight. If the claim was taken over, this row
+      // belongs to the successor and stamping `price_synced_at` from here would be writing
+      // over it; if the kill switch was flipped, the operator asked for no further writes.
+      // Either way the offers that DID land are re-derived as already-in-sync next run from
+      // the audit, so nothing is lost by not stamping.
+      if (stoppedEarly) {
+        logger.warn(
+          `[allegro-prices] not stamping price_synced_at for ${succeeded.size} confirmed offer(s): the run was stopped mid-flight and must make no further writes.`,
+        );
+      } else {
+        await stampSyncedOffers(allegro, batch, succeeded);
+      }
 
       return {
         outcome: {

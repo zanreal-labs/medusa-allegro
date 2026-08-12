@@ -64,6 +64,25 @@ export interface SyncRunContext {
    * state row once this has happened, since the row belongs to the successor.
    */
   heartbeat: () => Promise<boolean>;
+  /**
+   * Re-read the loop's kill switch, and report whether it is still SAFE to keep writing.
+   *
+   * False means an operator has flipped the switch since this run started. The switch's whole
+   * purpose is to stop a runaway mid-flight - it is a predicate rather than a boolean
+   * precisely so it is re-read at the moment of the run - but it was only ever evaluated once,
+   * before the claim, so a long run kept pushing to Allegro for its entire duration after
+   * being told to stop. On a full-catalogue price push that is minutes of commands.
+   *
+   * Loops without a kill switch always get `true`.
+   */
+  killSwitchClear: () => Promise<boolean>;
+  /**
+   * `heartbeat()` and `killSwitchClear()` together: false when EITHER says stop.
+   *
+   * What a per-item fence should call. Both conditions mean "stop writing now", and checking
+   * one without the other is how the loops ended up honouring the claim but not the switch.
+   */
+  mayContinue: () => Promise<boolean>;
 }
 
 /** Why a run did not happen. `claimHeld` is retryable; the others are not. */
@@ -166,6 +185,28 @@ export const runUnderSyncClaim = async <T>(
     return held;
   };
 
+  // Re-read, never cached. `killSwitch.disabled` is a predicate for exactly this reason: an
+  // operator flipping it is responding to an incident, and a value captured once before the
+  // claim ignores them for the whole run. On a full-catalogue price push that is minutes of
+  // further commands after being told to stop.
+  const killSwitchClear = async (): Promise<boolean> => {
+    if (!killSwitch) {
+      return true;
+    }
+    const disabled = await killSwitch.disabled(allegro);
+    if (disabled) {
+      logger.warn(
+        `[allegro-${provider}] the kill switch was flipped mid-run; stopping before any further write. ${killSwitch.reason}`,
+      );
+    }
+    return !disabled;
+  };
+
+  // What a per-item fence should call: both conditions mean "stop writing now", and checking
+  // one without the other is how the loops came to honour the claim but not the switch.
+  const mayContinue = async (): Promise<boolean> =>
+    (await heartbeat()) && (await killSwitchClear());
+
   let outcome: SyncRunOutcome = {
     lastError: `the "${provider}" sync run did not complete`,
     status: "error",
@@ -176,7 +217,9 @@ export const runUnderSyncClaim = async <T>(
       client,
       container,
       heartbeat,
+      killSwitchClear,
       logger,
+      mayContinue,
       state: claim.state,
     });
     ({ outcome } = result);

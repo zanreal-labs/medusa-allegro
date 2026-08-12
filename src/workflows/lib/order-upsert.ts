@@ -425,8 +425,14 @@ const findExistingMedusaOrder = async (
   }
 
   for (let page = 0; page < ADOPTION_MAX_PAGES; page += 1) {
-    // Offset pagination, newest first: a duplicate can only have been created by a
-    // recent pass, so the newest orders are where it is.
+    // Offset pagination over the orders table. The comment here used to claim "newest first"
+    // while passing no ordering at all, which is worth correcting rather than papering over:
+    // this scan is UNORDERED, so the bound is "the first N orders the query layer returns",
+    // not "the N most recent". That is still sound for its purpose - it is a fallback that
+    // only runs when the metadata filter itself is unusable, and every candidate is verified
+    // by exact metadata match before adoption, so an unordered scan can miss but can never
+    // adopt the wrong order. A miss degrades to creating the order, which is the pre-existing
+    // behaviour this fallback improves on rather than a regression.
     const { data } = await query.graph({
       entity: "order",
       fields: ["id", "metadata"],
@@ -441,7 +447,7 @@ const findExistingMedusaOrder = async (
     }
   }
   logger.warn(
-    `[allegro-orders] scanned ${ADOPTION_MAX_PAGES * ADOPTION_PAGE_SIZE} recent orders without finding one for checkout form ${checkoutFormId}; proceeding to create it.`,
+    `[allegro-orders] scanned ${ADOPTION_MAX_PAGES * ADOPTION_PAGE_SIZE} order(s) without finding one for checkout form ${checkoutFormId}; proceeding to create it.`,
   );
   return undefined;
 };

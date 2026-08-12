@@ -96,6 +96,15 @@ export const fakeAllegroService = (seed: {
   priceSyncDisabled?: boolean;
   stockSyncDisabled?: boolean;
   ordersSyncDisabled?: boolean;
+  /**
+   * Trip a kill switch only AFTER this many reads, simulating an operator flipping it
+   * mid-run.
+   *
+   * The pre-claim check reads it once, so `1` means "clear when the run starts, disabled by
+   * the first per-item fence" - which is the case that matters and the one a boolean flag
+   * cannot express.
+   */
+  killSwitchTripsAfterReads?: number;
   client?: unknown;
   claimHeld?: boolean;
   /** Simulates the claim being taken over mid-run: every heartbeat reports it lost. */
@@ -108,6 +117,21 @@ export const fakeAllegroService = (seed: {
     (seed.states ?? []).map((row) => [row.provider, { ...row }]),
   );
   const claims: string[] = [];
+  let killSwitchReads = 0;
+  /**
+   * The kill switch as the loops see it: re-read on every call, exactly like the real one.
+   *
+   * A fake that answered from a captured boolean could not express an operator flipping it
+   * mid-run, which is the whole point of the switch being a predicate.
+   */
+  const tripped = (seeded?: boolean): boolean => {
+    killSwitchReads += 1;
+    if (seeded) {
+      return true;
+    }
+    const after = seed.killSwitchTripsAfterReads;
+    return after !== undefined && killSwitchReads > after;
+  };
   const heartbeats: { provider: string; token: string }[] = [];
   const preClaimWritesSkipped: string[] = [];
   let claimSequence = 0;
@@ -191,9 +215,10 @@ export const fakeAllegroService = (seed: {
         stockLocationIds: [],
         ...seed.syncOptions,
       }),
-    isOrdersSyncDisabled: () => Promise.resolve(seed.ordersSyncDisabled ?? false),
-    isPriceSyncDisabled: () => Promise.resolve(seed.priceSyncDisabled ?? false),
-    isStockSyncDisabled: () => Promise.resolve(seed.stockSyncDisabled ?? false),
+    isOrdersSyncDisabled: () => Promise.resolve(tripped(seed.ordersSyncDisabled)),
+    isPriceSyncDisabled: () => Promise.resolve(tripped(seed.priceSyncDisabled)),
+    isStockSyncDisabled: () => Promise.resolve(tripped(seed.stockSyncDisabled)),
+    killSwitchReads: () => killSwitchReads,
     listAllegroCategoryRates: (filters: { category_id?: string[] } = {}) =>
       Promise.resolve(
         filters.category_id

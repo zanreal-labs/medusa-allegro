@@ -110,6 +110,8 @@ const setup = (input: {
   available?: Record<string, number>;
   script?: QuantityScript;
   stockSyncDisabled?: boolean;
+  /** Trip the kill switch only after N reads, i.e. mid-run. */
+  killSwitchTripsAfterReads?: number;
   noInventory?: boolean;
   stockLocationIds?: string[];
   syncOptions?: Record<string, unknown>;
@@ -118,6 +120,7 @@ const setup = (input: {
   const allegro = fakeAllegroService({
     client,
     offers: input.rows ?? [],
+    killSwitchTripsAfterReads: input.killSwitchTripsAfterReads,
     stockSyncDisabled: input.stockSyncDisabled,
     syncOptions: input.syncOptions,
   });
@@ -603,3 +606,27 @@ const runWith = async (input: Parameters<typeof setup>[0]) => {
   const result = await pushAllegroStock(context.container as never);
   return { ...context, result };
 };
+
+describe("pushAllegroStock: the kill switch is re-read mid-run", () => {
+  it("abandons the remaining quantity commands when the switch is flipped during the run", async () => {
+    // Same gap as the price loop: the per-chunk fence checked the claim but not the switch, so
+    // an operator stopping a runaway was ignored until the run finished writing quantities.
+    const { allegro, client, container } = healthy({ killSwitchTripsAfterReads: 1 });
+
+    const result = await pushAllegroStock(container as never);
+
+    expect(result.skipped).toBeUndefined();
+    expect(client.submissions).toEqual([]);
+    expect(result.error).toContain("stopped mid-flight");
+    // No stamping, because nothing was confirmed and the run must make no further writes.
+    expect(allegro.offers.every((row) => !row.stock_synced_at)).toBe(true);
+  });
+
+  it("still submits while the switch stays clear", async () => {
+    const { client, container } = healthy();
+
+    await pushAllegroStock(container as never);
+
+    expect(client.submissions).toHaveLength(1);
+  });
+});
