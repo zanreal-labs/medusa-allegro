@@ -31,6 +31,7 @@ import type { AllegroOffer } from "../allegro/types";
  * - `ambiguous` - the row's SKU matches more than one eligible variant.
  * - `skippedInactive` - not ACTIVE, so its quantity is meaningless.
  * - `skippedNoInventory` - the variant structurally has no quantity to publish.
+ * - `skippedNoListingStock` - the offer's own listing carried no usable quantity.
  * - `skippedUnmatched` - absent from the listing, or its SKU matches no eligible variant.
  * - `conflicted` - the live offer contradicts the mapping row.
  * - `unresolved` - a quantity could not be READ on either side, so the delta is unknown.
@@ -120,6 +121,14 @@ export interface StockSyncSummary {
    */
   skippedNoInventory: number;
   /**
+   * Authorised, ACTIVE offers whose LISTING carried no usable `stock.available`.
+   *
+   * Bounded to the offer, so it does not refuse the plan: Allegro reported every other offer
+   * in the same listing perfectly well. Distinct from `unresolved`, which is reserved for the
+   * variant side, where an unreadable quantity has unknown blast radius.
+   */
+  skippedNoListingStock: number;
+  /**
    * Authorised offers that could not be paired: absent from the live listing, or their
    * row's SKU matches no eligible variant. Counted so they are not invisible - an offer in
    * this bucket has its quantity published nowhere.
@@ -199,6 +208,7 @@ export const planStockSync = (
   let eligible = 0;
   let skippedInactive = 0;
   let skippedNoInventory = 0;
+  let skippedNoListingStock = 0;
   let skippedUnmatched = 0;
   let unresolved = 0;
   const claimedSkus = new Set<string>();
@@ -269,7 +279,15 @@ export const planStockSync = (
     eligible += 1;
     const observed = offer.stock?.available;
     if (!Number.isInteger(observed)) {
-      unresolved += 1;
+      // The OFFER did not report a usable quantity. Bounded to this one offer, exactly like an
+      // inactive offer or a variant with no inventory - Allegro told us about every other
+      // offer in the same listing - so it must not refuse the whole plan. It used to, which
+      // is the same wedge as the digital-product bug: one offer whose listing omits
+      // `stock.available` stopped the entire catalogue's stock sync, indefinitely.
+      //
+      // Still never guessed as 0: the delta is uncomputable, so the offer is skipped, counted
+      // and reported.
+      skippedNoListingStock += 1;
       continue;
     }
     const desired = variant.quantity;
@@ -305,6 +323,7 @@ export const planStockSync = (
     pending: 0,
     skippedInactive,
     skippedNoInventory,
+    skippedNoListingStock,
     skippedUnlinked,
     skippedUnmatched,
     synced: 0,
@@ -379,6 +398,7 @@ export const isStockCoverageComplete = (plan: StockSyncPlan): boolean =>
   plan.unresolved === 0 &&
   plan.skippedInactive === 0 &&
   plan.skippedNoInventory === 0 &&
+  plan.skippedNoListingStock === 0 &&
   plan.skippedUnmatched === 0 &&
   plan.conflicted === 0 &&
   plan.skippedUnlinked === 0;

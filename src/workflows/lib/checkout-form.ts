@@ -27,7 +27,8 @@ import { parseAmount } from "../../lib/sync/money";
 /** Money on an order, kept as the decimal string Allegro sent plus a parsed number. */
 export interface OrderMoney {
   amount: number;
-  currency: string;
+  /** Absent when Allegro stated an amount without a currency. Never defaulted. */
+  currency?: string;
 }
 
 const money = (value?: { amount: string; currency: string }): OrderMoney | undefined => {
@@ -35,7 +36,11 @@ const money = (value?: { amount: string; currency: string }): OrderMoney | undef
   if (amount === undefined) {
     return undefined;
   }
-  return { amount, currency: value?.currency ?? "PLN" };
+  // No PLN fallback. It was dead for the order total - `readCheckoutForm` refuses a form with
+  // no order currency before this runs - and for the delivery cost it would have labelled a
+  // foreign delivery charge as Polish. An amount whose currency Allegro did not state is
+  // reported as having no currency, and the caller decides.
+  return { amount, currency: value?.currency?.trim() || undefined };
 };
 
 /** One line of an Allegro order, reduced to what a Medusa line item needs. */
@@ -264,6 +269,13 @@ export const readCheckoutForm = (form: AllegroCheckoutForm): CheckoutFormRead =>
   }
 
   const lineItems = form.lineItems ?? [];
+  if (lineItems.length === 0) {
+    // An order with no lines is not an order. Applied, it would create an empty Medusa order
+    // whose total could never match the `totalToPay` sitting beside it, so it is refused for
+    // the same reason as an unreadable price: the form does not describe a sale this plugin
+    // can represent.
+    problems.push("the order carries no line items at all, so there is nothing to create");
+  }
   const lines: CheckoutFormLine[] = [];
   for (const [index, item] of lineItems.entries()) {
     // Named by position AND by offer, because a form can carry several lines and the
@@ -280,6 +292,13 @@ export const readCheckoutForm = (form: AllegroCheckoutForm): CheckoutFormRead =>
     }
     if (!lineCurrency) {
       problems.push(`${where} has no currency`);
+    } else if (facts.currency && lineCurrency.toLowerCase() !== facts.currency.toLowerCase()) {
+      // A line priced in a different currency from the order cannot be summed into it, and
+      // Medusa has one currency per order. Refused for the same reason as an unparseable
+      // price: applying it would create an order whose arithmetic is meaningless.
+      problems.push(
+        `${where} is priced in ${lineCurrency} but the order is in ${facts.currency}, so its price cannot be applied`,
+      );
     }
     if (!(Number.isInteger(quantity) && (quantity as number) >= 1)) {
       problems.push(`${where} has no usable quantity (received ${JSON.stringify(quantity)})`);

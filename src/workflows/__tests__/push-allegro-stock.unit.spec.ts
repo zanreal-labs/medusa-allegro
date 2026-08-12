@@ -438,6 +438,34 @@ describe("pushAllegroStock", () => {
     expect(result.complete).toBe(false);
   });
 
+  it("aborts the run when a CONFIGURED stock location does not exist", async () => {
+    // `retrieveAvailableQuantity` does not complain about an unknown location id - it finds no
+    // levels there and sums to zero - so a single typo in `stockLocationIds` produced exactly
+    // the same catastrophe as an empty list: every variant reads 0, the plan looks safe, and
+    // the run delists the whole catalogue while reporting a clean sync. Only the empty-config
+    // case was validated.
+    const { allegro, client, container } = healthy({
+      stockLocationIds: ["sloc_real"],
+      syncOptions: { stockLocationIds: ["sloc_TYPO"] },
+    });
+
+    await expect(pushAllegroStock(container as never)).rejects.toThrow(/sloc_TYPO/u);
+
+    expect(client.submissions).toEqual([]);
+    expect(allegro.states.get("stock")).toMatchObject({ status: "error" });
+  });
+
+  it("accepts configured locations that all exist", async () => {
+    const { client, container } = healthy({
+      stockLocationIds: ["sloc_a", "sloc_b"],
+      syncOptions: { stockLocationIds: ["sloc_a", "sloc_b"] },
+    });
+
+    await pushAllegroStock(container as never);
+
+    expect(client.submissions).toHaveLength(1);
+  });
+
   it("aborts the run when no stock location exists, rather than pushing zero everywhere", async () => {
     // `retrieveAvailableQuantity` returns BigNumber(0) for an EMPTY location list - it does
     // not fail - so every variant read as 0, the plan looked perfectly safe, and the run
@@ -564,6 +592,8 @@ describe("pushAllegroStock", () => {
           return Promise.resolve(9);
         },
       },
+      // The configured location has to EXIST, because configured ids are validated now.
+      stockLocationIds: ["sloc_warehouse"],
       variants: [{ id: "v1", inventoryItemIds: ["inv_1"], sku: "SKU-1" }],
     });
 

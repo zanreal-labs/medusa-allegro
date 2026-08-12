@@ -81,6 +81,7 @@ export const emptyStockSyncResult = (): StockSyncResult => ({
   pending: 0,
   skippedInactive: 0,
   skippedNoInventory: 0,
+  skippedNoListingStock: 0,
   skippedUnlinked: 0,
   skippedUnmatched: 0,
   synced: 0,
@@ -364,6 +365,11 @@ const buildStockError = (result: StockSyncResult, firstError?: string): string |
   if (result.skippedNoInventory > 0) {
     parts.push(
       `${result.skippedNoInventory} offer(s) map to a variant that does not manage inventory, so Medusa has no quantity to publish for them`,
+    );
+  }
+  if (result.skippedNoListingStock > 0) {
+    parts.push(
+      `${result.skippedNoListingStock} offer(s) were skipped because their Allegro listing carried no usable available quantity, so the difference could not be computed`,
     );
   }
   if (result.skippedUnlinked > 0) {

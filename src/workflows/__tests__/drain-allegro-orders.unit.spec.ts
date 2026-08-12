@@ -632,6 +632,39 @@ describe("drainAllegroOrders: a malformed form is refused, not fabricated", () =
     expect(context.table.rows[0]?.last_error).toContain("has no currency");
   });
 
+  it("refuses a line priced in a different currency from the order", async () => {
+    // Medusa has one currency per order, so a line in another currency cannot be summed into
+    // it. Applying it would produce an order whose arithmetic is meaningless - the same class
+    // as an unparseable price.
+    const context = malformed({
+      lineItems: [
+        {
+          offer: { external: { id: "SKU-1" }, id: "o1", name: "A product" },
+          price: { amount: "199.99", currency: "EUR" },
+          quantity: 1,
+        },
+      ],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toEqual([]);
+    expect(result.failed).toBe(1);
+    expect(context.table.rows[0]?.last_error).toContain("priced in EUR");
+  });
+
+  it("refuses a form with no line items at all", async () => {
+    // Not an order. Applied, it would create an empty Medusa order whose total could never
+    // match the `totalToPay` recorded beside it.
+    const context = malformed({ lineItems: [] });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toEqual([]);
+    expect(result.failed).toBe(1);
+    expect(context.table.rows[0]?.last_error).toContain("no line items");
+  });
+
   it("refuses a present-but-unreadable delivery cost", async () => {
     // Money the buyer paid. Silently dropping it understates the order total.
     const context = malformed({

@@ -37,7 +37,8 @@ export default async function allegroStockSyncJob(container: MedusaContainer): P
       `inactive=${result.skippedInactive} unlinked=${result.skippedUnlinked} ` +
       // The bounded exclusions. None refuses the run, so each is the only signal that
       // part of the catalogue had its quantity published nowhere.
-      `noInventory=${result.skippedNoInventory} unmatched=${result.skippedUnmatched} ` +
+      `noInventory=${result.skippedNoInventory} noListingStock=${result.skippedNoListingStock} ` +
+      `unmatched=${result.skippedUnmatched} ` +
       `conflicted=${result.conflicted} ` +
       `complete=${result.complete}`,
   );

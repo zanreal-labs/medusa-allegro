@@ -392,7 +392,15 @@ export const fakeContainer = (input: {
       }
       if (key === "query") {
         return {
-          graph: ({ entity, pagination }: { entity: string; pagination?: { skip: number } }) => {
+          graph: ({
+            entity,
+            filters,
+            pagination,
+          }: {
+            entity: string;
+            filters?: Record<string, unknown>;
+            pagination?: { skip: number };
+          }) => {
             const firstPage = (pagination?.skip ?? 0) === 0;
             if (entity === "product_variant" && firstPage) {
               return Promise.resolve({
@@ -412,8 +420,15 @@ export const fakeContainer = (input: {
               });
             }
             if (entity === "stock_location") {
+              const existing = input.stockLocationIds ?? ["sloc_default"];
+              // The id filter is HONOURED, because the loop validates configured ids against
+              // it. A fake that ignored the filter would answer "all of them exist" for any
+              // typo, which is exactly the check under test.
+              const wanted = (filters?.id as string[] | undefined) ?? undefined;
               return Promise.resolve({
-                data: (input.stockLocationIds ?? ["sloc_default"]).map((id) => ({ id })),
+                data: (wanted ? existing.filter((id) => wanted.includes(id)) : existing).map(
+                  (id) => ({ id }),
+                ),
               });
             }
             if (entity === "price_list") {

@@ -565,7 +565,10 @@ const reconcileOrderTotal = (
   }
 
   const actualCurrency = snapshot?.currency;
-  const expectedCurrency = expected.currency.trim().toLowerCase();
+  // `view.currency` rather than `totalToPay.currency`: the view only exists when the form
+  // carried an order currency, so this is always present, whereas the money helper no longer
+  // invents one for an amount Allegro sent without it.
+  const expectedCurrency = view.currency.trim().toLowerCase();
   const hint =
     customLineCount > 0
       ? ` This order carries ${customLineCount} custom line item(s) whose sygnatura matched no Medusa variant, which is the usual reason a total differs.`
@@ -574,13 +577,13 @@ const reconcileOrderTotal = (
   if (actualCurrency && actualCurrency !== expectedCurrency) {
     return {
       conflict: "total-mismatch",
-      conflict_detail: `Currency mismatch: Allegro charged ${expected.amount} ${expected.currency.toUpperCase()} but the Medusa order is in ${actualCurrency.toUpperCase()}, so the totals are not comparable.${hint}`,
+      conflict_detail: `Currency mismatch: Allegro charged ${expected.amount} ${expectedCurrency.toUpperCase()} but the Medusa order is in ${actualCurrency.toUpperCase()}, so the totals are not comparable.${hint}`,
     };
   }
   if (toMinorUnits(actual) !== toMinorUnits(expected.amount)) {
     return {
       conflict: "total-mismatch",
-      conflict_detail: `Total mismatch: Allegro charged ${expected.amount} ${expected.currency.toUpperCase()} but the Medusa order totals ${actual}. The Allegro figure is what the buyer paid.${hint}`,
+      conflict_detail: `Total mismatch: Allegro charged ${expected.amount} ${expectedCurrency.toUpperCase()} but the Medusa order totals ${actual}. The Allegro figure is what the buyer paid.${hint}`,
     };
   }
   return undefined;

@@ -306,10 +306,32 @@ const resolveStockLocationIds = async (
   container: MedusaContainer,
   configured: readonly string[],
 ): Promise<string[]> => {
+  const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
+
   if (configured.length > 0) {
+    // Configured ids are VALIDATED, not trusted. `retrieveAvailableQuantity` does not
+    // complain about a location id that does not exist - it simply finds no levels there and
+    // sums to zero - so a single typo in `stockLocationIds` produced exactly the same
+    // catastrophe as the empty list: every variant reads as 0, the plan looks safe, and the
+    // run pushes a zero quantity across the whole catalogue while reporting itself clean.
+    // Same posture as `resolveSalesChannelId`: an operator who named a location must not have
+    // that silently reinterpreted.
+    const { data } = await query.graph({
+      entity: "stock_location",
+      fields: ["id"],
+      filters: { id: [...configured] },
+    });
+    const known = new Set(data.map((row) => row.id as string));
+    const unknown = configured.filter((id) => !known.has(id));
+    if (unknown.length > 0) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `medusa-allegro: the configured \`stockLocationIds\` include ${unknown.length} id(s) that do not exist: ${unknown.join(", ")}. Refusing the stock run: Medusa reports zero available quantity for an unknown location rather than failing, so this would push a zero quantity for every variant and delist the catalogue on Allegro while reporting a clean sync.`,
+      );
+    }
     return [...configured];
   }
-  const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
+
   const { data } = await query.graph({ entity: "stock_location", fields: ["id"] });
   const ids = data.map((row) => row.id as string).filter(Boolean);
   if (ids.length === 0) {

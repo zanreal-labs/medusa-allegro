@@ -389,10 +389,17 @@ either.
 A KNOWN, bounded exclusion does not refuse anything. Each is counted, reported in
 `last_error`, and leaves exactly one offer alone: an inactive offer, a variant that does
 not manage inventory (so Medusa has no quantity to publish - a digital product, say), an
-offer that contradicts its mapping row, a mapped offer absent from the listing, and an
-eligible variant no mapped offer claims. Treating "this variant has no inventory" as an
+offer that contradicts its mapping row, a mapped offer absent from the listing, an offer
+whose own Allegro listing carried no usable `stock.available`, and an eligible variant no
+mapped offer claims. Treating "this variant has no inventory" as an
 unknown is what previously let a single digital product with an Allegro offer refuse the
 entire catalogue's stock sync indefinitely.
+
+**A configured `stockLocationIds` is validated against the locations that exist**, and an
+unknown id aborts the run. Medusa reports zero available quantity for a location that does
+not exist rather than failing, so a single typo produced the same catastrophe as the empty
+case below: every variant reads 0, the plan looks safe, and the whole catalogue is delisted
+by a run that reports itself clean.
 
 **A store with no stock locations aborts the run.** Medusa's `retrieveAvailableQuantity`
 answers `0` for an empty location list rather than failing, so every variant would read

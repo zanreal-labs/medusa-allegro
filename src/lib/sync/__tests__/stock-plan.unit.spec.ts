@@ -76,14 +76,38 @@ describe("planStockSync", () => {
     expect(plan.ambiguous).toBe(1);
   });
 
-  it("counts an unreadable offer quantity as unresolved, never as zero", () => {
+  it("counts an offer whose LISTING has no quantity in its own bucket, never as zero", () => {
+    // Bounded to this offer, so it must not refuse the plan: Allegro reported every other
+    // offer in the same listing perfectly well. It used to count as `unresolved`, which is
+    // plan-refusing - the same wedge as the digital-product bug, one offer stopping the entire
+    // catalogue's stock sync indefinitely.
     const plan = planOne({ quantity: 9, sku: "SKU-1" }, linked("o1", "SKU-1", { stock: {} }));
     expect(plan.changes).toEqual([]);
-    expect(plan.unresolved).toBe(1);
-    // The offer is still counted as eligible: it IS a writable offer, the delta is
-    // simply not computable. Conflating the two would hide the difference between
-    // "not ours" and "we could not read it".
+    expect(plan.skippedNoListingStock).toBe(1);
+    expect(plan.unresolved).toBe(0);
+    expect(isStockPlanSafe(plan)).toBe(true);
+    // But never complete: this offer's quantity is published nowhere.
+    expect(isStockCoverageComplete(plan)).toBe(false);
+    // Still counted as eligible: it IS a writable offer, the delta is simply not computable.
     expect(plan.eligible).toBe(1);
+  });
+
+  it("keeps writing the other offers when one listing has no quantity", () => {
+    const plan = planStockSync(
+      [
+        { quantity: 9, sku: "SKU-1" },
+        { quantity: 4, sku: "SKU-2" },
+      ],
+      [linked("o1", "SKU-1", { stock: {} }), linked("o2", "SKU-2")],
+      [
+        { offerId: "o1", sku: "SKU-1" },
+        { offerId: "o2", sku: "SKU-2" },
+      ],
+    );
+
+    expect(isStockPlanSafe(plan)).toBe(true);
+    expect(plan.changes).toEqual([{ desired: 4, offerId: "o2" }]);
+    expect(plan.skippedNoListingStock).toBe(1);
   });
 
   it("counts an unreadable variant quantity as unresolved", () => {
