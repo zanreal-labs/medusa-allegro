@@ -36,11 +36,29 @@ export interface SyncStateRow {
   write_scope_missing?: boolean;
 }
 
-export interface KillSwitches {
-  priceSyncDisabled: boolean;
-  stockSyncDisabled: boolean;
-  ordersSyncDisabled: boolean;
-  invoiceAttachDisabled: boolean;
+export type RuntimeToggleKey =
+  | "priceSync"
+  | "stockSync"
+  | "ordersSync"
+  | "fulfillmentWriteback"
+  | "invoiceAttach";
+
+/**
+ * One runtime writer as the settings page renders it.
+ *
+ * The switch binds to `persistedEnabled`; when `forceDisabled` is set the environment is
+ * holding the writer off whatever is persisted, so the UI locks the switch and says
+ * "forced off by environment" instead of showing an armed writer that never runs.
+ */
+export interface RuntimeToggle {
+  key: RuntimeToggleKey;
+  column: string;
+  label: string;
+  description: string;
+  envVar: string;
+  persistedEnabled: boolean;
+  forceDisabled: boolean;
+  effectiveEnabled: boolean;
 }
 
 export interface PublicOptions {
@@ -59,8 +77,13 @@ export interface PublicOptions {
 export interface OverviewResponse {
   connection: Connection;
   sync_state: SyncStateRow[];
-  kill_switches: KillSwitches;
+  toggles: RuntimeToggle[];
   options: PublicOptions;
+}
+
+/** The settings CRUD route's response, and the shape a toggle write returns. */
+export interface RuntimeTogglesResponse {
+  toggles: RuntimeToggle[];
 }
 
 export type OfferConflict = "missing-external-id" | "duplicate-sku" | "no-variant" | "no-offer";

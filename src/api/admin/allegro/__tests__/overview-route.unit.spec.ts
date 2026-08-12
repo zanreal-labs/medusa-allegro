@@ -55,18 +55,25 @@ const publicOptions = {
   stockSyncDisabled: false,
 };
 
-const killSwitches = {
-  ordersSyncDisabled: false,
-  priceSyncDisabled: false,
-  stockSyncDisabled: false,
-};
+const toggles = [
+  {
+    column: "price_sync_enabled",
+    description: "prices",
+    effectiveEnabled: false,
+    envVar: "ALLEGRO_PRICE_SYNC_DISABLED",
+    forceDisabled: false,
+    key: "priceSync",
+    label: "Price writes",
+    persistedEnabled: false,
+  },
+];
 
 const harness = () => {
   const listArgs: unknown[][] = [];
   const service = {
     getConnectionStatus: jest.fn(() => Promise.resolve(connectionStatus)),
-    getKillSwitches: jest.fn(() => Promise.resolve(killSwitches)),
     getPublicOptions: jest.fn(() => Promise.resolve(publicOptions)),
+    getRuntimeToggleStates: jest.fn(() => Promise.resolve(toggles)),
     listAllegroSyncStates: jest.fn((...args: unknown[]) => {
       listArgs.push(args);
       return Promise.resolve([syncStateRow]);
@@ -92,11 +99,11 @@ describe("GET /admin/allegro", () => {
     expect(h.bodies).toHaveLength(1);
     expect(h.bodies[0]).toEqual({
       connection: connectionStatus,
-      // Three switches, not one: "price sync is off" reads as "nothing is written",
-      // which is wrong while stock sync is on.
-      kill_switches: killSwitches,
       options: publicOptions,
       sync_state: [syncStateRow],
+      // A set, not one flag: "price sync is off" reads as "nothing is written", which is
+      // wrong while another writer is armed. Each toggle carries the state the UI needs.
+      toggles,
     });
   });
 

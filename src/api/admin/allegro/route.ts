@@ -6,13 +6,15 @@ import type AllegroModuleService from "../../../modules/allegro/service";
  * GET /admin/allegro
  *
  * Everything the settings page needs in one round trip: the connection status, the
- * per-provider sync health, the effective kill switches, and the sync configuration.
- * No secret material is returned - the token envelopes never leave the service, and
+ * per-provider sync health, the runtime toggles, and the sync configuration. No secret
+ * material is returned - the token envelopes never leave the service, and
  * `getPublicOptions` is the narrowed shape rather than the resolved options.
  *
- * The kill switches are returned as a set rather than one flag, because "price sync is
- * off" reads as "nothing is written" and that is wrong while stock sync is on. Three
- * loops write to Allegro, and each has its own switch.
+ * The toggles are returned as a set rather than one flag, because "price sync is off"
+ * reads as "nothing is written" and that is wrong while another writer is armed. Each
+ * carries its persisted arming, whether the environment forces it off, and the
+ * effective state - so the page renders an honest switch that says "forced off by
+ * environment" instead of lying about an armed writer the environment is holding down.
  *
  * `write_scope_missing` on any state row is the one condition the page raises as a
  * persistent banner: it means the stored token cannot write offers at all, no retry
@@ -21,17 +23,17 @@ import type AllegroModuleService from "../../../modules/allegro/service";
 export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void> {
   const allegro = req.scope.resolve(ALLEGRO_MODULE) as AllegroModuleService;
 
-  const [connection, syncState, options, killSwitches] = await Promise.all([
+  const [connection, syncState, options, toggles] = await Promise.all([
     allegro.getConnectionStatus(),
     allegro.listAllegroSyncStates({}, { order: { provider: "ASC" } }),
     allegro.getPublicOptions(),
-    allegro.getKillSwitches(),
+    allegro.getRuntimeToggleStates(),
   ]);
 
   res.json({
     connection,
-    kill_switches: killSwitches,
     options,
     sync_state: syncState,
+    toggles,
   });
 }

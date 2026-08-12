@@ -474,34 +474,6 @@ class AllegroModuleService extends MedusaService({
     });
   }
 
-  /**
-   * The four original writer kill-switches in one read.
-   *
-   * Kept as a narrowing over the resolved toggles so existing callers keep working;
-   * the admin reads the richer `getRuntimeToggleStates` (which also covers the new
-   * fulfillment write-back). "Disabled" here is the negation of effective-enabled.
-   */
-  async getKillSwitches(): Promise<{
-    priceSyncDisabled: boolean;
-    stockSyncDisabled: boolean;
-    ordersSyncDisabled: boolean;
-    invoiceAttachDisabled: boolean;
-  }> {
-    const [priceSyncDisabled, stockSyncDisabled, ordersSyncDisabled, invoiceAttachDisabled] =
-      await Promise.all([
-        this.isPriceSyncDisabled(),
-        this.isStockSyncDisabled(),
-        this.isOrdersSyncDisabled(),
-        this.isInvoiceAttachDisabled(),
-      ]);
-    return {
-      invoiceAttachDisabled,
-      ordersSyncDisabled,
-      priceSyncDisabled,
-      stockSyncDisabled,
-    };
-  }
-
   // ─── Sync-state: single-flight claim and health ───
 
   /** The provider's state row, or undefined before its first run. */

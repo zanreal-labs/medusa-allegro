@@ -1,9 +1,27 @@
 import { defineRouteConfig } from "@medusajs/admin-sdk";
-import { Alert, Badge, Button, Container, Heading, StatusBadge, Table, Text } from "@medusajs/ui";
+import {
+  Alert,
+  Badge,
+  Button,
+  Container,
+  Heading,
+  StatusBadge,
+  Switch,
+  Table,
+  Text,
+  toast,
+} from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
 import { formatDate, SYNC_STATUS_COLOR } from "../../../lib/format";
 import { sdk } from "../../../lib/sdk";
-import type { Connection, OverviewResponse } from "../../../lib/types";
+import type {
+  AllegroSummary,
+  Connection,
+  OverviewResponse,
+  RuntimeToggle,
+  RuntimeTogglesResponse,
+  SummaryResponse,
+} from "../../../lib/types";
 
 /**
  * The callback route can only pass back a short code, never Allegro's own
@@ -77,9 +95,11 @@ const formatCounters = (provider: string, counts?: Record<string, unknown> | nul
 
 const AllegroSettingsPage = () => {
   const [data, setData] = useState<OverviewResponse | undefined>();
+  const [summary, setSummary] = useState<AllegroSummary | undefined>();
   const [loadError, setLoadError] = useState<string | undefined>();
   const [disconnectWarning, setDisconnectWarning] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  const [busyToggle, setBusyToggle] = useState<string | undefined>();
 
   const params = new URLSearchParams(window.location.search);
   const justConnected = params.get("connected") === "1";
@@ -97,6 +117,45 @@ const AllegroSettingsPage = () => {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The catalogue roll-up is best-effort: a store that does not use Allegro yet, or a
+  // transient failure, just leaves the summary hidden rather than blocking the page.
+  useEffect(() => {
+    let cancelled = false;
+    sdk.client
+      .fetch<SummaryResponse>("/admin/allegro/summary")
+      .then((response) => {
+        if (!cancelled) {
+          setSummary(response.summary);
+        }
+      })
+      .catch(() => {
+        // Intentionally silent - the summary is a convenience, not load-bearing.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleWriter = async (toggle: RuntimeToggle) => {
+    // A writer the environment forces off cannot be armed from here - the switch is
+    // locked - so this only ever fires for a live toggle.
+    setBusyToggle(toggle.column);
+    try {
+      const response = await sdk.client.fetch<RuntimeTogglesResponse>("/admin/allegro/settings", {
+        body: { [toggle.column]: !toggle.persistedEnabled },
+        method: "POST",
+      });
+      setData((current) => (current ? { ...current, toggles: response.toggles } : current));
+      toast.success(
+        `${toggle.label} ${toggle.persistedEnabled ? "disarmed" : "armed"}. It takes effect on the next run.`,
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Could not change ${toggle.label}.`);
+    } finally {
+      setBusyToggle(undefined);
+    }
+  };
 
   const connect = async () => {
     setBusy(true);
@@ -267,31 +326,28 @@ const AllegroSettingsPage = () => {
         <Heading className="mb-2" level="h2">
           Writers
         </Heading>
-        <Text className="text-ui-fg-subtle mb-3" size="small">
-          Four writers reach Allegro, each with its own switch. They are listed separately because
-          "price sync is off" does not mean nothing is written.
+        <Text className="text-ui-fg-subtle mb-4" size="small">
+          Every writer that reaches Allegro has its own switch, armed live from here - a flip takes
+          effect on the next run, no redeploy. They are listed separately because "price sync is
+          off" does not mean nothing is written. A fresh install ships with every writer disarmed;
+          arm each one deliberately once you have connected and mapped your offers. A switch shown
+          as forced off is held down by an environment override and cannot be armed here until the
+          override is cleared.
         </Text>
-        <div className="flex flex-wrap gap-2">
-          <KillSwitch
-            disabled={data?.kill_switches.priceSyncDisabled}
-            envVar="ALLEGRO_PRICE_SYNC_DISABLED"
-            label="Price writes"
-          />
-          <KillSwitch
-            disabled={data?.kill_switches.stockSyncDisabled}
-            envVar="ALLEGRO_STOCK_SYNC_DISABLED"
-            label="Quantity writes"
-          />
-          <KillSwitch
-            disabled={data?.kill_switches.ordersSyncDisabled}
-            envVar="ALLEGRO_ORDERS_SYNC_DISABLED"
-            label="Order drain"
-          />
-          <KillSwitch
-            disabled={data?.kill_switches.invoiceAttachDisabled}
-            envVar="ALLEGRO_INVOICE_ATTACH_DISABLED"
-            label="Invoice attach"
-          />
+        <div className="flex flex-col gap-y-3">
+          {(data?.toggles ?? []).map((toggle) => (
+            <WriterToggle
+              busy={busyToggle === toggle.column}
+              key={toggle.key}
+              onToggle={() => void toggleWriter(toggle)}
+              toggle={toggle}
+            />
+          ))}
+          {data === undefined ? (
+            <Text className="text-ui-fg-subtle" size="small">
+              Loading...
+            </Text>
+          ) : null}
         </div>
         {data && !data.options.automationRules ? (
           <Alert className="mt-4" variant="warning">
@@ -322,6 +378,35 @@ const AllegroSettingsPage = () => {
           {data?.options.salesChannelId ?? data?.options.salesChannelName ?? "whole catalogue"}.
         </Text>
       </div>
+
+      {summary && summary.total > 0 ? (
+        <div className="px-6 py-4">
+          <Heading className="mb-2" level="h2">
+            Catalogue
+          </Heading>
+          <Text className="text-ui-fg-subtle mb-3" size="small">
+            A roll-up of the offer mapping. The authoritative per-product view is on each product's
+            own detail page; the counts here just answer "is anything wrong right now?" and link
+            into the offers view filtered to the rows that need attention.
+          </Text>
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <a className="text-ui-fg-interactive txt-compact-small" href="/app/allegro">
+              {summary.linked} linked
+            </a>
+            <Text className="text-ui-fg-subtle txt-compact-small">{summary.unlinked} unlinked</Text>
+            <a className="flex items-center gap-x-1" href="/app/allegro?filter=drift">
+              <StatusBadge color={summary.drifting > 0 ? "orange" : "grey"}>
+                {summary.drifting} drifting
+              </StatusBadge>
+            </a>
+            <a className="flex items-center gap-x-1" href="/app/allegro?filter=conflict">
+              <StatusBadge color={summary.conflicts > 0 ? "red" : "grey"}>
+                {summary.conflicts} conflict{summary.conflicts === 1 ? "" : "s"}
+              </StatusBadge>
+            </a>
+          </div>
+        </div>
+      ) : null}
 
       <div className="px-6 py-4">
         <Heading className="mb-2" level="h2">
@@ -400,28 +485,49 @@ const AllegroSettingsPage = () => {
 };
 
 /**
- * One writer's switch state.
+ * One writer's live switch.
  *
- * Named after what it stops rather than after the option, because that is what an
- * operator is deciding about, and it shows the env var so the remedy is on screen.
+ * The switch reflects and controls the PERSISTED arming. When the environment forces
+ * the writer off it is locked and labelled so - the switch still shows what is
+ * persisted, but the "forced off" note and the disabled control say the truth about why
+ * nothing runs, rather than pretending an armed writer is live. Named after what the
+ * writer does, with its override env var on screen so the remedy is visible.
  */
-const KillSwitch = ({
-  label,
-  disabled,
-  envVar,
+const WriterToggle = ({
+  toggle,
+  busy,
+  onToggle,
 }: {
-  label: string;
-  disabled?: boolean;
-  envVar: string;
+  toggle: RuntimeToggle;
+  busy: boolean;
+  onToggle: () => void;
 }) => (
-  <div className="flex flex-col gap-y-1 rounded-lg border px-3 py-2">
-    <div className="flex items-center gap-x-2">
-      <StatusBadge color={disabled ? "red" : "green"}>
-        {disabled ? "disabled" : "armed"}
-      </StatusBadge>
-      <span className="txt-compact-small-plus">{label}</span>
+  <div className="flex items-start justify-between gap-x-4 rounded-lg border px-3 py-3">
+    <div className="flex flex-col gap-y-1">
+      <div className="flex items-center gap-x-2">
+        <span className="txt-compact-small-plus">{toggle.label}</span>
+        {toggle.forceDisabled ? (
+          <StatusBadge color="red">forced off</StatusBadge>
+        ) : (
+          <StatusBadge color={toggle.effectiveEnabled ? "green" : "grey"}>
+            {toggle.effectiveEnabled ? "armed" : "disarmed"}
+          </StatusBadge>
+        )}
+      </div>
+      <span className="text-ui-fg-subtle txt-compact-xsmall">{toggle.description}</span>
+      {toggle.forceDisabled ? (
+        <span className="text-ui-fg-muted txt-compact-xsmall">
+          Forced off by the environment. Clear <code>{toggle.envVar}</code> to control it here.
+        </span>
+      ) : (
+        <code className="text-ui-fg-muted txt-compact-xsmall">{toggle.envVar}</code>
+      )}
     </div>
-    <code className="text-ui-fg-muted txt-compact-xsmall">{envVar}</code>
+    <Switch
+      checked={toggle.persistedEnabled}
+      disabled={busy || toggle.forceDisabled}
+      onCheckedChange={onToggle}
+    />
   </div>
 );
 
