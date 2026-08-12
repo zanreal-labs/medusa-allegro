@@ -323,6 +323,22 @@ const AllegroSettingsPage = () => {
         </Text>
       </div>
 
+      <div className="px-6 py-4">
+        <Heading className="mb-2" level="h2">
+          Category rates
+        </Heading>
+        <Text className="text-ui-fg-subtle mb-3" size="small">
+          The per-category sale commissions that set every price floor are configuration and live on
+          their own Settings page.
+        </Text>
+        <a
+          className="text-ui-fg-interactive txt-compact-small"
+          href="/app/settings/allegro/category-rates"
+        >
+          Open category rates
+        </a>
+      </div>
+
       <div className="overflow-x-auto px-6 py-4">
         <Heading className="mb-2" level="h2">
           Sync health

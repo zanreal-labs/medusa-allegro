@@ -17,13 +17,12 @@ import {
   toast,
 } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
-import { CONFLICT_LABEL, formatDate } from "../../lib/format";
+import { CONFLICT_LABEL, formatDate, PRICE_MODE_COLOR, PUSH_RESULT_COLOR } from "../../lib/format";
 import { sdk } from "../../lib/sdk";
 import type {
   OfferDetailResponse,
   OfferRow,
   OffersResponse,
-  PricePushRow,
   SinglePushResult,
   SyncRunResponse,
 } from "../../lib/types";
@@ -42,24 +41,18 @@ const PAGE_SIZE = 50;
 
 type Filter = "all" | "conflict" | "drift";
 
-const PRICE_MODE_COLOR: Record<string, "green" | "orange" | "red" | "grey" | "blue"> = {
-  automated: "green",
-  ended: "grey",
-  fixed: "orange",
-  paused: "orange",
-  unknown: "grey",
-};
-
-const PUSH_RESULT_COLOR: Record<PricePushRow["result"], "green" | "orange" | "red" | "grey"> = {
-  failed: "red",
-  observed: "grey",
-  skipped: "orange",
-  success: "green",
+/**
+ * The product-list status widget deep-links here with `?filter=conflict|drift`
+ * so "3 drifting" lands on exactly those rows. Anything else means "all".
+ */
+const initialFilter = (): Filter => {
+  const requested = new URLSearchParams(window.location.search).get("filter");
+  return requested === "conflict" || requested === "drift" ? requested : "all";
 };
 
 const AllegroOffersPage = () => {
   const [data, setData] = useState<OffersResponse | undefined>();
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<Filter>(initialFilter);
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
   const [loadError, setLoadError] = useState<string | undefined>();

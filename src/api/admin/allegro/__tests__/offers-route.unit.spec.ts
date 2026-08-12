@@ -88,6 +88,26 @@ describe("GET /admin/allegro/offers", () => {
     expect(h.filtersFor("listAndCountAllegroOffers").sku).toEqual({ $ilike: "%sku-1%" });
   });
 
+  it("filters on an exact SKU set for the product-detail widget", async () => {
+    const h = harness();
+    await GET_LIST(h.request({ query: { skus: ["SKU-1", "SKU-2"] } }), h.res);
+    expect(h.filtersFor("listAndCountAllegroOffers").sku).toEqual(["SKU-1", "SKU-2"]);
+  });
+
+  it("accepts a single SKU passed as a scalar", async () => {
+    const h = harness();
+    await GET_LIST(h.request({ query: { skus: "SKU-1" } }), h.res);
+    expect(h.filtersFor("listAndCountAllegroOffers").sku).toEqual(["SKU-1"]);
+  });
+
+  it("prefers an exact SKU set over a substring q", async () => {
+    // The widget never sends both, but if it did, the exact set is the safer
+    // reading: a substring match would widen the result past the product.
+    const h = harness();
+    await GET_LIST(h.request({ query: { q: "SKU", skus: ["SKU-1"] } }), h.res);
+    expect(h.filtersFor("listAndCountAllegroOffers").sku).toEqual(["SKU-1"]);
+  });
+
   it("caps the page size so a catalogue-sized response cannot be requested", async () => {
     const h = harness();
     await GET_LIST(h.request({ query: { limit: "100000" } }), h.res);

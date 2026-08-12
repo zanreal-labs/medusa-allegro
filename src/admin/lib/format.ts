@@ -1,4 +1,4 @@
-import type { SyncStatus } from "./types";
+import type { PricePushRow, SyncStatus } from "./types";
 
 /** Shared formatting for the Allegro admin pages. */
 
@@ -57,4 +57,28 @@ export const CONFLICT_LABEL: Record<string, string> = {
   "missing-external-id": "No sygnatura",
   "no-offer": "Offer gone",
   "no-variant": "No variant",
+  "sku-mismatch": "SKU mismatch",
+};
+
+/**
+ * Badge colour for an observed price mode. Shared by the offers page and the
+ * product-detail widget so the same state reads the same way on both.
+ */
+export const PRICE_MODE_COLOR: Record<string, "green" | "orange" | "red" | "grey" | "blue"> = {
+  automated: "green",
+  ended: "grey",
+  fixed: "orange",
+  paused: "orange",
+  unknown: "grey",
+};
+
+/** Badge colour for a push-history result. */
+export const PUSH_RESULT_COLOR: Record<
+  PricePushRow["result"],
+  "green" | "orange" | "red" | "grey"
+> = {
+  failed: "red",
+  observed: "grey",
+  skipped: "orange",
+  success: "green",
 };

@@ -34,9 +34,14 @@ What is here:
 - **Invoice attach** puts an issued invoice PDF onto the Allegro order, driven by an
   event from `@zanreal/medusa-infakt` and retried by a bounded sweep. A soft
   dependency in one direction only - see [The invoice chain](#the-invoice-chain).
-- Admin pages for offers (conflict and drift filters, per-offer opt-out, push
-  history), category rates, and orders (quarantine repair, import window), plus a
-  settings page with per-loop health and the four kill switches.
+- Admin surfaces built around one rule - **per-product state on the product,
+  configuration in Settings, operator task-flows in their own route**. A product
+  detail widget shows each variant SKU's linked offer, status, drift, promotion
+  state and per-offer price sync opt-out (with a push-history drawer); a compact
+  product-list banner rolls up linked / drifting / conflicting counts; category
+  rates and the connection live under **Settings -> Allegro**; and the offers and
+  orders routes stay for cross-catalogue and operator work. See
+  [Admin UI](#admin-ui).
 
 **Nothing writes to Allegro until you configure it to.** Price sync is inert
 without `automationRules`, both write loops honour their own kill switch, and a
@@ -268,6 +273,38 @@ settings page shows it. That matters here more than in most places: the stored
 rows are the only copy of the tokens, so after this call there is nothing left to
 revoke with, and the refresh token stays valid at Allegro until it expires unless
 you remove the application's access by hand in the developer panel.
+
+## Admin UI
+
+The information architecture answers one owner complaint directly: **you should
+not have to open a separate table to see a product's Allegro state.**
+
+- **Product detail widget** (`product.details.after`) - the authoritative
+  per-product view. For every variant SKU it shows the linked offer (with a link
+  to the live listing), a short status (linked / not linked / conflict), the
+  observed price mode and drift, promotion state, the last price and stock sync
+  times, and the per-offer **price sync opt-out** switch. The push history - the
+  only record of the bounds ever sent - opens in a drawer. This is where an
+  operator checks or opts a single product out, without touching the catalogue
+  table.
+- **Product list banner** (`product.list.before`) - a compact roll-up (N linked
+  / N unlinked / N drifting / N conflicts) above the products table, each count
+  linking into the Allegro offers route filtered to those rows. This is the
+  best-supported approximation of "Allegro status while browsing products":
+  **Medusa does not allow injecting a custom column into the core products data
+  table**, and it exposes no list-row widget zone, so a per-row status column is
+  not possible. The list zone (`product.list.before`/`after`) is the only list
+  surface a plugin gets, so the roll-up lives there and the per-product detail
+  widget carries the row-level truth.
+- **Settings -> Allegro** - configuration: the OAuth connection, the writer
+  switches and sync health, and (on its own nested page) the **category
+  commission rates**. Category rates moved here from a top-level table because
+  they are hand-maintained configuration, not a runtime task.
+- **Allegro (offers) route** - the cross-catalogue offer table with conflict and
+  drift filters, bulk rediscovery, and manual push. Kept as an operator/bulk
+  surface.
+- **Allegro -> Orders route** - the orders quarantine repair and import window.
+  Operational task-flow, kept as its own route.
 
 ## The sygnatura / SKU mapping principle
 

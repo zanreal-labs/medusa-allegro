@@ -9,6 +9,9 @@ import type AllegroModuleService from "../../../../modules/allegro/service";
  *
  * - `conflict=1` - only rows carrying an unresolved mapping conflict.
  * - `drift=1` - only rows whose automation state drifts from the expected rule.
+ * - `skus` - an exact set of SKUs (repeatable, `?skus=A&skus=B`), used by the
+ *   product-detail widget to fetch just the offers for one product's variants.
+ *   Takes precedence over `q`.
  * - `q` - a SKU substring.
  * - `limit` / `offset` - pagination, capped so a catalogue-sized response cannot be
  *   requested by accident.
@@ -47,13 +50,23 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
   if (isTruthyFlag(query.drift)) {
     filters.price_automation_drift = true;
   }
+  // An exact SKU set beats a substring search: the product-detail widget asks
+  // for precisely its variants' SKUs, and an `$ilike` would pull in unrelated
+  // offers that merely contain one of them as a substring.
+  const skus = Array.isArray(query.skus)
+    ? query.skus.map(String)
+    : (typeof query.skus === "string"
+      ? [query.skus]
+      : []);
   const search = typeof query.q === "string" ? query.q.trim() : "";
-  if (search) {
+  if (skus.length > 0) {
+    filters.sku = skus;
+  } else if (search) {
     // `%`, `_` and `\` are LIKE metacharacters, so an unescaped search term is a pattern
     // rather than a substring: a lone `%` matched every SKU in the catalogue, and `_` matched
     // any single character. Escaping makes the parameter mean what the UI says it means.
     // `\` goes first, or it would double-escape the escapes added after it.
-    const escaped = search.replace(/\\/gu, "\\\\").replace(/[%_]/gu, (char) => `\\${char}`);
+    const escaped = search.replaceAll('\\', "\\\\").replaceAll(/[%_]/gu, (char) => `\\${char}`);
     filters.sku = { $ilike: `%${escaped}%` };
   }
 

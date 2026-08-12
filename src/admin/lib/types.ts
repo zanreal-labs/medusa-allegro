@@ -134,6 +134,19 @@ export interface CategoryRatesResponse {
   category_rates: CategoryRateRow[];
 }
 
+/** Roll-up of the offer table for the product-list status widget. */
+export interface AllegroSummary {
+  total: number;
+  linked: number;
+  unlinked: number;
+  drifting: number;
+  conflicts: number;
+}
+
+export interface SummaryResponse {
+  summary: AllegroSummary;
+}
+
 export interface AllegroOrderRow {
   id: string;
   checkout_form_id: string;

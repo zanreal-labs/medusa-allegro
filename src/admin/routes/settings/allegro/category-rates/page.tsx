@@ -1,12 +1,14 @@
 import { defineRouteConfig } from "@medusajs/admin-sdk";
 import { Alert, Button, Container, Heading, Input, Table, Text, toast } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
-import { formatRate } from "../../../lib/format";
-import { sdk } from "../../../lib/sdk";
-import type { CategoryRateRow, CategoryRatesResponse } from "../../../lib/types";
+import { formatRate } from "../../../../lib/format";
+import { sdk } from "../../../../lib/sdk";
+import type { CategoryRateRow, CategoryRatesResponse } from "../../../../lib/types";
 
 /**
- * The commission rates that set every price floor.
+ * The commission rates that set every price floor - a Settings page, because it
+ * is configuration: hand-maintained numbers read off Allegro's published fee
+ * table, not a runtime operator task.
  *
  * Maintained by hand, and there is no API alternative: Allegro's fee calculator
  * rejects the offer bodies a seller can build from their own live offers, so the
@@ -29,7 +31,7 @@ interface Draft {
   promoted: string;
 }
 
-const AllegroCategoryRatesPage = () => {
+const AllegroCategoryRatesSettingsPage = () => {
   const [rates, setRates] = useState<CategoryRateRow[]>([]);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [loadError, setLoadError] = useState<string | undefined>();
@@ -204,7 +206,7 @@ const AllegroCategoryRatesPage = () => {
 };
 
 export const config = defineRouteConfig({
-  label: "Category rates",
+  label: "Allegro category rates",
 });
 
-export default AllegroCategoryRatesPage;
+export default AllegroCategoryRatesSettingsPage;
