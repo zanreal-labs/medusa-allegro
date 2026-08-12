@@ -41,11 +41,39 @@ export default async function allegroOrdersSyncJob(container: MedusaContainer): 
   }
 }
 
+/** The default drain cadence, in milliseconds. */
+export const DEFAULT_ORDERS_SYNC_INTERVAL_MS = 20_000;
+
+/**
+ * Resolve the drain schedule from the environment.
+ *
+ * Interval-based by default rather than cron. A `BOUGHT` event that has not been
+ * applied is an order nobody has been told about, and an interval keeps the gap tight
+ * and even without pinning the drain to a whole-minute cron tick - Medusa's cron only
+ * resolves to the minute, so ~20s is expressible only as an interval.
+ *
+ * `ALLEGRO_ORDERS_SYNC_INTERVAL_MS` overrides the default; a non-numeric or
+ * non-positive value falls back to it rather than scheduling something nonsensical.
+ * `ALLEGRO_ORDERS_SYNC_CRON`, if set, switches back to a cron expression - the two are
+ * mutually exclusive in Medusa's scheduler, so a cron wins when both are present.
+ *
+ * An env var rather than a plugin option because Medusa evaluates `config.schedule` at
+ * plugin-load time, before the DI container - and therefore this plugin's `options` -
+ * exists. See the offer-sync job.
+ */
+export const resolveOrdersSyncSchedule = (
+  env: NodeJS.ProcessEnv = process.env,
+): { cron: string } | { interval: number } => {
+  const cron = env.ALLEGRO_ORDERS_SYNC_CRON?.trim();
+  if (cron) {
+    return { cron };
+  }
+  const parsed = Number.parseInt(env.ALLEGRO_ORDERS_SYNC_INTERVAL_MS ?? "", 10);
+  const interval = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ORDERS_SYNC_INTERVAL_MS;
+  return { interval };
+};
+
 export const config = {
   name: JOB_NAME,
-  /**
-   * Env var rather than a plugin option: Medusa evaluates `config.schedule` at
-   * plugin-load time, before the DI container exists. See the offer-sync job.
-   */
-  schedule: process.env.ALLEGRO_ORDERS_SYNC_CRON ?? "* * * * *",
+  schedule: resolveOrdersSyncSchedule(),
 };
