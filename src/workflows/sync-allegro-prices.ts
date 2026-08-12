@@ -456,11 +456,11 @@ const planOffer = async (
   // may sell it at a loss. The `promotion-unresolved` gate below is what catches that,
   // and it was unreachable while the column defaulted to false.
   const promoted = row.promoted ?? undefined;
-  const commission = resolveCommissionFraction(
-    inputs.categoryRates,
-    row.category_id,
-    promoted ?? false,
-  );
+  // `promoted`, not `promoted ?? false`. Laundering an unresolved state into "standard"
+  // picks the LOWER commission, which yields a floor below a promoted offer's true
+  // break-even. The eligibility gate below refuses the offer regardless, so this was latent
+  // rather than live - and latent is exactly how it comes back.
+  const commission = resolveCommissionFraction(inputs.categoryRates, row.category_id, promoted);
   const breakEven =
     promoted === undefined ? undefined : await inputs.breakEvenFor(row.sku, commission);
 

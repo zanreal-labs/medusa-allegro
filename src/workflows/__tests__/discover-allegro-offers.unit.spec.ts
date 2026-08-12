@@ -313,6 +313,25 @@ describe("runOfferDiscovery", () => {
     expect(orphan?.promoted ?? null).toBeNull();
   });
 
+  it("clears a non-ACTIVE offer's promotion state to unresolved, not to false", async () => {
+    // The sequence this closes, end to end: an INACTIVE offer used to have `promoted: false`
+    // recorded as a RESOLVED fact. The seller then re-activates it and buys a promotion; the
+    // next discovery run has an unresolved sweep so it writes nothing, and the stale `false`
+    // survives and is believed. Price sync floors a promoted offer on the STANDARD commission
+    // - below its true break-even - and the monitor reads it as drift and switches it onto the
+    // standard rule, actively making it worse.
+    const { allegro } = await run({
+      offers: [offer({ external: { id: "SKU-1" }, id: "o1", publication: { status: "INACTIVE" } })],
+      promo: [],
+      stored: [{ id: "row-1", offer_id: "o1", promoted: true, sku: "SKU-1" }],
+      variants: [{ id: "v1", sku: "SKU-1" }],
+    });
+
+    // Neither true nor false: not established. Price sync skips it with
+    // `promotion-unresolved` until a successful sweep says otherwise.
+    expect(allegro.offers[0]?.promoted ?? null).toBeNull();
+  });
+
   it("counts an unresolved promotion state that is not a feature gap", async () => {
     const { output } = await run({
       offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],

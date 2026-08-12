@@ -145,20 +145,33 @@ export const sweepPromotedOffers = async (client: AllegroClient): Promise<PromoS
 /**
  * Decide an offer's promotion state from the sweep.
  *
- * With a complete map, an offer absent from it carries no packages, so it is not
- * promoted - this is what clears a stale flag. Without a map, `promoted` stays
- * undefined so a previously stored value is never overwritten by an unresolved
- * read, EXCEPT for an offer Allegro explicitly reports as non-ACTIVE: an ended
- * auction cannot be emphasized whatever packages it still carries. An UNKNOWN
- * status never force-clears.
+ * With a complete map, an offer absent from it carries no packages, so it is not promoted -
+ * this is what clears a stale flag. Without a map, `promoted` stays undefined so a
+ * previously stored value is never overwritten by an unresolved read. An UNKNOWN status
+ * never force-clears.
+ *
+ * A non-ACTIVE offer resolves to NULL: its promotion state is not established, which is a
+ * different claim from "not promoted". See below for why the difference is money.
  */
 export const resolveOfferPromoted = (
   offer: AllegroOffer,
   sweep: PromoSweepResult,
-): { promoted?: boolean; unresolved: boolean } => {
+): { promoted?: boolean | null; unresolved: boolean } => {
   const status = offer.publication?.status;
   if (status !== undefined && status !== "ACTIVE") {
-    return { promoted: false, unresolved: false };
+    // NULL, not `false`. "An ended auction cannot be emphasized" is true only WHILE the
+    // offer is ended, and a hard `false` outlived that state. Discovery upserts offers of
+    // every status, so an INACTIVE offer had `promoted: false` recorded as a RESOLVED fact.
+    // When the seller then re-activated it and bought a promotion, the next discovery run
+    // with an unresolved sweep wrote nothing - so the stale `false` survived and was
+    // believed. Price sync floored a genuinely promoted offer on the STANDARD commission,
+    // below its true break-even, and the monitor read it as drift and switched it onto the
+    // standard rule: actively making it worse, on a live listing.
+    //
+    // NULL says only what is known: this offer's promotion state is not established. It
+    // costs nothing for a non-ACTIVE offer, which every write path skips anyway, and it
+    // forces a real answer before the offer is ever priced again.
+    return { promoted: null, unresolved: false };
   }
   if (sweep.promotedByOffer) {
     return { promoted: sweep.promotedByOffer.get(offer.id) ?? false, unresolved: false };

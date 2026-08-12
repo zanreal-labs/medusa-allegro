@@ -105,9 +105,18 @@ export const buildCategoryRates = (
 export const resolveCommissionFraction = (
   rates: Map<string, CategoryRates>,
   categoryId: string | null | undefined,
-  promoted: boolean,
+  promoted: boolean | undefined,
 ): number | undefined => {
   if (!categoryId) {
+    return undefined;
+  }
+  // An unresolved promotion state cannot select a rate, so it selects NONE. Defaulting to
+  // the standard rate here would quietly re-create the bug the nullable `promoted` column
+  // exists to prevent: the standard rate is the LOWER commission, so it yields a floor
+  // below a promoted offer's true break-even. The eligibility ladder refuses such an offer
+  // anyway, but a defaulted rate one call earlier is a live trap for the next caller who
+  // reaches for this function without that gate in front of it.
+  if (promoted === undefined) {
     return undefined;
   }
   const entry = rates.get(categoryId);
