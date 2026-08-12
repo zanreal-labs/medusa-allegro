@@ -53,6 +53,16 @@ export interface AllegroPluginOptions {
    */
   ordersSyncDisabled?: boolean;
   /**
+   * Kill-switch for the fulfillment write-back: pushing the seller-managed
+   * fulfillment status back to Allegro on a Medusa fulfillment/shipment event.
+   *
+   * Its own switch because that path had none before - it is the only event-driven
+   * write in the plugin, and a store previously had no way to stop it reaching the
+   * marketplace short of pulling the subscriber. Force-disable it here or via
+   * `ALLEGRO_FULFILLMENT_WRITEBACK_DISABLED`; the live arming is the persisted toggle.
+   */
+  fulfillmentWritebackDisabled?: boolean;
+  /**
    * Kill-switch for attaching invoice PDFs to Allegro orders.
    *
    * Deliberately NOT folded into `ordersSyncDisabled`. That switch stops the drain
@@ -162,6 +172,7 @@ export interface ResolvedAllegroOptions {
   priceSyncDisabled: boolean;
   stockSyncDisabled: boolean;
   ordersSyncDisabled: boolean;
+  fulfillmentWritebackDisabled: boolean;
   invoiceAttachDisabled: boolean;
   automationRules?: { promoted: string; standard: string };
   changeCap: number;
@@ -251,6 +262,8 @@ const PRICE_SYNC_DISABLED_ENV = "ALLEGRO_PRICE_SYNC_DISABLED";
 const STOCK_SYNC_DISABLED_ENV = "ALLEGRO_STOCK_SYNC_DISABLED";
 /** Same contract again, for the order event drain. */
 const ORDERS_SYNC_DISABLED_ENV = "ALLEGRO_ORDERS_SYNC_DISABLED";
+/** Same contract again, for the fulfillment write-back on a Medusa fulfillment event. */
+const FULFILLMENT_WRITEBACK_DISABLED_ENV = "ALLEGRO_FULFILLMENT_WRITEBACK_DISABLED";
 /** Same contract again, for attaching invoice PDFs to Allegro orders. */
 const INVOICE_ATTACH_DISABLED_ENV = "ALLEGRO_INVOICE_ATTACH_DISABLED";
 /** Comma-separated stock location ids, overriding `stockLocationIds`. */
@@ -269,6 +282,10 @@ export const isStockSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): 
 
 export const isOrdersSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
   truthyEnv(env[ORDERS_SYNC_DISABLED_ENV]);
+
+export const isFulfillmentWritebackDisabledByEnv = (
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => truthyEnv(env[FULFILLMENT_WRITEBACK_DISABLED_ENV]);
 
 export const isInvoiceAttachDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
   truthyEnv(env[INVOICE_ATTACH_DISABLED_ENV]);
@@ -445,6 +462,11 @@ export const resolveAllegroOptions = (
   requireBooleanSwitch(options.stockSyncDisabled, "stockSyncDisabled", STOCK_SYNC_DISABLED_ENV);
   requireBooleanSwitch(options.ordersSyncDisabled, "ordersSyncDisabled", ORDERS_SYNC_DISABLED_ENV);
   requireBooleanSwitch(
+    options.fulfillmentWritebackDisabled,
+    "fulfillmentWritebackDisabled",
+    FULFILLMENT_WRITEBACK_DISABLED_ENV,
+  );
+  requireBooleanSwitch(
     options.invoiceAttachDisabled,
     "invoiceAttachDisabled",
     INVOICE_ATTACH_DISABLED_ENV,
@@ -502,6 +524,8 @@ export const resolveAllegroOptions = (
     docsUrl,
     encryptionKey,
     environment,
+    fulfillmentWritebackDisabled:
+      options.fulfillmentWritebackDisabled === true || isFulfillmentWritebackDisabledByEnv(),
     invoiceAttachDisabled: options.invoiceAttachDisabled === true || isInvoiceAttachDisabledByEnv(),
     invoiceModuleKey: optionalString(options.invoiceModuleKey) ?? DEFAULT_INVOICE_MODULE_KEY,
     marketplaceId: optionalString(options.marketplaceId) ?? DEFAULT_MARKETPLACE_ID,
