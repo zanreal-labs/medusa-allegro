@@ -887,6 +887,22 @@
           "enumItems": [],
           "mappedType": "text"
         },
+        "allegro_invoice_id": {
+          "name": "allegro_invoice_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
         "allegro_status": {
           "name": "allegro_status",
           "type": "text",
@@ -1025,6 +1041,22 @@
           "comment": null,
           "enumItems": [],
           "mappedType": "text"
+        },
+        "invoice_attached_at": {
+          "name": "invoice_attached_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
         },
         "last_error": {
           "name": "last_error",

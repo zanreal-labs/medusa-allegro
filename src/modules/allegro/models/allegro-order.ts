@@ -30,6 +30,16 @@ import { model } from "@medusajs/framework/utils";
  * a total starts reading 233.20999999999998.
  */
 const AllegroOrder = model.define("allegro_order", {
+  /**
+   * Allegro's id for the invoice document registered on this checkout form.
+   *
+   * Persisted the moment the create returns, BEFORE the file is uploaded, because
+   * `POST .../invoices` has no idempotency key: a crash between a successful create
+   * and this column being written would otherwise register a second document on the
+   * next attempt, and an order accepts only ten. With the id stored, the retry
+   * uploads against the document that already exists.
+   */
+  allegro_invoice_id: model.text().nullable(),
   /** Checkout status, verbatim: BOUGHT, FILLED_IN, READY_FOR_PROCESSING, CANCELLED. */
   allegro_status: model.text().nullable(),
   /** Buyer's Allegro login. Display-only; never a mapping key. */
@@ -77,6 +87,15 @@ const AllegroOrder = model.define("allegro_order", {
   /** Seller-managed fulfillment status, verbatim (NEW, SENT, RETURNED, ...). */
   fulfillment_status: model.text().nullable(),
   id: model.id({ prefix: "algorder" }).primaryKey(),
+  /**
+   * When Allegro accepted the invoice PDF for this order. Null is "not attached".
+   *
+   * Stamped LAST, after the upload returned, so a row that reads attached really
+   * carries a file the buyer can download. The sweep in the orders job uses the same
+   * reading in reverse: null with an invoice already issued means unfinished work,
+   * whatever step it stopped at.
+   */
+  invoice_attached_at: model.dateTime().nullable(),
   /** Last failure for this form, cleared on the next successful pass. */
   last_error: model.text().nullable(),
   /** `occurredAt` of the newest journal event this row was refreshed for. */
