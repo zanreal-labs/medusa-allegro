@@ -11,6 +11,7 @@ import { AllegroOAuth } from "../../lib/allegro/oauth";
 import type { PersistedToken } from "../../lib/allegro/types";
 import { decryptValue, encryptValue } from "../../lib/crypto";
 import {
+  isFulfillmentWritebackDisabledByEnv,
   isInvoiceAttachDisabledByEnv,
   isOrdersSyncDisabledByEnv,
   isPriceSyncDisabledByEnv,
@@ -25,13 +26,29 @@ import type {
 } from "../../lib/options";
 import { mintOAuthState, verifyOAuthState } from "../../lib/oauth-state";
 import type { OAuthStateVerification } from "../../lib/oauth-state";
+import {
+  FRESH_INSTALL_SETTINGS,
+  resolveEffectiveEnabled,
+  RUNTIME_TOGGLES,
+} from "../../lib/runtime-toggles";
+import type { RuntimeToggleColumn, RuntimeToggleKey } from "../../lib/runtime-toggles";
 import type { FailureState } from "../../lib/sync/failure-state";
 import AllegroAuth from "./models/allegro-auth";
 import AllegroCategoryRate from "./models/allegro-category-rate";
 import AllegroOffer from "./models/allegro-offer";
 import AllegroOrder from "./models/allegro-order";
 import AllegroPricePush from "./models/allegro-price-push";
+import AllegroSettings from "./models/allegro-settings";
 import AllegroSyncState from "./models/allegro-sync-state";
+
+/**
+ * The fixed primary key of the settings singleton.
+ *
+ * A constant id rather than a generated one makes the row a genuine singleton: a
+ * second insert collides on the primary key, so concurrent first-reads cannot leave
+ * two rows behind, and every read targets the same key.
+ */
+export const ALLEGRO_SETTINGS_ID = "algset_singleton";
 
 /** The distinct sync loops, each with its own state row, claim and kill switch. */
 export const ALLEGRO_SYNC_PROVIDERS = {
@@ -83,6 +100,39 @@ export const SYNC_HEARTBEAT_INTERVAL_MS = 60_000;
  * the day the wording changes.
  */
 export const SYNC_CLAIM_HELD = "a sync run is already in progress for this provider";
+
+/** The persisted runtime-toggle singleton, as callers read it. */
+export interface AllegroSettingsRow {
+  id: string;
+  price_sync_enabled: boolean;
+  stock_sync_enabled: boolean;
+  orders_sync_enabled: boolean;
+  fulfillment_writeback_enabled: boolean;
+  invoice_attach_enabled: boolean;
+}
+
+/**
+ * A runtime toggle as the admin renders it.
+ *
+ * `persistedEnabled` is the stored arming; `forceDisabled` is the environment (or
+ * boot-option) override that can only force off; `effectiveEnabled` is what the
+ * runtime paths actually honour. The UI binds the switch to `persistedEnabled` and
+ * locks it, showing "forced off by environment", whenever `forceDisabled` is set -
+ * so it never reports an armed writer that the environment is silently holding off.
+ */
+export interface AllegroRuntimeToggleState {
+  key: RuntimeToggleKey;
+  column: RuntimeToggleColumn;
+  label: string;
+  description: string;
+  envVar: string;
+  persistedEnabled: boolean;
+  forceDisabled: boolean;
+  effectiveEnabled: boolean;
+}
+
+/** The columns an admin write may set on the settings singleton. */
+export type AllegroSettingsPatch = Partial<Record<RuntimeToggleColumn, boolean>>;
 
 /** The sync-state row, as the loops read it. */
 export interface AllegroSyncStateRow {
@@ -195,6 +245,7 @@ class AllegroModuleService extends MedusaService({
   AllegroOffer,
   AllegroOrder,
   AllegroPricePush,
+  AllegroSettings,
   AllegroSyncState,
 }) {
   protected readonly options_: ResolvedAllegroOptions;
@@ -261,45 +312,174 @@ class AllegroModuleService extends MedusaService({
     });
   }
 
+  // ─── Runtime toggles: the persisted, operator-flippable arming ───
+
   /**
-   * Effective price-sync kill-switch.
+   * The settings singleton, created with the fresh-install defaults on first read.
    *
-   * Re-reads the environment on every call rather than trusting the value
-   * captured at boot, so `ALLEGRO_PRICE_SYNC_DISABLED=1` takes effect on a
-   * restart-free redeploy of the process environment as well.
+   * Every runtime path resolves its effective arming from this row at the top of its
+   * tick/handler, so an operator flipping a toggle in the admin takes effect on the
+   * next run without a redeploy. The fixed id makes it a true singleton: a concurrent
+   * first-read that loses the insert re-reads the winner's row rather than duplicating
+   * it, and a config singleton written this rarely never contends in practice.
    */
-  isPriceSyncDisabled(): Promise<boolean> {
-    return Promise.resolve(this.options_.priceSyncDisabled || isPriceSyncDisabledByEnv());
+  async getSettings(): Promise<AllegroSettingsRow> {
+    const existing = await this.readSettingsRow();
+    if (existing) {
+      return existing;
+    }
+    try {
+      const [created] = await this.createAllegroSettings([
+        { id: ALLEGRO_SETTINGS_ID, ...FRESH_INSTALL_SETTINGS },
+      ]);
+      return created as unknown as AllegroSettingsRow;
+    } catch (error) {
+      // A concurrent first-read won the insert under the fixed id. The row exists now.
+      const row = await this.readSettingsRow();
+      if (row) {
+        return row;
+      }
+      throw error;
+    }
   }
 
-  /** Effective quantity-write kill-switch. Same env-wins contract as prices. */
-  isStockSyncDisabled(): Promise<boolean> {
-    return Promise.resolve(this.options_.stockSyncDisabled || isStockSyncDisabledByEnv());
-  }
-
-  /** Effective order-drain kill-switch. Same env-wins contract as prices. */
-  isOrdersSyncDisabled(): Promise<boolean> {
-    return Promise.resolve(this.options_.ordersSyncDisabled || isOrdersSyncDisabledByEnv());
+  /** The stored singleton row, or undefined before its first read created it. */
+  protected async readSettingsRow(): Promise<AllegroSettingsRow | undefined> {
+    const [row] = await this.listAllegroSettings({ id: ALLEGRO_SETTINGS_ID }, { take: 1 });
+    return row as unknown as AllegroSettingsRow | undefined;
   }
 
   /**
-   * Effective invoice-attach kill-switch. Same env-wins contract as prices.
+   * Arm or disarm writers by writing the persisted toggles.
+   *
+   * Only the columns present in `patch` are written, so arming one writer does not
+   * disturb another. A write to a writer the environment force-disables is accepted
+   * and stored - the operator is recording intent for when the override is lifted -
+   * and the returned effective state still shows it held off, never a lie.
+   */
+  async updateSettings(patch: AllegroSettingsPatch): Promise<AllegroSettingsRow> {
+    // Ensure the singleton exists before the conditional update, so a first-ever write
+    // through the admin has a row to land on.
+    await this.getSettings();
+    await this.updateAllegroSettings([{ id: ALLEGRO_SETTINGS_ID, ...patch }]);
+    const row = await this.readSettingsRow();
+    if (!row) {
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        "medusa-allegro: the settings singleton disappeared between write and read.",
+      );
+    }
+    return row;
+  }
+
+  /**
+   * The environment/boot-option force-disable for every writer, by key.
+   *
+   * Re-reads the environment on every call rather than trusting the value captured at
+   * boot, so `ALLEGRO_PRICE_SYNC_DISABLED=1` and its siblings take effect on a
+   * restart-free redeploy of the process environment too. The environment (and a
+   * boot-time plugin option) can ONLY force a writer off; a set override beats a
+   * persisted `true`.
+   */
+  private forceDisabledByKey(): Record<RuntimeToggleKey, boolean> {
+    const o = this.options_;
+    return {
+      fulfillmentWriteback: o.fulfillmentWritebackDisabled || isFulfillmentWritebackDisabledByEnv(),
+      invoiceAttach: o.invoiceAttachDisabled || isInvoiceAttachDisabledByEnv(),
+      ordersSync: o.ordersSyncDisabled || isOrdersSyncDisabledByEnv(),
+      priceSync: o.priceSyncDisabled || isPriceSyncDisabledByEnv(),
+      stockSync: o.stockSyncDisabled || isStockSyncDisabledByEnv(),
+    };
+  }
+
+  /** effectiveEnabled for one writer: persisted arming, unless an override forces off. */
+  private async resolveWriterEnabled(
+    key: RuntimeToggleKey,
+    column: RuntimeToggleColumn,
+  ): Promise<boolean> {
+    const settings = await this.getSettings();
+    return resolveEffectiveEnabled(settings[column] === true, this.forceDisabledByKey()[key]);
+  }
+
+  /**
+   * Effective price-sync kill-switch: disabled unless the persisted toggle is armed
+   * and no override forces it off. Read at the top of every price run and re-read
+   * per item, so flipping the toggle stops an in-flight run without a restart.
+   */
+  async isPriceSyncDisabled(): Promise<boolean> {
+    return !(await this.resolveWriterEnabled("priceSync", "price_sync_enabled"));
+  }
+
+  /** Effective quantity-write kill-switch. Same persisted-plus-override contract. */
+  async isStockSyncDisabled(): Promise<boolean> {
+    return !(await this.resolveWriterEnabled("stockSync", "stock_sync_enabled"));
+  }
+
+  /** Effective order-drain kill-switch. Same persisted-plus-override contract. */
+  async isOrdersSyncDisabled(): Promise<boolean> {
+    return !(await this.resolveWriterEnabled("ordersSync", "orders_sync_enabled"));
+  }
+
+  /**
+   * Effective fulfillment-write-back kill-switch.
+   *
+   * NEW: this event-driven write had no kill switch at all before, so a store could
+   * not stop it reaching the marketplace short of pulling the subscriber. Defaults
+   * OFF like every other writer, resolved from the persisted toggle at the top of
+   * each fulfillment event.
+   */
+  async isFulfillmentWritebackDisabled(): Promise<boolean> {
+    return !(await this.resolveWriterEnabled(
+      "fulfillmentWriteback",
+      "fulfillment_writeback_enabled",
+    ));
+  }
+
+  /**
+   * Effective invoice-attach kill-switch.
    *
    * Its own switch rather than a reading of `ordersSyncDisabled`: pausing the import
    * of orders and refusing to deliver an already-issued invoice are different
    * decisions, and conflating them means one incident response silently causes the
-   * other problem.
+   * other problem. Defaults ON (enabled-but-inert until an invoicing module is wired).
    */
-  isInvoiceAttachDisabled(): Promise<boolean> {
-    return Promise.resolve(this.options_.invoiceAttachDisabled || isInvoiceAttachDisabledByEnv());
+  async isInvoiceAttachDisabled(): Promise<boolean> {
+    return !(await this.resolveWriterEnabled("invoiceAttach", "invoice_attach_enabled"));
   }
 
   /**
-   * Every kill switch in one read, for the admin.
+   * Every runtime toggle, resolved for the admin.
    *
-   * One method rather than four calls from the route because they are only ever
-   * meaningful together: "price sync is off" reads as "nothing is written", which is
-   * wrong while stock sync is on.
+   * One method rather than five calls from the route because the writers are only
+   * meaningful together, and each entry carries what the UI needs to render an honest
+   * switch: the persisted arming it binds to, the environment override that locks it,
+   * and the effective state that results. Reads the singleton once and reuses it.
+   */
+  async getRuntimeToggleStates(): Promise<AllegroRuntimeToggleState[]> {
+    const settings = await this.getSettings();
+    const forced = this.forceDisabledByKey();
+    return RUNTIME_TOGGLES.map((meta) => {
+      const persistedEnabled = settings[meta.column] === true;
+      const forceDisabled = forced[meta.key];
+      return {
+        column: meta.column,
+        description: meta.description,
+        effectiveEnabled: resolveEffectiveEnabled(persistedEnabled, forceDisabled),
+        envVar: meta.envVar,
+        forceDisabled,
+        key: meta.key,
+        label: meta.label,
+        persistedEnabled,
+      };
+    });
+  }
+
+  /**
+   * The four original writer kill-switches in one read.
+   *
+   * Kept as a narrowing over the resolved toggles so existing callers keep working;
+   * the admin reads the richer `getRuntimeToggleStates` (which also covers the new
+   * fulfillment write-back). "Disabled" here is the negation of effective-enabled.
    */
   async getKillSwitches(): Promise<{
     priceSyncDisabled: boolean;

@@ -16,10 +16,14 @@ import { pushAllegroFulfillment } from "../workflows/push-allegro-fulfillment";
  * recorded on the `allegro_order` row instead, and an operator can set the status by
  * hand on Allegro.
  *
- * `ordersSyncDisabled` deliberately does NOT gate this. That switch stops the drain
- * from CONSUMING the journal; a store that has fulfilled an order still wants the
- * buyer to see it shipped, and suppressing that would leave a real shipment
- * invisible on the marketplace with nothing to correct it later.
+ * `ordersSyncDisabled` deliberately does NOT gate this: that switch stops the drain
+ * from CONSUMING the journal, and pausing an import is a different decision from
+ * refusing to tell the buyer a shipment happened. The write-back has its OWN switch
+ * instead - `fulfillmentWritebackEnabled`, resolved inside `pushAllegroFulfillment` at
+ * the top of each event - so a store can stop this reaching the marketplace live,
+ * without conflating it with the order drain and without pulling the subscriber. It
+ * defaults OFF on a fresh install like every other writer, and the resolution happens
+ * in the workflow rather than here so a redeploy-free flip is honoured on the next event.
  */
 export default async function allegroFulfillmentPushSubscriber({
   container,

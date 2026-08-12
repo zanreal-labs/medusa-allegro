@@ -96,6 +96,7 @@ export const fakeAllegroService = (seed: {
   priceSyncDisabled?: boolean;
   stockSyncDisabled?: boolean;
   ordersSyncDisabled?: boolean;
+  fulfillmentWritebackDisabled?: boolean;
   invoiceAttachDisabled?: boolean;
   /**
    * Trip a kill switch only AFTER this many reads, simulating an operator flipping it
@@ -208,6 +209,8 @@ export const fakeAllegroService = (seed: {
      * seed directly - which also matches the real service, where it is independent of the
      * three loop switches rather than a reading of them.
      */
+    isFulfillmentWritebackDisabled: () =>
+      Promise.resolve(seed.fulfillmentWritebackDisabled === true),
     isInvoiceAttachDisabled: () => Promise.resolve(seed.invoiceAttachDisabled === true),
     isOrdersSyncDisabled: () => Promise.resolve(tripped(seed.ordersSyncDisabled)),
     isPriceSyncDisabled: () => Promise.resolve(tripped(seed.priceSyncDisabled)),

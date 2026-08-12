@@ -118,10 +118,73 @@ const fakeTable = (initial: AuthRow[] = []) => {
 
 type FakeTable = ReturnType<typeof fakeTable>;
 
+interface SettingsRow {
+  id: string;
+  price_sync_enabled: boolean;
+  stock_sync_enabled: boolean;
+  orders_sync_enabled: boolean;
+  fulfillment_writeback_enabled: boolean;
+  invoice_attach_enabled: boolean;
+}
+
+/**
+ * In-memory stand-in for the `allegro_settings` singleton.
+ *
+ * Seed a row to test a specific arming; leave it empty and the service's first read
+ * creates the fresh-install defaults (writers off, invoice-attach on), exactly as the
+ * real lazy singleton does against Postgres.
+ */
+const fakeSettings = (seed?: Partial<SettingsRow>) => {
+  const rows: SettingsRow[] = seed
+    ? [
+        {
+          fulfillment_writeback_enabled: false,
+          id: "algset_singleton",
+          invoice_attach_enabled: true,
+          orders_sync_enabled: false,
+          price_sync_enabled: false,
+          stock_sync_enabled: false,
+          ...seed,
+        },
+      ]
+    : [];
+
+  return {
+    create: (data: Partial<SettingsRow>[]) => {
+      const created = data.map((entry) => {
+        const row = { id: "algset_singleton", ...entry } as SettingsRow;
+        rows.push(row);
+        return { ...row };
+      });
+      return Promise.resolve(created);
+    },
+    list: (filters: { id?: string } = {}, config: { take?: number } = {}) => {
+      let out = rows.filter((row) => (filters.id ? row.id === filters.id : true));
+      if (config.take !== undefined) {
+        out = out.slice(0, config.take);
+      }
+      return Promise.resolve(out.map((row) => ({ ...row })));
+    },
+    rows,
+    update: (data: (Partial<SettingsRow> & { id: string })[]) => {
+      for (const entry of data) {
+        const index = rows.findIndex((row) => row.id === entry.id);
+        if (index !== -1) {
+          rows[index] = { ...rows[index], ...entry } as SettingsRow;
+        }
+      }
+      return Promise.resolve(data);
+    },
+  };
+};
+
+type FakeSettings = ReturnType<typeof fakeSettings>;
+
 const makeService = (
   table: FakeTable,
   options: AllegroPluginOptions = validOptions(),
   logger?: { warn: (message: string) => void },
+  settings: FakeSettings = fakeSettings(),
 ) => {
   const container = {
     baseRepository: {
@@ -143,9 +206,12 @@ const makeService = (
   // instance shadows the prototype methods the factory installed.
   Object.assign(service as unknown as Record<string, unknown>, {
     createAllegroAuths: table.create,
+    createAllegroSettings: settings.create,
     deleteAllegroAuths: table.delete,
     listAllegroAuths: table.list,
+    listAllegroSettings: settings.list,
     updateAllegroAuths: table.update,
+    updateAllegroSettings: settings.update,
   });
 
   return service;
@@ -563,36 +629,95 @@ describe("getPublicOptions", () => {
   });
 });
 
-describe("kill switches", () => {
-  it("reports all four, so the admin cannot read one as all of them", async () => {
-    // The whole reason `getKillSwitches` is one method: "price sync is off" reads as
-    // "nothing is written", which is wrong while any of the other three is on.
-    expect(await makeService(fakeTable()).getKillSwitches()).toEqual({
-      invoiceAttachDisabled: false,
-      ordersSyncDisabled: false,
-      priceSyncDisabled: false,
-      stockSyncDisabled: false,
-    });
-  });
+describe("runtime toggles", () => {
+  it("defaults every writer OFF on a fresh install, except invoice attach", async () => {
+    // The safe fresh-install posture: nothing reaches the marketplace until an operator
+    // arms it. Invoice attach is the one writer that defaults on, because the document
+    // already exists by the time its event lands - it is enabled-but-inert until wired.
+    const service = makeService(fakeTable());
 
-  it("keeps invoice attach independent of the order drain", async () => {
-    // Not a reading of `ordersSyncDisabled`. Pausing the import to stop a runaway must
-    // not also stop an issued invoice reaching the buyer, and vice versa.
-    const service = makeService(fakeTable(), validOptions({ ordersSyncDisabled: true }));
-
+    expect(await service.isPriceSyncDisabled()).toBe(true);
+    expect(await service.isStockSyncDisabled()).toBe(true);
     expect(await service.isOrdersSyncDisabled()).toBe(true);
+    expect(await service.isFulfillmentWritebackDisabled()).toBe(true);
     expect(await service.isInvoiceAttachDisabled()).toBe(false);
   });
 
-  it("honours the invoice-attach switch on its own", async () => {
-    const service = makeService(fakeTable(), validOptions({ invoiceAttachDisabled: true }));
+  it("honours a persisted toggle once it is armed", async () => {
+    const service = makeService(
+      fakeTable(),
+      validOptions(),
+      undefined,
+      fakeSettings({ price_sync_enabled: true }),
+    );
 
-    expect(await service.isInvoiceAttachDisabled()).toBe(true);
-    expect(await service.isOrdersSyncDisabled()).toBe(false);
+    expect(await service.isPriceSyncDisabled()).toBe(false);
   });
 
-  it("re-reads the environment rather than the value captured at boot", async () => {
-    const service = makeService(fakeTable());
+  it("respects a flip of the persisted toggle without reconstructing the service", async () => {
+    // The property a redeploy-free kill switch needs: the job/subscriber re-reads the
+    // persisted row each tick, so an operator arming a writer takes effect on the next
+    // run against the SAME service instance.
+    const settings = fakeSettings({ stock_sync_enabled: false });
+    const service = makeService(fakeTable(), validOptions(), undefined, settings);
+
+    expect(await service.isStockSyncDisabled()).toBe(true);
+
+    await service.updateSettings({ stock_sync_enabled: true });
+
+    expect(await service.isStockSyncDisabled()).toBe(false);
+  });
+
+  it("lets the environment force a writer off even when the toggle is armed", async () => {
+    // Precedence: persisted on + env off = off. The override can only force off, and a
+    // set override beats a persisted `true`.
+    const service = makeService(
+      fakeTable(),
+      validOptions(),
+      undefined,
+      fakeSettings({ price_sync_enabled: true }),
+    );
+    const previous = process.env.ALLEGRO_PRICE_SYNC_DISABLED;
+    process.env.ALLEGRO_PRICE_SYNC_DISABLED = "1";
+    try {
+      expect(await service.isPriceSyncDisabled()).toBe(true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.ALLEGRO_PRICE_SYNC_DISABLED;
+      } else {
+        process.env.ALLEGRO_PRICE_SYNC_DISABLED = previous;
+      }
+    }
+  });
+
+  it("keeps a writer off when it is neither armed nor overridden", async () => {
+    // Precedence: persisted off + env unset = off.
+    const service = makeService(fakeTable(), validOptions(), undefined, fakeSettings());
+
+    expect(await service.isOrdersSyncDisabled()).toBe(true);
+  });
+
+  it("keeps invoice attach independent of the order drain", async () => {
+    // Pausing the import to stop a runaway must not also stop an issued invoice reaching
+    // the buyer, and vice versa.
+    const service = makeService(
+      fakeTable(),
+      validOptions(),
+      undefined,
+      fakeSettings({ invoice_attach_enabled: true, orders_sync_enabled: true }),
+    );
+
+    expect(await service.isOrdersSyncDisabled()).toBe(false);
+    expect(await service.isInvoiceAttachDisabled()).toBe(false);
+  });
+
+  it("re-reads the environment override rather than the value captured at boot", async () => {
+    const service = makeService(
+      fakeTable(),
+      validOptions(),
+      undefined,
+      fakeSettings({ invoice_attach_enabled: true }),
+    );
     const previous = process.env.ALLEGRO_INVOICE_ATTACH_DISABLED;
     process.env.ALLEGRO_INVOICE_ATTACH_DISABLED = "1";
     try {
@@ -604,6 +729,43 @@ describe("kill switches", () => {
         delete process.env.ALLEGRO_INVOICE_ATTACH_DISABLED;
       } else {
         process.env.ALLEGRO_INVOICE_ATTACH_DISABLED = previous;
+      }
+    }
+  });
+
+  it("surfaces every writer's persisted, forced and effective state for the admin", async () => {
+    const service = makeService(
+      fakeTable(),
+      validOptions(),
+      undefined,
+      fakeSettings({ price_sync_enabled: true, stock_sync_enabled: true }),
+    );
+    const previous = process.env.ALLEGRO_STOCK_SYNC_DISABLED;
+    process.env.ALLEGRO_STOCK_SYNC_DISABLED = "1";
+    try {
+      const states = await service.getRuntimeToggleStates();
+      const price = states.find((state) => state.key === "priceSync");
+      const stock = states.find((state) => state.key === "stockSync");
+
+      // Armed and not overridden: effective on.
+      expect(price).toMatchObject({
+        effectiveEnabled: true,
+        forceDisabled: false,
+        persistedEnabled: true,
+      });
+      // Armed but overridden: persisted stays true, but effective is off and the UI can
+      // say "forced off by environment" rather than lying about it.
+      expect(stock).toMatchObject({
+        effectiveEnabled: false,
+        forceDisabled: true,
+        persistedEnabled: true,
+      });
+      expect(states).toHaveLength(5);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.ALLEGRO_STOCK_SYNC_DISABLED;
+      } else {
+        process.env.ALLEGRO_STOCK_SYNC_DISABLED = previous;
       }
     }
   });

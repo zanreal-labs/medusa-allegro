@@ -36,8 +36,10 @@ const STATUS_BY_EVENT: Record<string, AllegroSettableFulfillmentStatus> = {
 };
 
 export interface PushFulfillmentResult {
-  /** False when nothing was attempted (not an Allegro order, not connected). */
+  /** False when nothing was attempted (not an Allegro order, not connected, disabled). */
   attempted: boolean;
+  /** Set when the writer was disarmed, so the subscriber can say why nothing happened. */
+  skipped?: string;
   /** The status this push set, when it set one. */
   status?: AllegroSettableFulfillmentStatus;
   error?: string;
@@ -61,6 +63,15 @@ export const pushAllegroFulfillment = async (
   const status = STATUS_BY_EVENT[input.eventName];
   if (!status) {
     return { attempted: false };
+  }
+
+  // Resolved here, at the top of the handler, so an operator disarming the write-back
+  // in the admin takes effect on the very next fulfillment event without a redeploy.
+  // Defaults OFF: this event-driven write never reaches the marketplace until armed.
+  if (await allegro.isFulfillmentWritebackDisabled()) {
+    const skipped = "Fulfillment write-back is disabled, so the status was not pushed to Allegro.";
+    logger.info(`[allegro-fulfillment] ${skipped} Medusa order ${input.orderId}.`);
+    return { attempted: false, skipped };
   }
 
   const [row] = (await allegro.listAllegroOrders(
