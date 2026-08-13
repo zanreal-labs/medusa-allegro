@@ -14,14 +14,14 @@ import {
   toast,
 } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
-import { formatAge, formatDate, SYNC_STATUS_COLOR } from "../../../lib/format";
-import { sdk } from "../../../lib/sdk";
+import { formatAge, formatDate, SYNC_STATUS_COLOR } from "../../../../lib/format";
+import { sdk } from "../../../../lib/sdk";
 import type {
   ImportResult,
   OrdersResponse,
   RepairResult,
   SyncRunResponse,
-} from "../../../lib/types";
+} from "../../../../lib/types";
 
 /**
  * The orders sync surface.
@@ -420,7 +420,7 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
 );
 
 export const config = defineRouteConfig({
-  label: "Orders sync",
+  label: "Allegro orders",
 });
 
 export default AllegroOrdersPage;

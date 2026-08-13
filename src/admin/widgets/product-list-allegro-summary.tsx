@@ -12,8 +12,8 @@ import type { AllegroSummary, SummaryResponse } from "../lib/types";
  * data table - that table is not extensible from a widget. So a true per-row "Allegro
  * status" while browsing the stock products list is not on offer here, and this is the
  * best-supported approximation: one roll-up line that answers "is anything wrong with
- * my Allegro catalogue?" at a glance, with each count linking into the Allegro offers
- * route filtered to exactly those rows. The authoritative per-product view lives on
+ * my Allegro catalogue?" at a glance, with each count linking into Settings -> Allegro
+ * offers filtered to exactly those rows. The authoritative per-product view lives on
  * each product's own detail page (the `product.details.after` widget).
  *
  * TODO(medusa-admin-kit): the real per-row "Allegro status" column will be contributed
@@ -55,16 +55,16 @@ const ProductListAllegroSummaryWidget = () => {
       <Text size="small" weight="plus">
         Allegro
       </Text>
-      <a className="text-ui-fg-interactive txt-compact-small" href="/app/allegro">
+      <a className="text-ui-fg-interactive txt-compact-small" href="/app/settings/allegro/offers">
         {summary.linked} linked
       </a>
       <Text className="text-ui-fg-subtle txt-compact-small">{summary.unlinked} unlinked</Text>
-      <a className="flex items-center gap-x-1" href="/app/allegro?filter=drift">
+      <a className="flex items-center gap-x-1" href="/app/settings/allegro/offers?filter=drift">
         <StatusBadge color={summary.drifting > 0 ? "orange" : "grey"}>
           {summary.drifting} drifting
         </StatusBadge>
       </a>
-      <a className="flex items-center gap-x-1" href="/app/allegro?filter=conflict">
+      <a className="flex items-center gap-x-1" href="/app/settings/allegro/offers?filter=conflict">
         <StatusBadge color={summary.conflicts > 0 ? "red" : "grey"}>
           {summary.conflicts} conflict{summary.conflicts === 1 ? "" : "s"}
         </StatusBadge>

@@ -28,7 +28,7 @@ import type { OfferDetailResponse, OfferRow, OffersResponse } from "../lib/types
  * the observed pricing mode and drift, promotion state, and the per-offer price
  * sync opt-out. The push history - the only record of the bounds ever sent - is
  * one click away in a drawer. Bulk work (rediscovery, category rates, orders)
- * stays in the dedicated Allegro routes and Settings.
+ * stays under Settings -> Allegro.
  */
 
 /** The public storefront page for an offer. Sandbox offers will not resolve. */

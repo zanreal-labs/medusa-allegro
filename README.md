@@ -35,13 +35,13 @@ What is here:
   event from `@zanreal/medusa-infakt` and retried by a bounded sweep. A soft
   dependency in one direction only - see [The invoice chain](#the-invoice-chain).
 - Admin surfaces built around one rule - **per-product state on the product,
-  configuration in Settings, operator task-flows in their own route**. A product
-  detail widget shows each variant SKU's linked offer, status, drift, promotion
-  state and per-offer price sync opt-out (with a push-history drawer); a compact
-  product-list banner rolls up linked / drifting / conflicting counts; category
-  rates and the connection live under **Settings -> Allegro**; and the offers and
-  orders routes stay for cross-catalogue and operator work. See
-  [Admin UI](#admin-ui).
+  everything else under Settings**. A product detail widget shows each variant
+  SKU's linked offer, status, drift, promotion state and per-offer price sync
+  opt-out (with a push-history drawer); a compact product-list banner rolls up
+  linked / drifting / conflicting counts; the connection, writer toggles,
+  category rates, the cross-catalogue offers table and the orders task-flow all
+  live under **Settings -> Allegro**, with nothing Allegro-specific in the main
+  ecommerce sidebar. See [Admin UI](#admin-ui).
 
 **Nothing writes to Allegro until you arm it.** Every writer is governed by a
 persisted, admin-flippable toggle that ships **off** on a fresh install, so a newly
@@ -338,8 +338,11 @@ you remove the application's access by hand in the developer panel.
 
 ## Admin UI
 
-The information architecture answers one owner complaint directly: **you should
-not have to open a separate table to see a product's Allegro state.**
+The information architecture answers two things at once: **you should not have
+to open a separate table to see a product's Allegro state**, and **nothing
+Allegro-specific belongs in the main ecommerce sidebar** - it is an
+integration's configuration and operator tooling, not a merchandising surface,
+so every non-per-product view lives under Settings.
 
 - **Product detail widget** (`product.details.after`) - the authoritative
   per-product view. For every variant SKU it shows the linked offer (with a link
@@ -351,7 +354,7 @@ not have to open a separate table to see a product's Allegro state.**
   table.
 - **Product list banner** (`product.list.before`) - a compact roll-up (N linked
   / N unlinked / N drifting / N conflicts) above the products table, each count
-  linking into the Allegro offers route filtered to those rows. This is the
+  linking into Settings -> Allegro offers filtered to those rows. This is the
   best-supported approximation of "Allegro status while browsing products":
   **Medusa 2.18 does not allow injecting a custom column into the core products
   data table**, and it exposes no list-row widget zone, so a per-row status column
@@ -368,16 +371,18 @@ not have to open a separate table to see a product's Allegro state.**
   connection, the **live writer toggles** (interactive switches backed by the
   persisted [runtime settings](#runtime-toggles) - arm or disarm each writer without
   a redeploy; a writer the environment forces off is shown locked), a catalogue
-  roll-up, sync health, and (on its own nested page) the **category commission
-  rates**. Category rates and all writer control live here because they are
-  configuration and operator control, not a per-product task.
-- **Allegro (offers) route** - the cross-catalogue offer table with conflict and
-  drift filters, bulk rediscovery, and manual push. Kept as an operator triage
-  surface for catalogue-wide "which offers are not syncing, and fix them" work - a
-  genuine multi-item workflow the per-product widget cannot serve, and distinct from
-  the browse case that the deferred admin-kit column will cover.
-- **Allegro -> Orders route** - the orders quarantine repair and import window.
-  Operational task-flow, kept as its own route.
+  roll-up, sync health, and links into the three nested Settings pages below.
+- **Settings -> Allegro -> Offers** - the cross-catalogue offer table with
+  conflict and drift filters, bulk rediscovery, and manual push. An operator
+  triage surface for catalogue-wide "which offers are not syncing, and fix them"
+  work - a genuine multi-item workflow the per-product widget cannot serve, and
+  distinct from the browse case that the deferred admin-kit column will cover.
+- **Settings -> Allegro -> Orders** - the orders quarantine repair and import
+  window. Operational task-flow, not a setting itself, but still nested here
+  rather than in the main sidebar.
+- **Settings -> Allegro -> Category rates** - the per-category sale commissions
+  that set every price floor. Pure configuration, hand-maintained from Allegro's
+  published fee table.
 
 ## The sygnatura / SKU mapping principle
 

@@ -390,16 +390,25 @@ const AllegroSettingsPage = () => {
             into the offers view filtered to the rows that need attention.
           </Text>
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-            <a className="text-ui-fg-interactive txt-compact-small" href="/app/allegro">
+            <a
+              className="text-ui-fg-interactive txt-compact-small"
+              href="/app/settings/allegro/offers"
+            >
               {summary.linked} linked
             </a>
             <Text className="text-ui-fg-subtle txt-compact-small">{summary.unlinked} unlinked</Text>
-            <a className="flex items-center gap-x-1" href="/app/allegro?filter=drift">
+            <a
+              className="flex items-center gap-x-1"
+              href="/app/settings/allegro/offers?filter=drift"
+            >
               <StatusBadge color={summary.drifting > 0 ? "orange" : "grey"}>
                 {summary.drifting} drifting
               </StatusBadge>
             </a>
-            <a className="flex items-center gap-x-1" href="/app/allegro?filter=conflict">
+            <a
+              className="flex items-center gap-x-1"
+              href="/app/settings/allegro/offers?filter=conflict"
+            >
               <StatusBadge color={summary.conflicts > 0 ? "red" : "grey"}>
                 {summary.conflicts} conflict{summary.conflicts === 1 ? "" : "s"}
               </StatusBadge>
@@ -407,6 +416,31 @@ const AllegroSettingsPage = () => {
           </div>
         </div>
       ) : null}
+
+      <div className="px-6 py-4">
+        <Heading className="mb-2" level="h2">
+          Offers and orders
+        </Heading>
+        <Text className="text-ui-fg-subtle mb-3" size="small">
+          The cross-catalogue offer table (conflict/drift filters, bulk rediscovery, manual push)
+          and the orders quarantine/repair and import window are their own Settings pages, since
+          they are operator task-flows rather than a single setting.
+        </Text>
+        <div className="flex flex-wrap gap-x-6">
+          <a
+            className="text-ui-fg-interactive txt-compact-small"
+            href="/app/settings/allegro/offers"
+          >
+            Open Allegro offers
+          </a>
+          <a
+            className="text-ui-fg-interactive txt-compact-small"
+            href="/app/settings/allegro/orders"
+          >
+            Open Allegro orders
+          </a>
+        </div>
+      </div>
 
       <div className="px-6 py-4">
         <Heading className="mb-2" level="h2">

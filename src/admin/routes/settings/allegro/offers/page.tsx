@@ -1,5 +1,4 @@
 import { defineRouteConfig } from "@medusajs/admin-sdk";
-import { ShoppingBag } from "@medusajs/icons";
 import {
   Alert,
   Badge,
@@ -17,15 +16,20 @@ import {
   toast,
 } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
-import { CONFLICT_LABEL, formatDate, PRICE_MODE_COLOR, PUSH_RESULT_COLOR } from "../../lib/format";
-import { sdk } from "../../lib/sdk";
+import {
+  CONFLICT_LABEL,
+  formatDate,
+  PRICE_MODE_COLOR,
+  PUSH_RESULT_COLOR,
+} from "../../../../lib/format";
+import { sdk } from "../../../../lib/sdk";
 import type {
   OfferDetailResponse,
   OfferRow,
   OffersResponse,
   SinglePushResult,
   SyncRunResponse,
-} from "../../lib/types";
+} from "../../../../lib/types";
 
 /**
  * The offer mapping table.
@@ -451,8 +455,7 @@ const AllegroOffersPage = () => {
 };
 
 export const config = defineRouteConfig({
-  icon: ShoppingBag,
-  label: "Allegro",
+  label: "Allegro offers",
 });
 
 export default AllegroOffersPage;
