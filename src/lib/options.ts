@@ -290,6 +290,90 @@ export const isFulfillmentWritebackDisabledByEnv = (
 export const isInvoiceAttachDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
   truthyEnv(env[INVOICE_ATTACH_DISABLED_ENV]);
 
+/**
+ * The environment lock for each editable sync-configuration field.
+ *
+ * Same contract as the writer kill-switches, adapted to a value rather than a
+ * boolean: when the variable is SET, it is the effective value outright,
+ * regardless of what is persisted in the admin or configured in
+ * `medusa-config.ts`. An operator reaches for this to pin `marketplaceId` or
+ * `salesChannelId` - the two fields where a wrong value silently breaks the
+ * Allegro<->Medusa mapping - in a way an admin mistake cannot undo, exactly like
+ * `ALLEGRO_PRICE_SYNC_DISABLED` cannot be re-armed from the admin.
+ *
+ * Unset (empty or absent) reads as "no lock", so these env vars are opt-in and a
+ * store that never sets them behaves exactly as it did before this field became
+ * editable: persisted-if-set, else the `medusa-config.ts` default.
+ */
+const AUTOMATION_RULE_STANDARD_ENV = "ALLEGRO_AUTOMATION_RULE_STANDARD";
+/** Same contract, for the promoted-offer rule name. */
+const AUTOMATION_RULE_PROMOTED_ENV = "ALLEGRO_AUTOMATION_RULE_PROMOTED";
+/** Same contract, for the SRP metadata key. */
+const SRP_METADATA_KEY_ENV = "ALLEGRO_SRP_METADATA_KEY";
+/** Same contract, for the SRP price list id. */
+const SRP_PRICE_LIST_ID_ENV = "ALLEGRO_SRP_PRICE_LIST_ID";
+/** Same contract, for the per-run change cap. */
+const CHANGE_CAP_ENV = "ALLEGRO_CHANGE_CAP";
+/** Same contract, for the price-automation marketplace id. Wiring-critical. */
+const MARKETPLACE_ID_ENV = "ALLEGRO_MARKETPLACE_ID";
+/** Same contract, for the sales-channel id scope. Wiring-critical. */
+const SALES_CHANNEL_ID_ENV = "ALLEGRO_SALES_CHANNEL_ID";
+/** Same contract, for the sales-channel name scope. */
+const SALES_CHANNEL_NAME_ENV = "ALLEGRO_SALES_CHANNEL_NAME";
+
+/** A trimmed, non-empty environment value, or undefined when the variable is unset. */
+const optionalEnvString = (env: NodeJS.ProcessEnv, name: string): string | undefined =>
+  optionalString(env[name]);
+
+export const automationRuleStandardEnvOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined => optionalEnvString(env, AUTOMATION_RULE_STANDARD_ENV);
+
+export const automationRulePromotedEnvOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined => optionalEnvString(env, AUTOMATION_RULE_PROMOTED_ENV);
+
+export const srpMetadataKeyEnvOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined => optionalEnvString(env, SRP_METADATA_KEY_ENV);
+
+export const srpPriceListIdEnvOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined => optionalEnvString(env, SRP_PRICE_LIST_ID_ENV);
+
+export const marketplaceIdEnvOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined => optionalEnvString(env, MARKETPLACE_ID_ENV);
+
+export const salesChannelIdEnvOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined => optionalEnvString(env, SALES_CHANNEL_ID_ENV);
+
+export const salesChannelNameEnvOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined => optionalEnvString(env, SALES_CHANNEL_NAME_ENV);
+
+/**
+ * The change-cap lock, parsed as a positive integer.
+ *
+ * A malformed value (not an integer, zero, or negative) is read as "no lock"
+ * rather than thrown: this is evaluated on every `getSyncOptions()` call, and a
+ * typo in an environment variable must not turn every price-sync run into a
+ * thrown error. `resolveChangeCap` still enforces the same rule, loudly, on the
+ * `medusa-config.ts` default at boot.
+ */
+export const changeCapEnvOverride = (env: NodeJS.ProcessEnv = process.env): number | undefined => {
+  const raw = optionalEnvString(env, CHANGE_CAP_ENV);
+  if (raw === undefined) {
+    return undefined;
+  }
+  // `Number(...)`, not `Number.parseInt`: parseInt truncates "1.5" to 1 and reads
+  // "50abc" as 50, silently accepting exactly the malformed input this is supposed
+  // to reject as "no lock".
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : undefined;
+};
+
 /** Default price-automation marketplace: a single-account PL seller lives here. */
 export const DEFAULT_MARKETPLACE_ID = "allegro-pl";
 /** Default container key of the optional `@zanreal/medusa-product-costs` module. */

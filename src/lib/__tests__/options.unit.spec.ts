@@ -1,9 +1,17 @@
 import { randomBytes } from "node:crypto";
 import {
+  automationRulePromotedEnvOverride,
+  automationRuleStandardEnvOverride,
+  changeCapEnvOverride,
   DEFAULT_REDIRECT_PATH,
   DEFAULT_SCOPES,
   isPriceSyncDisabledByEnv,
+  marketplaceIdEnvOverride,
   resolveAllegroOptions,
+  salesChannelIdEnvOverride,
+  salesChannelNameEnvOverride,
+  srpMetadataKeyEnvOverride,
+  srpPriceListIdEnvOverride,
 } from "../options";
 import type { AllegroPluginOptions } from "../options";
 
@@ -166,5 +174,50 @@ describe("isPriceSyncDisabledByEnv", () => {
 
   it.each(["0", "false", "no", "", undefined])("treats %p as enabled", (value) => {
     expect(isPriceSyncDisabledByEnv({ ALLEGRO_PRICE_SYNC_DISABLED: value })).toBe(false);
+  });
+});
+
+describe("the configuration-field environment locks", () => {
+  it("reads a set variable as the lock value, trimmed", () => {
+    expect(marketplaceIdEnvOverride({ ALLEGRO_MARKETPLACE_ID: "  allegro-pl  " })).toBe(
+      "allegro-pl",
+    );
+    expect(salesChannelIdEnvOverride({ ALLEGRO_SALES_CHANNEL_ID: "sc_123" })).toBe("sc_123");
+    expect(salesChannelNameEnvOverride({ ALLEGRO_SALES_CHANNEL_NAME: "Allegro" })).toBe("Allegro");
+    expect(srpMetadataKeyEnvOverride({ ALLEGRO_SRP_METADATA_KEY: "srp" })).toBe("srp");
+    expect(srpPriceListIdEnvOverride({ ALLEGRO_SRP_PRICE_LIST_ID: "pl_1" })).toBe("pl_1");
+    expect(automationRuleStandardEnvOverride({ ALLEGRO_AUTOMATION_RULE_STANDARD: "Store" })).toBe(
+      "Store",
+    );
+    expect(
+      automationRulePromotedEnvOverride({ ALLEGRO_AUTOMATION_RULE_PROMOTED: "Store Sale" }),
+    ).toBe("Store Sale");
+  });
+
+  it("reads an absent or blank variable as no lock", () => {
+    expect(marketplaceIdEnvOverride({})).toBeUndefined();
+    expect(marketplaceIdEnvOverride({ ALLEGRO_MARKETPLACE_ID: "" })).toBeUndefined();
+    expect(marketplaceIdEnvOverride({ ALLEGRO_MARKETPLACE_ID: "   " })).toBeUndefined();
+  });
+});
+
+describe("changeCapEnvOverride", () => {
+  it("reads a positive integer as the lock value", () => {
+    expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "50" })).toBe(50);
+  });
+
+  it("reads an absent variable as no lock", () => {
+    expect(changeCapEnvOverride({})).toBeUndefined();
+  });
+
+  it("reads a malformed value as no lock rather than throwing", () => {
+    // This is evaluated on every `getSyncOptions()` call, unlike `resolveChangeCap`
+    // which enforces the same rule loudly, but only once, at boot on the
+    // medusa-config.ts default. A typo in an environment variable must not turn
+    // every price-sync run into a thrown error.
+    expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "0" })).toBeUndefined();
+    expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "-5" })).toBeUndefined();
+    expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "1.5" })).toBeUndefined();
+    expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "not-a-number" })).toBeUndefined();
   });
 });

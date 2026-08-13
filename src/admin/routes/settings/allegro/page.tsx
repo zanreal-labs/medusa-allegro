@@ -5,6 +5,7 @@ import {
   Button,
   Container,
   Heading,
+  Input,
   StatusBadge,
   Switch,
   Table,
@@ -16,10 +17,11 @@ import { formatDate, SYNC_STATUS_COLOR } from "../../../lib/format";
 import { sdk } from "../../../lib/sdk";
 import type {
   AllegroSummary,
+  ConfigField,
   Connection,
   OverviewResponse,
   RuntimeToggle,
-  RuntimeTogglesResponse,
+  SettingsResponse,
   SummaryResponse,
 } from "../../../lib/types";
 
@@ -58,6 +60,18 @@ const connectionLabel = (connection: Connection): string => {
   return connection.credentialsUnreadable ? "Unreadable credentials" : "Connected";
 };
 
+/**
+ * One configuration field by key, or undefined before the first load resolves.
+ *
+ * A small lookup rather than inlining `.find(...)` at each call site: the two
+ * "is this inert?" banners below each need two fields, and this keeps that
+ * readable.
+ */
+const findConfigField = (
+  data: OverviewResponse | undefined,
+  key: ConfigField["key"],
+): ConfigField | undefined => data?.configFields.find((field) => field.key === key);
+
 /** What each provider row is, in one line, so the table needs no legend. */
 const PROVIDER_DESCRIPTION: Record<string, string> = {
   offers: "Maps SKUs to offers, sweeps promotion state, discovers categories. Read-only.",
@@ -93,6 +107,10 @@ const formatCounters = (provider: string, counts?: Record<string, unknown> | nul
   return parts.length > 0 ? parts.join(", ") : "no counters recorded";
 };
 
+/** A field's stored value, as the input shows it. `null` renders as a blank input. */
+const formatFieldValue = (value: string | number | null): string =>
+  value === null || value === undefined ? "" : String(value);
+
 const AllegroSettingsPage = () => {
   const [data, setData] = useState<OverviewResponse | undefined>();
   const [summary, setSummary] = useState<AllegroSummary | undefined>();
@@ -100,6 +118,16 @@ const AllegroSettingsPage = () => {
   const [disconnectWarning, setDisconnectWarning] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
   const [busyToggle, setBusyToggle] = useState<string | undefined>();
+  const [busyField, setBusyField] = useState<string | undefined>();
+  /**
+   * One text draft per configuration column, keyed by column name.
+   *
+   * Seeded from the persisted value on first load and left alone afterwards, so
+   * editing one field does not get clobbered by a refresh triggered by saving a
+   * DIFFERENT field - the same reason the category-rates page keeps its own draft
+   * state rather than binding straight to the loaded rows.
+   */
+  const [fieldDrafts, setFieldDrafts] = useState<Record<string, string>>({});
 
   const params = new URLSearchParams(window.location.search);
   const justConnected = params.get("connected") === "1";
@@ -117,6 +145,26 @@ const AllegroSettingsPage = () => {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Seeds a draft for every field the FIRST time it is seen. Skips a column already
+  // present so a refresh triggered by saving field A never clobbers an in-progress,
+  // unsaved edit on field B.
+  useEffect(() => {
+    if (!data?.configFields) {
+      return;
+    }
+    setFieldDrafts((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const field of data.configFields) {
+        if (!(field.column in next)) {
+          next[field.column] = formatFieldValue(field.persistedValue);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [data?.configFields]);
 
   // The catalogue roll-up is best-effort: a store that does not use Allegro yet, or a
   // transient failure, just leaves the summary hidden rather than blocking the page.
@@ -142,11 +190,15 @@ const AllegroSettingsPage = () => {
     // locked - so this only ever fires for a live toggle.
     setBusyToggle(toggle.column);
     try {
-      const response = await sdk.client.fetch<RuntimeTogglesResponse>("/admin/allegro/settings", {
+      const response = await sdk.client.fetch<SettingsResponse>("/admin/allegro/settings", {
         body: { [toggle.column]: !toggle.persistedEnabled },
         method: "POST",
       });
-      setData((current) => (current ? { ...current, toggles: response.toggles } : current));
+      setData((current) =>
+        current
+          ? { ...current, configFields: response.configFields, toggles: response.toggles }
+          : current,
+      );
       toast.success(
         `${toggle.label} ${toggle.persistedEnabled ? "disarmed" : "armed"}. It takes effect on the next run.`,
       );
@@ -154,6 +206,55 @@ const AllegroSettingsPage = () => {
       toast.error(error instanceof Error ? error.message : `Could not change ${toggle.label}.`);
     } finally {
       setBusyToggle(undefined);
+    }
+  };
+
+  /**
+   * Save one configuration field.
+   *
+   * A blank draft is sent as `null`, which CLEARS the field back to its
+   * `medusa-config.ts` fallback - the same "clear" contract the category-rate save
+   * already uses. `change_cap` is parsed and range-checked here too, so a bad value
+   * shows a toast immediately rather than a round trip just to learn the server
+   * rejected it.
+   */
+  const saveConfigField = async (field: ConfigField) => {
+    const draft = (fieldDrafts[field.column] ?? "").trim();
+
+    let value: string | number | null;
+    if (draft === "") {
+      value = null;
+    } else if (field.kind === "number") {
+      const parsed = Number(draft);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        toast.error(`${field.label} must be a positive integer.`);
+        return;
+      }
+      value = parsed;
+    } else {
+      value = draft;
+    }
+
+    setBusyField(field.column);
+    try {
+      const response = await sdk.client.fetch<SettingsResponse>("/admin/allegro/settings", {
+        body: { [field.column]: value },
+        method: "POST",
+      });
+      setData((current) =>
+        current
+          ? { ...current, configFields: response.configFields, toggles: response.toggles }
+          : current,
+      );
+      toast.success(
+        value === null
+          ? `${field.label} cleared. It falls back to the medusa-config.ts value.`
+          : `Saved ${field.label}.`,
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Could not save ${field.label}.`);
+    } finally {
+      setBusyField(undefined);
     }
   };
 
@@ -349,34 +450,62 @@ const AllegroSettingsPage = () => {
             </Text>
           ) : null}
         </div>
-        {data && !data.options.automationRules ? (
-          <Alert className="mt-4" variant="warning">
-            The `automationRules` option is not configured, so price sync is inert: there are no
-            rule names to attach and the plugin never invents one. Set the two rule names that
-            already exist on the Allegro account.
-          </Alert>
-        ) : null}
-        {data?.options.automationRules ? (
-          <Text className="text-ui-fg-muted mt-3" size="small">
-            Rules: <code>{data.options.automationRules.standard}</code> for a standard offer,{" "}
-            <code>{data.options.automationRules.promoted}</code> when promoted. Both must exist on
-            the Allegro account; a missing or renamed rule aborts the whole run with nothing
-            written.
-          </Text>
-        ) : null}
-        {data && !(data.options.srpMetadataKey || data.options.srpPriceListId) ? (
-          <Alert className="mt-4" variant="warning">
-            No SRP source is configured (`srpMetadataKey` or `srpPriceListId`), so every offer is
-            skipped with reason `missing-srp`. The SRP is the price-range ceiling, and there is
-            deliberately no fallback to the current selling price - that would let a rule ratchet
-            the price down on every run.
-          </Alert>
-        ) : null}
-        <Text className="text-ui-fg-muted mt-3" size="small">
-          Change cap: {data?.options.changeCap ?? "-"} command(s) per price run. Marketplace:{" "}
-          <code>{data?.options.marketplaceId ?? "-"}</code>. Sales channel:{" "}
-          {data?.options.salesChannelId ?? data?.options.salesChannelName ?? "whole catalogue"}.
+      </div>
+
+      <div className="px-6 py-4">
+        <Heading className="mb-2" level="h2">
+          Sync configuration
+        </Heading>
+        <Text className="text-ui-fg-subtle mb-4" size="small">
+          These used to be set only in `medusa-config.ts` and shown here as read-only text. Editing
+          a field here persists it and takes effect on the next sync run, no redeploy. Clearing a
+          field (blank it and Save) falls back to the `medusa-config.ts` value. A field shown as
+          locked is pinned by an environment variable that always wins over both this admin and the
+          config file.
         </Text>
+
+        {data &&
+        !(
+          findConfigField(data, "automationRuleStandard")?.effectiveValue &&
+          findConfigField(data, "automationRulePromoted")?.effectiveValue
+        ) ? (
+          <Alert className="mb-4" variant="warning">
+            No two distinct automation rule names resolve yet, so price sync is inert: there are no
+            rule names to attach and the plugin never invents one. Set both below, or in
+            `medusa-config.ts`. Both must already exist on the Allegro account.
+          </Alert>
+        ) : null}
+        {data &&
+        !(
+          findConfigField(data, "srpMetadataKey")?.effectiveValue ||
+          findConfigField(data, "srpPriceListId")?.effectiveValue
+        ) ? (
+          <Alert className="mb-4" variant="warning">
+            No SRP source resolves yet, so every offer is skipped with reason `missing-srp`. The SRP
+            is the price-range ceiling, and there is deliberately no fallback to the current selling
+            price - that would let a rule ratchet the price down on every run.
+          </Alert>
+        ) : null}
+
+        <div className="flex flex-col gap-y-3">
+          {(data?.configFields ?? []).map((field) => (
+            <ConfigFieldRow
+              busy={busyField === field.column}
+              draft={fieldDrafts[field.column] ?? formatFieldValue(field.persistedValue)}
+              field={field}
+              key={field.key}
+              onChange={(value) =>
+                setFieldDrafts((current) => ({ ...current, [field.column]: value }))
+              }
+              onSave={() => void saveConfigField(field)}
+            />
+          ))}
+          {data === undefined ? (
+            <Text className="text-ui-fg-subtle" size="small">
+              Loading...
+            </Text>
+          ) : null}
+        </div>
       </div>
 
       {summary && summary.total > 0 ? (
@@ -562,6 +691,68 @@ const WriterToggle = ({
       disabled={busy || toggle.forceDisabled}
       onCheckedChange={onToggle}
     />
+  </div>
+);
+
+/**
+ * One editable sync-configuration field.
+ *
+ * Sibling of `WriterToggle`, same shape: the input binds to the LOCAL draft (not
+ * straight to the persisted value, so typing does not fire a save on every
+ * keystroke), a `locked` field is disabled with the same "the environment is
+ * pinning this" note a forced-off toggle gets, and a `wiringCritical` field gets
+ * an extra warning ABOVE the input - re-scoping which Medusa products this
+ * plugin matches against Allegro is not a tuning knob, and the input alone does
+ * not say that.
+ */
+const ConfigFieldRow = ({
+  field,
+  draft,
+  busy,
+  onChange,
+  onSave,
+}: {
+  field: ConfigField;
+  draft: string;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onSave: () => void;
+}) => (
+  <div className="flex flex-col gap-y-2 rounded-lg border px-3 py-3">
+    <div className="flex items-center gap-x-2">
+      <span className="txt-compact-small-plus">{field.label}</span>
+      {field.locked ? <StatusBadge color="red">locked by environment</StatusBadge> : null}
+    </div>
+    <span className="text-ui-fg-subtle txt-compact-xsmall">{field.description}</span>
+    {field.wiringCritical ? (
+      <Alert variant="warning">
+        Changing this re-scopes which Medusa products this plugin matches against Allegro offers. A
+        wrong value here breaks the mapping silently rather than merely mis-tuning a run.
+      </Alert>
+    ) : null}
+    <div className="flex items-end gap-x-2">
+      <Input
+        className="max-w-sm"
+        disabled={busy || field.locked}
+        onChange={(changeEvent) => onChange(changeEvent.target.value)}
+        placeholder={
+          field.configDefault !== null ? `medusa-config.ts: ${field.configDefault}` : "not set"
+        }
+        type={field.kind === "number" ? "number" : "text"}
+        value={draft}
+      />
+      <Button disabled={busy || field.locked} onClick={onSave} size="small" variant="secondary">
+        Save
+      </Button>
+    </div>
+    {field.locked ? (
+      <span className="text-ui-fg-muted txt-compact-xsmall">
+        Locked by the environment at <code>{field.effectiveValue}</code>. Clear{" "}
+        <code>{field.envVar}</code> to control it here.
+      </span>
+    ) : (
+      <code className="text-ui-fg-muted txt-compact-xsmall">{field.envVar}</code>
+    )}
   </div>
 );
 

@@ -74,16 +74,54 @@ export interface PublicOptions {
   scopes: string;
 }
 
+export type ConfigFieldKey =
+  | "automationRuleStandard"
+  | "automationRulePromoted"
+  | "srpMetadataKey"
+  | "srpPriceListId"
+  | "changeCap"
+  | "marketplaceId"
+  | "salesChannelId"
+  | "salesChannelName";
+
+/**
+ * One editable sync-configuration field as the settings page renders it.
+ *
+ * Sibling of `RuntimeToggle`: the input binds to `persistedValue`; when `locked` is
+ * set the environment is pinning `effectiveValue` whatever is persisted, so the UI
+ * disables the input and says so, instead of showing an edit that never takes
+ * effect. `wiringCritical` marks the two fields (`marketplaceId`, `salesChannelId`)
+ * where a wrong value re-scopes which Medusa products this plugin matches against
+ * Allegro, rather than merely mis-tuning a run - the page renders an explicit
+ * warning next to those two.
+ */
+export interface ConfigField {
+  key: ConfigFieldKey;
+  column: string;
+  label: string;
+  description: string;
+  envVar: string;
+  kind: "text" | "number";
+  wiringCritical: boolean;
+  persistedValue: string | number | null;
+  envOverride: string | number | null;
+  configDefault: string | number | null;
+  effectiveValue: string | number | null;
+  locked: boolean;
+}
+
 export interface OverviewResponse {
   connection: Connection;
   sync_state: SyncStateRow[];
   toggles: RuntimeToggle[];
+  configFields: ConfigField[];
   options: PublicOptions;
 }
 
-/** The settings CRUD route's response, and the shape a toggle write returns. */
-export interface RuntimeTogglesResponse {
+/** The settings CRUD route's response, and the shape a toggle or field write returns. */
+export interface SettingsResponse {
   toggles: RuntimeToggle[];
+  configFields: ConfigField[];
 }
 
 export type OfferConflict = "missing-external-id" | "duplicate-sku" | "no-variant" | "no-offer";

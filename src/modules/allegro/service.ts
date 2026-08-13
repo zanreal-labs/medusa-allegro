@@ -9,14 +9,24 @@ import {
 import { AllegroClient } from "../../lib/allegro/client";
 import { AllegroOAuth } from "../../lib/allegro/oauth";
 import type { PersistedToken } from "../../lib/allegro/types";
+import { CONFIG_FIELDS, resolveEffectiveConfigValue } from "../../lib/config-fields";
+import type { ConfigFieldColumn, ConfigFieldKey } from "../../lib/config-fields";
 import { decryptValue, encryptValue } from "../../lib/crypto";
 import {
+  automationRulePromotedEnvOverride,
+  automationRuleStandardEnvOverride,
+  changeCapEnvOverride,
   isFulfillmentWritebackDisabledByEnv,
   isInvoiceAttachDisabledByEnv,
   isOrdersSyncDisabledByEnv,
   isPriceSyncDisabledByEnv,
   isStockSyncDisabledByEnv,
+  marketplaceIdEnvOverride,
   resolveAllegroOptions,
+  salesChannelIdEnvOverride,
+  salesChannelNameEnvOverride,
+  srpMetadataKeyEnvOverride,
+  srpPriceListIdEnvOverride,
   toPublicAllegroOptions,
 } from "../../lib/options";
 import type {
@@ -101,7 +111,14 @@ export const SYNC_HEARTBEAT_INTERVAL_MS = 60_000;
  */
 export const SYNC_CLAIM_HELD = "a sync run is already in progress for this provider";
 
-/** The persisted runtime-toggle singleton, as callers read it. */
+/**
+ * The persisted settings singleton, as callers read it.
+ *
+ * The five `*_enabled` columns are the runtime toggles; the rest are the editable
+ * sync-configuration fields (see `src/lib/config-fields.ts`). Every configuration
+ * column is nullable with no persisted default - `null` means "nothing entered in
+ * the admin, fall back to the `medusa-config.ts` option".
+ */
 export interface AllegroSettingsRow {
   id: string;
   price_sync_enabled: boolean;
@@ -109,6 +126,14 @@ export interface AllegroSettingsRow {
   orders_sync_enabled: boolean;
   fulfillment_writeback_enabled: boolean;
   invoice_attach_enabled: boolean;
+  automation_rule_standard: string | null;
+  automation_rule_promoted: string | null;
+  srp_metadata_key: string | null;
+  srp_price_list_id: string | null;
+  change_cap: number | null;
+  marketplace_id: string | null;
+  sales_channel_id: string | null;
+  sales_channel_name: string | null;
 }
 
 /**
@@ -131,8 +156,54 @@ export interface AllegroRuntimeToggleState {
   effectiveEnabled: boolean;
 }
 
-/** The columns an admin write may set on the settings singleton. */
-export type AllegroSettingsPatch = Partial<Record<RuntimeToggleColumn, boolean>>;
+/**
+ * A configuration field as the admin renders it.
+ *
+ * `persistedValue` is what an operator entered (or `null` if nothing was);
+ * `envOverride` is the environment lock, which can only be a value or absent -
+ * unlike a toggle's force-disable, there is no "off" for a string or a number, so
+ * a set override wins outright; `effectiveValue` is what `getSyncOptions()`
+ * actually resolves. `locked` mirrors a toggle's `forceDisabled`: the admin
+ * disables the input and explains why, exactly like a writer forced off by the
+ * environment.
+ */
+export interface AllegroConfigFieldState {
+  key: ConfigFieldKey;
+  column: ConfigFieldColumn;
+  label: string;
+  description: string;
+  envVar: string;
+  kind: "text" | "number";
+  wiringCritical: boolean;
+  persistedValue: string | number | null;
+  envOverride: string | number | null;
+  configDefault: string | number | null;
+  effectiveValue: string | number | null;
+  locked: boolean;
+}
+
+/**
+ * The columns an admin write may set on the settings singleton.
+ *
+ * The configuration half is spelled out column-by-column, rather than
+ * `Record<ConfigFieldColumn, string | number | null>`, because the columns are NOT
+ * interchangeably typed: `change_cap` is a number, the rest are text. A blanket
+ * `string | number` would let a number through for a text column, and it would
+ * make this type structurally incompatible with the generated model row type -
+ * which is exactly the shape `updateAllegroSettings` demands - and turn every
+ * write into a "no overload matches" compile error instead of the one bad field
+ * actually being rejected.
+ */
+export type AllegroSettingsPatch = Partial<Record<RuntimeToggleColumn, boolean>> & {
+  automation_rule_standard?: string | null;
+  automation_rule_promoted?: string | null;
+  srp_metadata_key?: string | null;
+  srp_price_list_id?: string | null;
+  change_cap?: number | null;
+  marketplace_id?: string | null;
+  sales_channel_id?: string | null;
+  sales_channel_name?: string | null;
+};
 
 /** The sync-state row, as the loops read it. */
 export interface AllegroSyncStateRow {
@@ -294,22 +365,49 @@ class AllegroModuleService extends MedusaService({
    * (`redirectPath`, `scopes`). Both are narrowings of the resolved options, and
    * neither carries the client secret or the encryption key - `getOptions` stays
    * protected precisely so nothing outside the service can reach those.
+   *
+   * Eight of these fields used to be read straight off `this.options_` - the
+   * `medusa-config.ts` constructor options, fixed until a redeploy. They are now
+   * resolved through `resolveAllConfigFields()`: the environment lock if an
+   * operator set one, else the persisted admin value if one was entered, else the
+   * same `medusa-config.ts` default as before. A store that never touches the new
+   * admin fields gets exactly the old behaviour, because every persisted column
+   * starts `null`.
    */
-  getSyncOptions(): Promise<AllegroSyncOptions> {
+  async getSyncOptions(): Promise<AllegroSyncOptions> {
     const o = this.options_;
-    return Promise.resolve({
-      automationRules: o.automationRules,
-      changeCap: o.changeCap,
+    const resolved = await this.resolveAllConfigFields();
+
+    const standard = resolved.automationRuleStandard.effectiveValue;
+    const promoted = resolved.automationRulePromoted.effectiveValue;
+    const srpMetadataKey = resolved.srpMetadataKey.effectiveValue;
+    const srpPriceListId = resolved.srpPriceListId.effectiveValue;
+    const salesChannelId = resolved.salesChannelId.effectiveValue;
+    const salesChannelName = resolved.salesChannelName.effectiveValue;
+
+    return {
+      // Both names are required for a real automation rule assignment - see
+      // `resolveAutomationRules` - so a mix where only one resolves to a value is
+      // read the same way that plugin option always was: inert, not half-applied.
+      automationRules:
+        typeof standard === "string" && standard && typeof promoted === "string" && promoted
+          ? { promoted, standard }
+          : undefined,
+      changeCap: (resolved.changeCap.effectiveValue as number | null) ?? o.changeCap,
       costsModuleKey: o.costsModuleKey,
       invoiceModuleKey: o.invoiceModuleKey,
-      marketplaceId: o.marketplaceId,
+      marketplaceId: (resolved.marketplaceId.effectiveValue as string | null) ?? o.marketplaceId,
       regionId: o.regionId,
-      salesChannelId: o.salesChannelId,
-      salesChannelName: o.salesChannelName,
-      srpMetadataKey: o.srpMetadataKey,
-      srpPriceListId: o.srpPriceListId,
+      salesChannelId:
+        typeof salesChannelId === "string" && salesChannelId ? salesChannelId : undefined,
+      salesChannelName:
+        typeof salesChannelName === "string" && salesChannelName ? salesChannelName : undefined,
+      srpMetadataKey:
+        typeof srpMetadataKey === "string" && srpMetadataKey ? srpMetadataKey : undefined,
+      srpPriceListId:
+        typeof srpPriceListId === "string" && srpPriceListId ? srpPriceListId : undefined,
       stockLocationIds: o.stockLocationIds,
-    });
+    };
   }
 
   // ─── Runtime toggles: the persisted, operator-flippable arming ───
@@ -350,17 +448,29 @@ class AllegroModuleService extends MedusaService({
   }
 
   /**
-   * Arm or disarm writers by writing the persisted toggles.
+   * Arm or disarm writers, and/or edit sync-configuration fields, by writing the
+   * persisted singleton.
    *
-   * Only the columns present in `patch` are written, so arming one writer does not
-   * disturb another. A write to a writer the environment force-disables is accepted
-   * and stored - the operator is recording intent for when the override is lifted -
-   * and the returned effective state still shows it held off, never a lie.
+   * Only the columns present in `patch` are written, so arming one writer - or
+   * editing one configuration field - does not disturb another. A toggle write the
+   * environment force-disables is accepted and stored - the operator is recording
+   * intent for when the override is lifted - and the returned effective state still
+   * shows it held off, never a lie. `null` on a configuration column clears it back
+   * to its `medusa-config.ts` fallback, the same "clear" contract the category-rate
+   * route already uses.
+   *
+   * Rejects a configuration write that would newly collide the two automation rule
+   * names, or newly set both SRP sources, once resolved against whatever governs
+   * the OTHER half of the pair (persisted, env-locked, or configured). Those two
+   * pairs have a boot-time uniqueness check when both come from
+   * `medusa-config.ts` (`resolveAutomationRules`, `resolveAllegroOptions`) - this is
+   * the same invariant, extended to the case an admin edit newly creates.
    */
   async updateSettings(patch: AllegroSettingsPatch): Promise<AllegroSettingsRow> {
     // Ensure the singleton exists before the conditional update, so a first-ever write
     // through the admin has a row to land on.
     await this.getSettings();
+    await this.assertConfigWriteIsSafe(patch);
     await this.updateAllegroSettings([{ id: ALLEGRO_SETTINGS_ID, ...patch }]);
     const row = await this.readSettingsRow();
     if (!row) {
@@ -472,6 +582,165 @@ class AllegroModuleService extends MedusaService({
         persistedEnabled,
       };
     });
+  }
+
+  // ─── Sync configuration: the persisted, operator-editable fields ───
+
+  /**
+   * The environment lock for every editable configuration field, by key.
+   *
+   * Re-read on every call rather than trusting a value captured at boot, matching
+   * the toggle overrides: an operator setting `ALLEGRO_MARKETPLACE_ID` or
+   * `ALLEGRO_SALES_CHANNEL_ID` is pinning a wiring-critical value against an admin
+   * mistake, and that has to take effect without a restart.
+   */
+  private configFieldEnvOverrides(): Record<ConfigFieldKey, string | number | undefined> {
+    return {
+      automationRulePromoted: automationRulePromotedEnvOverride(),
+      automationRuleStandard: automationRuleStandardEnvOverride(),
+      changeCap: changeCapEnvOverride(),
+      marketplaceId: marketplaceIdEnvOverride(),
+      salesChannelId: salesChannelIdEnvOverride(),
+      salesChannelName: salesChannelNameEnvOverride(),
+      srpMetadataKey: srpMetadataKeyEnvOverride(),
+      srpPriceListId: srpPriceListIdEnvOverride(),
+    };
+  }
+
+  /**
+   * The `medusa-config.ts` default for every editable configuration field, by key.
+   *
+   * The fallback of last resort - what `getSyncOptions` returned for these fields
+   * before any of them were persisted, so an unedited field behaves exactly as it
+   * always did.
+   */
+  private configFieldDefaults(): Record<ConfigFieldKey, string | number | null> {
+    const o = this.options_;
+    return {
+      automationRulePromoted: o.automationRules?.promoted ?? null,
+      automationRuleStandard: o.automationRules?.standard ?? null,
+      changeCap: o.changeCap,
+      marketplaceId: o.marketplaceId,
+      salesChannelId: o.salesChannelId ?? null,
+      salesChannelName: o.salesChannelName ?? null,
+      srpMetadataKey: o.srpMetadataKey ?? null,
+      srpPriceListId: o.srpPriceListId ?? null,
+    };
+  }
+
+  /**
+   * Every editable configuration field, resolved: persisted value, environment
+   * lock, `medusa-config.ts` default, and the effective value that wins.
+   *
+   * One method rather than eight separate lookups because `getSyncOptions` and
+   * `getConfigFieldStates` both need every field, and this reads the settings
+   * singleton exactly once for all of them.
+   */
+  private async resolveAllConfigFields(): Promise<
+    Record<
+      ConfigFieldKey,
+      {
+        persistedValue: string | number | null;
+        envOverride: string | number | null;
+        configDefault: string | number | null;
+        effectiveValue: string | number | null;
+        locked: boolean;
+      }
+    >
+  > {
+    const settings = await this.getSettings();
+    const overrides = this.configFieldEnvOverrides();
+    const defaults = this.configFieldDefaults();
+
+    const result = {} as Record<
+      ConfigFieldKey,
+      {
+        persistedValue: string | number | null;
+        envOverride: string | number | null;
+        configDefault: string | number | null;
+        effectiveValue: string | number | null;
+        locked: boolean;
+      }
+    >;
+    for (const meta of CONFIG_FIELDS) {
+      const persistedValue = settings[meta.column] ?? null;
+      const envOverride = overrides[meta.key] ?? null;
+      const configDefault = defaults[meta.key] ?? null;
+      result[meta.key] = {
+        configDefault,
+        effectiveValue: resolveEffectiveConfigValue(envOverride, persistedValue, configDefault),
+        envOverride,
+        locked: envOverride !== null,
+        persistedValue,
+      };
+    }
+    return result;
+  }
+
+  /**
+   * Every configuration field, resolved for the admin.
+   *
+   * Mirrors `getRuntimeToggleStates`: each entry carries what the UI needs to
+   * render an honest input - the persisted value it binds to, the environment
+   * lock that disables it, and the effective value `getSyncOptions` actually uses.
+   */
+  async getConfigFieldStates(): Promise<AllegroConfigFieldState[]> {
+    const resolved = await this.resolveAllConfigFields();
+    return CONFIG_FIELDS.map((meta) => ({
+      ...meta,
+      ...resolved[meta.key],
+    }));
+  }
+
+  /**
+   * Reject a configuration write that would newly collide the two automation
+   * rule names, or newly set both SRP sources.
+   *
+   * Resolves what EACH half of the pair would be after this patch - using the
+   * patched value where the patch touches that column, the already-effective
+   * value otherwise - so a collision is caught whatever mix of persisted,
+   * env-locked or configured values produces it. A no-op write (neither column in
+   * the pair is touched) can never newly collide anything, so this only does work
+   * when the patch actually carries a configuration column.
+   */
+  private async assertConfigWriteIsSafe(patch: AllegroSettingsPatch): Promise<void> {
+    const touchesConfig = CONFIG_FIELDS.some((field) => field.column in patch);
+    if (!touchesConfig) {
+      return;
+    }
+
+    const current = await this.resolveAllConfigFields();
+    const effectiveAfterPatch = (
+      key: ConfigFieldKey,
+      column: ConfigFieldColumn,
+    ): string | number | null => {
+      if (!(column in patch)) {
+        return current[key].effectiveValue;
+      }
+      return resolveEffectiveConfigValue(
+        current[key].envOverride,
+        patch[column] ?? null,
+        current[key].configDefault,
+      );
+    };
+
+    const standard = effectiveAfterPatch("automationRuleStandard", "automation_rule_standard");
+    const promoted = effectiveAfterPatch("automationRulePromoted", "automation_rule_promoted");
+    if (typeof standard === "string" && standard !== "" && standard === promoted) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `This write would make the standard and promoted automation rule both resolve to "${standard}". A promotion flip would then be a no-op switch, so the promoted commission rate would never reach the price floor. Use two distinct rules.`,
+      );
+    }
+
+    const srpMetadataKey = effectiveAfterPatch("srpMetadataKey", "srp_metadata_key");
+    const srpPriceListId = effectiveAfterPatch("srpPriceListId", "srp_price_list_id");
+    if (srpMetadataKey && srpPriceListId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "`srp_metadata_key` and `srp_price_list_id` would both resolve to a value. They are mutually exclusive - configure exactly one source for the SRP ceiling.",
+      );
+    }
   }
 
   // ─── Sync-state: single-flight claim and health ───

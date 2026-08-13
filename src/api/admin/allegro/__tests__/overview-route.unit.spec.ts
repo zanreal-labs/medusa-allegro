@@ -68,9 +68,35 @@ const toggles = [
   },
 ];
 
+/**
+ * The editable sync-configuration fields, as `getConfigFieldStates` returns them.
+ *
+ * Also in the response on purpose, alongside `options`: this is what lets the page
+ * render an editable input bound to the persisted value, with the environment lock
+ * and the effective value the sync engines actually use. None of it is secret
+ * material either.
+ */
+const configFields = [
+  {
+    column: "marketplace_id",
+    configDefault: "allegro-pl",
+    description: "Marketplace the price-automation rule assignment targets.",
+    effectiveValue: "allegro-pl",
+    envOverride: null,
+    envVar: "ALLEGRO_MARKETPLACE_ID",
+    key: "marketplaceId",
+    kind: "text",
+    label: "Marketplace id",
+    locked: false,
+    persistedValue: null,
+    wiringCritical: true,
+  },
+];
+
 const harness = () => {
   const listArgs: unknown[][] = [];
   const service = {
+    getConfigFieldStates: jest.fn(() => Promise.resolve(configFields)),
     getConnectionStatus: jest.fn(() => Promise.resolve(connectionStatus)),
     getPublicOptions: jest.fn(() => Promise.resolve(publicOptions)),
     getRuntimeToggleStates: jest.fn(() => Promise.resolve(toggles)),
@@ -98,6 +124,7 @@ describe("GET /admin/allegro", () => {
 
     expect(h.bodies).toHaveLength(1);
     expect(h.bodies[0]).toEqual({
+      configFields,
       connection: connectionStatus,
       options: publicOptions,
       sync_state: [syncStateRow],

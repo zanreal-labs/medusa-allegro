@@ -4,12 +4,13 @@ import { ALLEGRO_MODULE } from "../../../../../modules/allegro";
 import { GET, POST } from "../route";
 
 /**
- * The runtime-toggle CRUD, over a fake service that only records the write.
+ * The settings CRUD, over a fake service that only records the write.
  *
  * What matters here is the route's contract: it writes only the keys present, rejects
- * anything that is not a known boolean toggle, and answers with the resolved toggle
- * state so the admin can render the effect (including a writer the environment forces
- * off, which a write cannot clear).
+ * anything that is not a known toggle or configuration field, validates a
+ * configuration value against its column's kind, and answers with the resolved state
+ * so the admin can render the effect - including a writer the environment forces off,
+ * or a configuration field the environment locks, neither of which a write can clear.
  */
 
 const toggleStates = [
@@ -25,9 +26,27 @@ const toggleStates = [
   },
 ];
 
+const configFieldStates = [
+  {
+    column: "marketplace_id",
+    configDefault: "allegro-pl",
+    description: "Marketplace the price-automation rule assignment targets.",
+    effectiveValue: "allegro-pl",
+    envOverride: null,
+    envVar: "ALLEGRO_MARKETPLACE_ID",
+    key: "marketplaceId",
+    kind: "text",
+    label: "Marketplace id",
+    locked: false,
+    persistedValue: null,
+    wiringCritical: true,
+  },
+];
+
 const harness = () => {
   const updates: unknown[] = [];
   const service = {
+    getConfigFieldStates: jest.fn(() => Promise.resolve(configFieldStates)),
     getRuntimeToggleStates: jest.fn(() => Promise.resolve(toggleStates)),
     updateSettings: jest.fn((patch: unknown) => {
       updates.push(patch);
@@ -48,10 +67,10 @@ const harness = () => {
 };
 
 describe("GET /admin/allegro/settings", () => {
-  it("returns the resolved toggle states", async () => {
+  it("returns the resolved toggle and configuration field states", async () => {
     const h = harness();
     await GET(h.makeReq(), h.res);
-    expect(h.bodies[0]).toEqual({ toggles: toggleStates });
+    expect(h.bodies[0]).toEqual({ configFields: configFieldStates, toggles: toggleStates });
   });
 });
 
@@ -63,7 +82,7 @@ describe("POST /admin/allegro/settings", () => {
 
     expect(h.updates).toEqual([{ price_sync_enabled: true }]);
     // Answers with the freshly resolved state so the UI reflects the write.
-    expect(h.bodies[0]).toEqual({ toggles: toggleStates });
+    expect(h.bodies[0]).toEqual({ configFields: configFieldStates, toggles: toggleStates });
   });
 
   it("accepts several toggles at once", async () => {
@@ -95,5 +114,75 @@ describe("POST /admin/allegro/settings", () => {
 
     await expect(POST(h.makeReq({}), h.res)).rejects.toBeInstanceOf(MedusaError);
     expect(h.service.updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("writes a text configuration field, trimmed", async () => {
+    const h = harness();
+
+    await POST(h.makeReq({ marketplace_id: "  allegro-pl  " }), h.res);
+
+    expect(h.updates).toEqual([{ marketplace_id: "allegro-pl" }]);
+  });
+
+  it("clears a text configuration field with null, falling back to the medusa-config default", async () => {
+    const h = harness();
+
+    await POST(h.makeReq({ srp_metadata_key: null }), h.res);
+
+    expect(h.updates).toEqual([{ srp_metadata_key: null }]);
+  });
+
+  it("treats a blank string the same as null - a cleared field, not an error", async () => {
+    const h = harness();
+
+    await POST(h.makeReq({ srp_metadata_key: "   " }), h.res);
+
+    expect(h.updates).toEqual([{ srp_metadata_key: null }]);
+  });
+
+  it("writes change_cap as a positive integer", async () => {
+    const h = harness();
+
+    await POST(h.makeReq({ change_cap: 50 }), h.res);
+
+    expect(h.updates).toEqual([{ change_cap: 50 }]);
+  });
+
+  it("rejects change_cap that is zero or negative", async () => {
+    const h = harness();
+
+    await expect(POST(h.makeReq({ change_cap: 0 }), h.res)).rejects.toBeInstanceOf(MedusaError);
+    expect(h.service.updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects change_cap that is not an integer", async () => {
+    const h = harness();
+
+    await expect(POST(h.makeReq({ change_cap: 1.5 }), h.res)).rejects.toBeInstanceOf(MedusaError);
+    expect(h.service.updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects change_cap sent as a string rather than coercing it", async () => {
+    const h = harness();
+
+    await expect(POST(h.makeReq({ change_cap: "50" }), h.res)).rejects.toBeInstanceOf(MedusaError);
+    expect(h.service.updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown configuration field rather than silently ignoring a typo", async () => {
+    const h = harness();
+
+    await expect(POST(h.makeReq({ marketplace_di: "allegro-pl" }), h.res)).rejects.toBeInstanceOf(
+      MedusaError,
+    );
+    expect(h.service.updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("accepts a mix of a toggle and a configuration field in one write", async () => {
+    const h = harness();
+
+    await POST(h.makeReq({ marketplace_id: "allegro-pl", price_sync_enabled: true }), h.res);
+
+    expect(h.updates).toEqual([{ marketplace_id: "allegro-pl", price_sync_enabled: true }]);
   });
 });

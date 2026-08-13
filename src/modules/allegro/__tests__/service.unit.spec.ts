@@ -125,6 +125,14 @@ interface SettingsRow {
   orders_sync_enabled: boolean;
   fulfillment_writeback_enabled: boolean;
   invoice_attach_enabled: boolean;
+  automation_rule_standard: string | null;
+  automation_rule_promoted: string | null;
+  srp_metadata_key: string | null;
+  srp_price_list_id: string | null;
+  change_cap: number | null;
+  marketplace_id: string | null;
+  sales_channel_id: string | null;
+  sales_channel_name: string | null;
 }
 
 /**
@@ -138,11 +146,19 @@ const fakeSettings = (seed?: Partial<SettingsRow>) => {
   const rows: SettingsRow[] = seed
     ? [
         {
+          automation_rule_promoted: null,
+          automation_rule_standard: null,
+          change_cap: null,
           fulfillment_writeback_enabled: false,
           id: "algset_singleton",
           invoice_attach_enabled: true,
+          marketplace_id: null,
           orders_sync_enabled: false,
           price_sync_enabled: false,
+          sales_channel_id: null,
+          sales_channel_name: null,
+          srp_metadata_key: null,
+          srp_price_list_id: null,
           stock_sync_enabled: false,
           ...seed,
         },
@@ -768,6 +784,249 @@ describe("runtime toggles", () => {
         process.env.ALLEGRO_STOCK_SYNC_DISABLED = previous;
       }
     }
+  });
+});
+
+/**
+ * `getSyncOptions` used to read these eight fields straight off `this.options_`,
+ * fixed until a redeploy. These tests pin the precedence that replaced that:
+ * environment lock, then the persisted admin value, then the same
+ * `medusa-config.ts` default as before - so a store that never touches the new
+ * admin fields gets exactly the old behaviour.
+ */
+describe("getSyncOptions - editable configuration precedence", () => {
+  it("falls back to the medusa-config default when nothing is persisted or locked", async () => {
+    const service = makeService(
+      fakeTable(),
+      validOptions({
+        automationRules: { promoted: "Cfg Promoted", standard: "Cfg Standard" },
+        changeCap: 42,
+        marketplaceId: "cfg-marketplace",
+        salesChannelId: "sc_cfg",
+        salesChannelName: "Cfg Channel",
+        srpMetadataKey: "cfg_srp_meta",
+      }),
+    );
+
+    const options = await service.getSyncOptions();
+
+    expect(options).toMatchObject({
+      automationRules: { promoted: "Cfg Promoted", standard: "Cfg Standard" },
+      changeCap: 42,
+      marketplaceId: "cfg-marketplace",
+      salesChannelId: "sc_cfg",
+      salesChannelName: "Cfg Channel",
+      srpMetadataKey: "cfg_srp_meta",
+    });
+  });
+
+  it("reads the persisted admin value over the medusa-config default", async () => {
+    const service = makeService(
+      fakeTable(),
+      validOptions({ changeCap: 100, marketplaceId: "cfg-marketplace" }),
+      undefined,
+      fakeSettings({ change_cap: 7, marketplace_id: "admin-marketplace" }),
+    );
+
+    const options = await service.getSyncOptions();
+
+    expect(options.changeCap).toBe(7);
+    expect(options.marketplaceId).toBe("admin-marketplace");
+  });
+
+  it("lets an environment lock win over a persisted admin edit - the wiring-critical fields", async () => {
+    const service = makeService(
+      fakeTable(),
+      validOptions(),
+      undefined,
+      fakeSettings({ marketplace_id: "admin-marketplace", sales_channel_id: "sc_admin" }),
+    );
+    const previousMarketplace = process.env.ALLEGRO_MARKETPLACE_ID;
+    const previousChannel = process.env.ALLEGRO_SALES_CHANNEL_ID;
+    process.env.ALLEGRO_MARKETPLACE_ID = "locked-marketplace";
+    process.env.ALLEGRO_SALES_CHANNEL_ID = "sc_locked";
+    try {
+      const options = await service.getSyncOptions();
+      expect(options.marketplaceId).toBe("locked-marketplace");
+      expect(options.salesChannelId).toBe("sc_locked");
+    } finally {
+      if (previousMarketplace === undefined) {
+        delete process.env.ALLEGRO_MARKETPLACE_ID;
+      } else {
+        process.env.ALLEGRO_MARKETPLACE_ID = previousMarketplace;
+      }
+      if (previousChannel === undefined) {
+        delete process.env.ALLEGRO_SALES_CHANNEL_ID;
+      } else {
+        process.env.ALLEGRO_SALES_CHANNEL_ID = previousChannel;
+      }
+    }
+  });
+
+  it("treats a half-resolved automation rule pair as inert, same as the medusa-config-only path", async () => {
+    // Only the standard rule is persisted; nothing configures a promoted rule. A real
+    // assignment needs both names, so this must read the same as neither being set.
+    const service = makeService(
+      fakeTable(),
+      validOptions(),
+      undefined,
+      fakeSettings({ automation_rule_standard: "Admin Standard" }),
+    );
+
+    const options = await service.getSyncOptions();
+
+    expect(options.automationRules).toBeUndefined();
+  });
+
+  it("resolves a full automation rule pair once both halves are persisted", async () => {
+    const service = makeService(
+      fakeTable(),
+      validOptions(),
+      undefined,
+      fakeSettings({
+        automation_rule_promoted: "Admin Promoted",
+        automation_rule_standard: "Admin Standard",
+      }),
+    );
+
+    const options = await service.getSyncOptions();
+
+    expect(options.automationRules).toEqual({
+      promoted: "Admin Promoted",
+      standard: "Admin Standard",
+    });
+  });
+});
+
+describe("getConfigFieldStates", () => {
+  it("surfaces every field's persisted, locked, defaulted and effective value", async () => {
+    const service = makeService(
+      fakeTable(),
+      validOptions({ marketplaceId: "cfg-marketplace" }),
+      undefined,
+      fakeSettings({ marketplace_id: "admin-marketplace" }),
+    );
+    const previous = process.env.ALLEGRO_MARKETPLACE_ID;
+    process.env.ALLEGRO_MARKETPLACE_ID = "locked-marketplace";
+    try {
+      const states = await service.getConfigFieldStates();
+      const marketplace = states.find((state) => state.key === "marketplaceId");
+
+      expect(marketplace).toMatchObject({
+        configDefault: "cfg-marketplace",
+        effectiveValue: "locked-marketplace",
+        envOverride: "locked-marketplace",
+        locked: true,
+        persistedValue: "admin-marketplace",
+        wiringCritical: true,
+      });
+      expect(states).toHaveLength(8);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.ALLEGRO_MARKETPLACE_ID;
+      } else {
+        process.env.ALLEGRO_MARKETPLACE_ID = previous;
+      }
+    }
+  });
+
+  it("reports an unlocked, unedited field with only its medusa-config default", async () => {
+    const service = makeService(fakeTable(), validOptions({ changeCap: 42 }));
+
+    const states = await service.getConfigFieldStates();
+    const changeCap = states.find((state) => state.key === "changeCap");
+
+    expect(changeCap).toMatchObject({
+      configDefault: 42,
+      effectiveValue: 42,
+      envOverride: null,
+      locked: false,
+      persistedValue: null,
+    });
+  });
+});
+
+describe("updateSettings - configuration field writes", () => {
+  it("persists a configuration field and reflects it in getSyncOptions without reconstructing the service", async () => {
+    // The property a redeploy-free config edit needs: the same instance that served
+    // the old value serves the new one on its very next call.
+    const settings = fakeSettings();
+    const service = makeService(fakeTable(), validOptions({ changeCap: 100 }), undefined, settings);
+
+    expect((await service.getSyncOptions()).changeCap).toBe(100);
+
+    await service.updateSettings({ change_cap: 7 });
+
+    expect((await service.getSyncOptions()).changeCap).toBe(7);
+  });
+
+  it("clears a persisted configuration field back to the medusa-config default with null", async () => {
+    const settings = fakeSettings({ marketplace_id: "admin-marketplace" });
+    const service = makeService(
+      fakeTable(),
+      validOptions({ marketplaceId: "cfg-marketplace" }),
+      undefined,
+      settings,
+    );
+
+    await service.updateSettings({ marketplace_id: null });
+
+    expect((await service.getSyncOptions()).marketplaceId).toBe("cfg-marketplace");
+  });
+
+  it("rejects a write that would make the two automation rule names collide", async () => {
+    // The medusa-config default already carries a promoted rule name. Persisting the
+    // SAME name as the standard rule newly collides them - a case the boot-time check
+    // in `resolveAutomationRules` cannot catch, because it only ever saw the config.
+    const service = makeService(
+      fakeTable(),
+      validOptions({ automationRules: { promoted: "Store Sale", standard: "Store" } }),
+      undefined,
+      fakeSettings(),
+    );
+
+    await expect(
+      service.updateSettings({ automation_rule_standard: "Store Sale" }),
+    ).rejects.toBeInstanceOf(MedusaError);
+  });
+
+  it("rejects a write that would set both SRP sources at once", async () => {
+    const service = makeService(
+      fakeTable(),
+      validOptions({ srpPriceListId: "pl_cfg" }),
+      undefined,
+      fakeSettings(),
+    );
+
+    await expect(service.updateSettings({ srp_metadata_key: "admin_meta" })).rejects.toBeInstanceOf(
+      MedusaError,
+    );
+  });
+
+  it("allows a write that clears one SRP source while the other stays configured", async () => {
+    const settings = fakeSettings({ srp_metadata_key: "admin_meta" });
+    const service = makeService(
+      fakeTable(),
+      validOptions({ srpPriceListId: "pl_cfg" }),
+      undefined,
+      settings,
+    );
+
+    // Clearing the metadata key leaves only the price list id in play - no collision.
+    await expect(service.updateSettings({ srp_metadata_key: null })).resolves.toBeDefined();
+  });
+
+  it("allows a write that does not touch either half of a colliding pair", async () => {
+    // A write to an unrelated column must never run the collision check against
+    // stale state and fail for a field the operator did not even touch.
+    const service = makeService(
+      fakeTable(),
+      validOptions({ automationRules: { promoted: "Store Sale", standard: "Store" } }),
+      undefined,
+      fakeSettings(),
+    );
+
+    await expect(service.updateSettings({ change_cap: 5 })).resolves.toBeDefined();
   });
 });
 

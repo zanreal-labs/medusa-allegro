@@ -27,8 +27,41 @@ import { model } from "@medusajs/framework/utils";
  * plugin the document already exists as a legal record and the only sensible default
  * is to deliver it; it is enabled-but-inert until an invoicing module is wired, since
  * there is nothing to attach before then.
+ *
+ * The same row also carries the editable sync-configuration fields
+ * (`automation_rule_standard` and friends, see `src/lib/config-fields.ts`). They were
+ * `medusa-config.ts` constructor options only, rendered in the admin as inert text -
+ * changing one meant editing the config file and redeploying. Every one of these
+ * columns is NULLABLE with NO default: `null` means "nothing persisted, fall back to
+ * the `medusa-config.ts` default", the same precedence the runtime toggles use for
+ * an environment override, adapted to a value instead of a boolean. A fresh install
+ * or an unedited field is therefore indistinguishable from before this row existed.
  */
 const AllegroSettings = model.define("allegro_settings", {
+  /**
+   * Name of the price-automation rule attached to a promoted offer.
+   *
+   * Persisted counterpart of the `automationRules.promoted` plugin option. `null`
+   * falls back to that option. Must differ from `automation_rule_standard` once
+   * both resolve to a value - see the write-side check in the service - because a
+   * promotion flip would otherwise attach the same rule regardless of promotion
+   * state, silently defeating the promoted commission rate.
+   */
+  automation_rule_promoted: model.text().nullable(),
+  /**
+   * Name of the price-automation rule attached to a standard (non-promoted)
+   * offer. Persisted counterpart of the `automationRules.standard` plugin option.
+   * `null` falls back to that option.
+   */
+  automation_rule_standard: model.text().nullable(),
+  /**
+   * Commands issued per price-sync run. Persisted counterpart of the `changeCap`
+   * plugin option. `null` falls back to that option (which itself defaults to
+   * `DEFAULT_CHANGE_CAP`). The write-side check rejects anything that is not a
+   * positive integer, for the same reason `resolveChangeCap` does at boot: a cap
+   * of 0 or less is not "no writes" - the kill switches exist for that.
+   */
+  change_cap: model.number().nullable(),
   /**
    * When the seller-managed fulfillment status is pushed back to Allegro on a
    * Medusa fulfillment/shipment event.
@@ -46,10 +79,50 @@ const AllegroSettings = model.define("allegro_settings", {
    * emits the event, because there is nothing to attach before then.
    */
   invoice_attach_enabled: model.boolean().default(true),
+  /**
+   * Marketplace the price-automation rule assignment targets. Persisted
+   * counterpart of the `marketplaceId` plugin option. `null` falls back to that
+   * option (which itself defaults to `DEFAULT_MARKETPLACE_ID`).
+   *
+   * WIRING-CRITICAL: a wrong value silently breaks the Allegro<->Medusa mapping
+   * rather than merely mis-tuning a run. Editable, but the `medusa-config.ts` /
+   * `ALLEGRO_MARKETPLACE_ID` value can hard-lock it - see
+   * `marketplaceIdEnvOverride` in `src/lib/options.ts`.
+   */
+  marketplace_id: model.text().nullable(),
   /** When the order event journal is drained into Medusa orders. Defaults OFF. */
   orders_sync_enabled: model.boolean().default(false),
   /** When price-automation rules and bounds are written to Allegro. Defaults OFF. */
   price_sync_enabled: model.boolean().default(false),
+  /**
+   * Sales channel id that scopes which Medusa products are matched against
+   * Allegro offers. Persisted counterpart of the `salesChannelId` plugin option.
+   * `null` falls back to that option.
+   *
+   * WIRING-CRITICAL, same reasoning as `marketplace_id`: re-scoping which
+   * products are sync-eligible is not a tuning knob, it changes what this plugin
+   * matches. `ALLEGRO_SALES_CHANNEL_ID` can hard-lock it.
+   */
+  sales_channel_id: model.text().nullable(),
+  /**
+   * Sales channel name that scopes eligible products when no channel id is set.
+   * Persisted counterpart of the `salesChannelName` plugin option. `null` falls
+   * back to that option.
+   */
+  sales_channel_name: model.text().nullable(),
+  /**
+   * Variant (or product) metadata key holding the SRP ceiling. Persisted
+   * counterpart of the `srpMetadataKey` plugin option. `null` falls back to that
+   * option. Mutually exclusive with `srp_price_list_id` once both resolve to a
+   * value - see the write-side check in the service.
+   */
+  srp_metadata_key: model.text().nullable(),
+  /**
+   * Price list id whose price is read as the SRP ceiling. Persisted counterpart
+   * of the `srpPriceListId` plugin option. `null` falls back to that option.
+   * Mutually exclusive with `srp_metadata_key`.
+   */
+  srp_price_list_id: model.text().nullable(),
   /** When Medusa available quantity is pushed to Allegro. Defaults OFF. */
   stock_sync_enabled: model.boolean().default(false),
 });

@@ -114,21 +114,21 @@ npx medusa db:migrate
 
 ### Sync options
 
-| Option               | Type                                     | Required | Default          | Notes                                                                                                                                                                                                                       |
-| -------------------- | ---------------------------------------- | -------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `automationRules`    | `{ promoted: string; standard: string }` | no       | -                | Names of two price-automation rules that must **already exist** on the Allegro account. Resolved by name every run; missing, renamed or ambiguous aborts the run with nothing written. **Omit it and price sync is inert.** |
-| `changeCap`          | `number`                                 | no       | `100`            | Price-automation commands per run. Positive integer; `0` is rejected - use a kill switch to stop writes, not a zero cap.                                                                                                    |
-| `stockSyncDisabled`  | `boolean`                                | no       | `false`          | Force-disable override for quantity writes. Can only force OFF; the live arming is the [runtime toggle](#runtime-toggles). Same boolean-only contract as `priceSyncDisabled`.                                               |
-| `ordersSyncDisabled` | `boolean`                                | no       | `false`          | Force-disable override for the order drain. Forced off, the journal is not consumed at all, so the cursor holds and nothing is skipped. Live arming is the runtime toggle.                                                  |
-| `salesChannelId`     | `string`                                 | no       | -                | Scopes which products are sync-eligible. With neither this nor `salesChannelName`, the whole catalogue is eligible.                                                                                                         |
-| `salesChannelName`   | `string`                                 | no       | -                | Resolved by name at run time. A configured name that does not exist is an **error**, not a fallback to the whole catalogue.                                                                                                 |
-| `stockLocationIds`   | `string[]`                               | no       | every location   | Locations whose available quantity is summed for the push. `ALLEGRO_STOCK_LOCATION_IDS` overrides it.                                                                                                                       |
-| `srpMetadataKey`     | `string`                                 | no       | -                | Reads the SRP (the price-range ceiling) from that key in the variant's `metadata`, falling back to the product's. Mutually exclusive with `srpPriceListId`.                                                                 |
-| `srpPriceListId`     | `string`                                 | no       | -                | Reads the SRP from the variant's price in that price list.                                                                                                                                                                  |
-| `costsModuleKey`     | `string`                                 | no       | `"productCosts"` | Container key of `@zanreal/medusa-product-costs`, resolved lazily and optionally. Without it, every offer is skipped with `missing-break-even`. There is never a default floor.                                             |
-| `invoiceModuleKey`   | `string`                                 | no       | `"infakt"`       | Container key of `@zanreal/medusa-infakt`, resolved lazily and optionally. Without it the invoice chain is inert. See [The invoice chain](#the-invoice-chain).                                                              |
-| `marketplaceId`      | `string`                                 | no       | `"allegro-pl"`   | Marketplace the rule assignment targets.                                                                                                                                                                                    |
-| `regionId`           | `string`                                 | no       | derived          | Region Allegro orders are created in. Falls back to the first region matching the order currency, then the first region at all (with a warning).                                                                            |
+| Option               | Type                                     | Required | Default          | Notes                                                                                                                                                                                                                                                                                                                                 |
+| -------------------- | ---------------------------------------- | -------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `automationRules`    | `{ promoted: string; standard: string }` | no       | -                | Names of two price-automation rules that must **already exist** on the Allegro account. Resolved by name every run; missing, renamed or ambiguous aborts the run with nothing written. **Omit it and price sync is inert.** Also editable and persisted from the admin - see [Sync configuration fields](#sync-configuration-fields). |
+| `changeCap`          | `number`                                 | no       | `100`            | Price-automation commands per run. Positive integer; `0` is rejected - use a kill switch to stop writes, not a zero cap. Also editable and persisted from the admin.                                                                                                                                                                  |
+| `stockSyncDisabled`  | `boolean`                                | no       | `false`          | Force-disable override for quantity writes. Can only force OFF; the live arming is the [runtime toggle](#runtime-toggles). Same boolean-only contract as `priceSyncDisabled`.                                                                                                                                                         |
+| `ordersSyncDisabled` | `boolean`                                | no       | `false`          | Force-disable override for the order drain. Forced off, the journal is not consumed at all, so the cursor holds and nothing is skipped. Live arming is the runtime toggle.                                                                                                                                                            |
+| `salesChannelId`     | `string`                                 | no       | -                | Scopes which products are sync-eligible. With neither this nor `salesChannelName`, the whole catalogue is eligible. Also editable and persisted from the admin - **wiring-critical**, see [Sync configuration fields](#sync-configuration-fields).                                                                                    |
+| `salesChannelName`   | `string`                                 | no       | -                | Resolved by name at run time. A configured name that does not exist is an **error**, not a fallback to the whole catalogue. Also editable and persisted from the admin.                                                                                                                                                               |
+| `stockLocationIds`   | `string[]`                               | no       | every location   | Locations whose available quantity is summed for the push. `ALLEGRO_STOCK_LOCATION_IDS` overrides it.                                                                                                                                                                                                                                 |
+| `srpMetadataKey`     | `string`                                 | no       | -                | Reads the SRP (the price-range ceiling) from that key in the variant's `metadata`, falling back to the product's. Mutually exclusive with `srpPriceListId`. Also editable and persisted from the admin.                                                                                                                               |
+| `srpPriceListId`     | `string`                                 | no       | -                | Reads the SRP from the variant's price in that price list. Also editable and persisted from the admin.                                                                                                                                                                                                                                |
+| `costsModuleKey`     | `string`                                 | no       | `"productCosts"` | Container key of `@zanreal/medusa-product-costs`, resolved lazily and optionally. Without it, every offer is skipped with `missing-break-even`. There is never a default floor.                                                                                                                                                       |
+| `invoiceModuleKey`   | `string`                                 | no       | `"infakt"`       | Container key of `@zanreal/medusa-infakt`, resolved lazily and optionally. Without it the invoice chain is inert. See [The invoice chain](#the-invoice-chain).                                                                                                                                                                        |
+| `marketplaceId`      | `string`                                 | no       | `"allegro-pl"`   | Marketplace the rule assignment targets. Also editable and persisted from the admin - **wiring-critical**, see [Sync configuration fields](#sync-configuration-fields).                                                                                                                                                               |
+| `regionId`           | `string`                                 | no       | derived          | Region Allegro orders are created in. Falls back to the first region matching the order currency, then the first region at all (with a warning).                                                                                                                                                                                      |
 
 All options are validated in a module loader, so a misconfiguration fails at boot
 with a specific message instead of surfacing as an opaque Allegro error later. The
@@ -159,6 +159,14 @@ process.env.X` yields `"true"`, which a truthiness test honours and a `=== true`
 | `ALLEGRO_ORDERS_SYNC_INTERVAL_MS`        | Interval, in ms, for the order drain. Default `20000` (20s). The drain schedules on an interval by default because Medusa's cron only resolves to the minute and a fresh order should be drained sub-minute.                                    |
 | `ALLEGRO_ORDERS_SYNC_CRON`               | Switches the order drain back to a cron expression instead of an interval. The two are mutually exclusive in Medusa's scheduler; when both are set the cron wins.                                                                               |
 | `ALLEGRO_STOCK_LOCATION_IDS`             | Comma-separated stock location ids, overriding `stockLocationIds`.                                                                                                                                                                              |
+| `ALLEGRO_AUTOMATION_RULE_STANDARD`       | **Locks** the standard-offer automation rule name, beating both the admin field and `automationRules.standard`. See [Sync configuration fields](#sync-configuration-fields).                                                                    |
+| `ALLEGRO_AUTOMATION_RULE_PROMOTED`       | The same, for the promoted-offer rule name.                                                                                                                                                                                                     |
+| `ALLEGRO_SRP_METADATA_KEY`               | The same, for the SRP metadata key.                                                                                                                                                                                                             |
+| `ALLEGRO_SRP_PRICE_LIST_ID`              | The same, for the SRP price list id.                                                                                                                                                                                                            |
+| `ALLEGRO_CHANGE_CAP`                     | The same, for the per-run change cap. Ignored (read as unset) unless it is a positive integer.                                                                                                                                                  |
+| `ALLEGRO_MARKETPLACE_ID`                 | The same, for the marketplace id. **Wiring-critical** - see [Sync configuration fields](#sync-configuration-fields).                                                                                                                            |
+| `ALLEGRO_SALES_CHANNEL_ID`               | The same, for the sales-channel id. **Wiring-critical.**                                                                                                                                                                                        |
+| `ALLEGRO_SALES_CHANNEL_NAME`             | The same, for the sales-channel name.                                                                                                                                                                                                           |
 | `MEDUSA_BACKEND_URL`                     | Fallback for `backendUrl` when deriving the OAuth redirect URI.                                                                                                                                                                                 |
 
 The schedules and force-disable overrides are env vars rather than plugin options
@@ -227,6 +235,66 @@ and emitting events.
 The singleton row is created lazily under a fixed primary key on first read, with these
 defaults. Upgrading an existing install runs the additive migration that creates the
 table; the row appears the first time any runtime path or the admin reads it.
+
+## Sync configuration fields
+
+Eight of the [sync options](#sync-options) - the two automation rule names, the SRP
+source, the change cap, the marketplace id and the sales-channel scope - are also
+**editable from Settings -> Allegro**, on the same `allegro_settings` singleton the
+runtime toggles use. An edit persists and takes effect on the next sync run, no
+redeploy - the same property the toggles have. A store that never touches these admin
+fields behaves exactly as before: every persisted column starts `null`, and `null`
+falls through to the `medusa-config.ts` option.
+
+| Field                              | Column                     | `medusa-config.ts` option  | Env lock                           |
+| ---------------------------------- | -------------------------- | -------------------------- | ---------------------------------- |
+| Automation rule (standard)         | `automation_rule_standard` | `automationRules.standard` | `ALLEGRO_AUTOMATION_RULE_STANDARD` |
+| Automation rule (promoted)         | `automation_rule_promoted` | `automationRules.promoted` | `ALLEGRO_AUTOMATION_RULE_PROMOTED` |
+| SRP source: metadata key           | `srp_metadata_key`         | `srpMetadataKey`           | `ALLEGRO_SRP_METADATA_KEY`         |
+| SRP source: price list id          | `srp_price_list_id`        | `srpPriceListId`           | `ALLEGRO_SRP_PRICE_LIST_ID`        |
+| Change cap                         | `change_cap`               | `changeCap`                | `ALLEGRO_CHANGE_CAP`               |
+| Marketplace id (wiring-critical)   | `marketplace_id`           | `marketplaceId`            | `ALLEGRO_MARKETPLACE_ID`           |
+| Sales channel id (wiring-critical) | `sales_channel_id`         | `salesChannelId`           | `ALLEGRO_SALES_CHANNEL_ID`         |
+| Sales channel name                 | `sales_channel_name`       | `salesChannelName`         | `ALLEGRO_SALES_CHANNEL_NAME`       |
+
+### Precedence
+
+Adapted from the toggles' "the override can only force off" contract to a value
+rather than a boolean - there is no "off" for a string or a number, so a set
+environment lock wins outright:
+
+```
+effectiveValue = envLock ?? persistedValue ?? medusaConfigDefault
+```
+
+- an env lock, when set, is authoritative - it beats both a persisted admin edit AND
+  the `medusa-config.ts` option, and the admin shows the field **locked**, the same
+  treatment a forced-off toggle gets
+- otherwise the persisted admin value governs, when one has been entered
+- otherwise the `medusa-config.ts` option governs, exactly as it always did
+
+Clearing a field in the admin (blank it and Save) writes `null`, which falls back to
+the `medusa-config.ts` option rather than to an empty value - the same "clear"
+contract the category-rates page already uses.
+
+### Marketplace id and sales channel id are wiring-critical
+
+Editing `marketplaceId` or `salesChannelId` **re-scopes which Medusa products this
+plugin matches against Allegro offers**, not merely a tuning knob - a wrong value
+breaks the mapping silently rather than producing an obviously bad result. Both stay
+editable and persisted, with the same env-lock escape hatch as everything else: set
+`ALLEGRO_MARKETPLACE_ID` or `ALLEGRO_SALES_CHANNEL_ID` to pin the correct value against
+an admin mistake during a cutover. The admin renders an explicit warning on both
+inputs saying so.
+
+### Automation rule names and SRP source stay mutually consistent
+
+Two invariants that already existed as **boot-time** checks in `resolveAllegroOptions` -
+the standard and promoted rule names must differ, and at most one SRP source may be
+set - are now also enforced on every **admin write**, because persisting a field
+independently of the other can newly create a collision the boot-time check never saw
+(one half configured, the other newly persisted to the same value). The write is
+rejected with a `MedusaError` rather than silently accepted.
 
 ## OAuth setup
 
@@ -370,8 +438,12 @@ so every non-per-product view lives under Settings.
 - **Settings -> Allegro** - the configuration and control home: the OAuth
   connection, the **live writer toggles** (interactive switches backed by the
   persisted [runtime settings](#runtime-toggles) - arm or disarm each writer without
-  a redeploy; a writer the environment forces off is shown locked), a catalogue
-  roll-up, sync health, and links into the three nested Settings pages below.
+  a redeploy; a writer the environment forces off is shown locked), the **sync
+  configuration fields** (editable inputs backed by the same singleton - see
+  [Sync configuration fields](#sync-configuration-fields); a field an environment
+  variable locks is shown locked, same treatment as a forced-off toggle), a
+  catalogue roll-up, sync health, and links into the three nested Settings pages
+  below.
 - **Settings -> Allegro -> Offers** - the cross-catalogue offer table with
   conflict and drift filters, bulk rediscovery, and manual push. An operator
   triage surface for catalogue-wide "which offers are not syncing, and fix them"
