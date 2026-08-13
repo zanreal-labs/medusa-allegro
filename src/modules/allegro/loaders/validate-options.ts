@@ -19,7 +19,9 @@ export default async function validateAllegroOptions({
 
   logger?.info(
     `[medusa-allegro] configured for ${resolved.environment}, callback ${resolved.redirectPath}, price sync ${
-      resolved.priceSyncDisabled ? "DISABLED" : "enabled"
+      resolved.priceSyncDisabled
+        ? "DISABLED (forced off by config, wins over admin settings)"
+        : "default: not forced off by config (effective state is governed by the persisted admin settings, off until an operator enables it)"
     }`,
   );
 }
