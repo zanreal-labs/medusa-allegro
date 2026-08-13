@@ -16,11 +16,12 @@ import type { AllegroSummary, SummaryResponse } from "../lib/types";
  * offers filtered to exactly those rows. The authoritative per-product view lives on
  * each product's own detail page (the `product.details.after` widget).
  *
- * TODO(medusa-admin-kit): the real per-row "Allegro status" column will be contributed
- * through @zanreal/medusa-admin-kit's extensible products list once it ships. This
- * plugin will register that column there rather than building a competing full products
- * list of its own; this summary line stays as the zero-dependency fallback. See the
- * README "Admin surfaces" section.
+ * The real per-row "Allegro status" column is now contributed through
+ * @zanreal/medusa-admin-kit's extensible Catalog route (see
+ * `src/admin/widgets/register-product-columns.tsx`) rather than a competing full
+ * products list of its own; this summary line stays on the stock Products page as
+ * the zero-dependency fallback for a store that has not added the Catalog route.
+ * See the README "Admin surfaces" section.
  *
  * It renders nothing until at least one SKU is mapped, so a store that does not
  * use Allegro never sees it.

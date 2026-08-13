@@ -25,6 +25,9 @@
   "files": [
     ".medusa/server"
   ],
+  "dependencies": {
+    "@zanreal/medusa-admin-kit": "github:zanreal-labs/medusa-admin-kit#f313157bf066bb47504c9359a8637881ab07d144"
+  },
   "exports": {
     "./package.json": "./package.json",
     "./workflows": "./.medusa/server/src/workflows/index.js",
