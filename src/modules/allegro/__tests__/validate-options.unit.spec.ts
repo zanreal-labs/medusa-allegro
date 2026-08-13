@@ -36,7 +36,9 @@ describe("validateAllegroOptions", () => {
 
     expect(logged[0]).toContain("configured for production");
     expect(logged[0]).toContain("/admin/allegro/oauth/callback");
-    expect(logged[0]).toContain("price sync enabled");
+    expect(logged[0]).toContain("price sync default: not forced off by config");
+    expect(logged[0]).toContain("governed by the persisted admin settings");
+    expect(logged[0]).not.toContain("price sync enabled");
   });
 
   it("names the kill-switch in the boot log when it is on", async () => {
