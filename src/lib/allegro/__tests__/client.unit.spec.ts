@@ -476,8 +476,8 @@ describe("AllegroClient", () => {
       return Promise.resolve(
         apiJson(200, {
           rules: [
-            { default: false, id: "r1", name: "Bitdefender", type: "FOLLOW_BY_ALLEGRO_MIN_PRICE" },
-            { default: false, id: "r2", name: "Bitdefender Sale" },
+            { default: false, id: "r1", name: "Rule One", type: "FOLLOW_BY_ALLEGRO_MIN_PRICE" },
+            { default: false, id: "r2", name: "Rule Two" },
           ],
         }),
       );
@@ -495,7 +495,7 @@ describe("AllegroClient", () => {
     const { rules } = await c.listPriceAutomationRules();
     expect(fetchImpl.mock.calls[0]?.[0]).toContain("/sale/price-automation/rules");
     expect(rules).toHaveLength(2);
-    expect(rules[0]?.name).toBe("Bitdefender");
+    expect(rules[0]?.name).toBe("Rule One");
   });
 
   it("reads a single offer's attached price-automation rule + status", async () => {

@@ -118,7 +118,7 @@ npx medusa db:migrate
 | -------------------- | ---------------------------------------- | -------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pricingMode`        | `"monitor" \| "automation_rule" \| "fixed_price"` | no | `"automation_rule"` | How this store prices its Allegro offers - see [Pricing modes](#pricing-modes). This is the DEFAULT; the persisted admin choice wins over it. `"automation_rule"` is what this plugin did before the mode existed, so an upgrade changes nothing. |
 | `automationRules`    | `{ promoted: string; standard: string }` | no       | -                | Names of two price-automation rules that must **already exist** on the Allegro account. Resolved by name every run; missing, renamed or ambiguous aborts the run with nothing written. **Omit it and price sync is inert.** Also editable and persisted from the admin - see [Sync configuration fields](#sync-configuration-fields). |
-| `changeCap`          | `number`                                 | no       | `100`            | Price-automation commands per run. Positive integer; `0` is rejected - use a kill switch to stop writes, not a zero cap. Also editable and persisted from the admin.                                                                                                                                                                  |
+| `changeCap`          | `number`                                 | no       | `1`              | Price-automation commands per run. Positive integer; `0` is rejected - use a kill switch to stop writes, not a zero cap. Also editable and persisted from the admin. The default is a deliberately minimal placeholder, not a recommendation - see [Choosing a change cap](#choosing-a-change-cap).                                    |
 | `stockSyncDisabled`  | `boolean`                                | no       | `false`          | Force-disable override for quantity writes. Can only force OFF; the live arming is the [runtime toggle](#runtime-toggles). Same boolean-only contract as `priceSyncDisabled`.                                                                                                                                                         |
 | `ordersSyncDisabled` | `boolean`                                | no       | `false`          | Force-disable override for the order drain. Forced off, the journal is not consumed at all, so the cursor holds and nothing is skipped. Live arming is the runtime toggle.                                                                                                                                                            |
 | `salesChannelId`     | `string`                                 | no       | -                | Scopes which products are sync-eligible. With neither this nor `salesChannelName`, the whole catalogue is eligible. Also editable and persisted from the admin - **wiring-critical**, see [Sync configuration fields](#sync-configuration-fields).                                                                                    |
@@ -868,9 +868,10 @@ An offer with no recorded bounds is re-pushed, which is idempotent.
 - **Fail-loud rule resolution.** Both rule names are resolved against the live rules
   list every run. Missing, renamed or ambiguous aborts the whole run with nothing
   written. The plugin never guesses which rule you meant and never creates one.
-- **Change cap** (`changeCap`, default 100). A bug that mislabels the whole catalogue
-  as drifting can reprice at most that many offers before a human sees the run and
-  can flip the switch. The remainder waits for the next tick.
+- **Change cap** (`changeCap`). A bug that mislabels the whole catalogue as drifting
+  can reprice at most that many offers before a human sees the run and can flip the
+  switch. The remainder waits for the next tick. See
+  [Choosing a change cap](#choosing-a-change-cap) for why the shipped default is 1.
 - **Per-offer quarantine** after 5 consecutive failures, so one permanently bad offer
   cannot burn the run's budget every tick. Never silent: named in `last_error` and in
   the admin, with a manual push as the remedy.
@@ -1111,9 +1112,28 @@ under Settings -> Allegro. The safe order, and why each step comes where it does
    `automationRules` to their names. Until then price sync is inert by construction.
 7. **Arm the writers under Settings -> Allegro - stock first, then prices.** A wrong
    quantity is recoverable in one run; a wrong price may already have sold something.
-   Start with a low `changeCap` and watch the push history in the Offers drawer. Arm
+   The shipped `changeCap` is already the lowest possible; raise it only once you
+   have watched the push history in the Offers drawer and believe the run. Arm
    the order drain, fulfillment write-back and invoice attach when you are ready for
    each; every toggle takes effect on the next run, no redeploy.
+
+### Choosing a change cap
+
+`changeCap` ships as `1`, and that is a placeholder rather than a recommendation. A blast radius is
+a risk decision belonging to the store that bears the risk, so this plugin does not publish anyone
+else's risk appetite as a starting point. It ships the most cautious value that is still a working
+configuration and expects you to raise it deliberately.
+
+Erring low is safe and, importantly, not silent: every run that hits the cap logs
+`change cap (N) hit; M offer(s) wait for the next tick`, so a store still on `1` can see exactly why
+the catalogue is converging one offer per tick. Erring high is the direction the cap exists to
+prevent.
+
+Note that the cap also bounds manual pushes over a rolling hour (see
+[The manual push budget](#the-manual-push-budget)), so leaving it at `1` makes manual pushes
+correspondingly rare. Pick a number that matches how big a mistaken run you
+are willing to absorb between two ticks, then set it in **Settings > Allegro** (persisted, no
+restart), in `ALLEGRO_CHANGE_CAP`, or as the `changeCap` option.
 
 ## Operator runbook
 

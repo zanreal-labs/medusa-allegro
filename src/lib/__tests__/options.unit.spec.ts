@@ -4,6 +4,7 @@ import {
   automationRuleStandardEnvOverride,
   changeCapEnvOverride,
   pricingModeEnvOverride,
+  DEFAULT_CHANGE_CAP,
   DEFAULT_REDIRECT_PATH,
   DEFAULT_SCOPES,
   isPriceSyncDisabledByEnv,
@@ -214,12 +215,36 @@ describe("changeCapEnvOverride", () => {
   it("reads a malformed value as no lock rather than throwing", () => {
     // This is evaluated on every `getSyncOptions()` call, unlike `resolveChangeCap`
     // which enforces the same rule loudly, but only once, at boot on the
-    // medusa-config.ts default. A typo in an environment variable must not turn
+    // configured default. A typo in an environment variable must not turn
     // every price-sync run into a thrown error.
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "0" })).toBeUndefined();
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "-5" })).toBeUndefined();
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "1.5" })).toBeUndefined();
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "not-a-number" })).toBeUndefined();
+  });
+});
+
+describe("the change cap default", () => {
+  it("ships the smallest working blast radius, not a tuned business figure", () => {
+    // The regression this guards: the shipped default used to be one store's
+    // own risk appetite, published to every installer as if it were a sensible
+    // starting point. A blast radius belongs to whoever bears the risk, so this
+    // ships the most cautious value that is still a working configuration and
+    // expects an operator to raise it deliberately. Erring low only slows
+    // convergence, and does so loudly (the run logs when the cap bites); erring
+    // high is the direction this cap exists to prevent.
+    expect(DEFAULT_CHANGE_CAP).toBe(1);
+    expect(resolveAllegroOptions(validOptions()).changeCap).toBe(DEFAULT_CHANGE_CAP);
+  });
+
+  it("keeps a deliberately chosen cap untouched", () => {
+    expect(resolveAllegroOptions({ ...validOptions(), changeCap: 250 }).changeCap).toBe(250);
+  });
+
+  it("still refuses a zero or negative cap, which is a kill switch's job", () => {
+    expect(() => resolveAllegroOptions({ ...validOptions(), changeCap: 0 })).toThrow(
+      /positive integer/u,
+    );
   });
 });
 
