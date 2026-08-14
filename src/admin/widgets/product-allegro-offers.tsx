@@ -1,5 +1,9 @@
 import { defineWidgetConfig } from "@medusajs/admin-sdk";
-import type { AdminProduct, DetailWidgetProps } from "@medusajs/framework/types";
+import type {
+  AdminProduct,
+  AdminProductVariant,
+  DetailWidgetProps,
+} from "@medusajs/framework/types";
 import {
   Alert,
   Badge,
@@ -41,8 +45,26 @@ const promotedLabel = (promoted: boolean | null | undefined): string => {
   return promoted ? "yes" : "no";
 };
 
+/**
+ * A product detail page never hands a widget its variants.
+ *
+ * The dashboard loads the product for `product.details.*` with
+ * `PRODUCT_DETAIL_FIELDS = getLinkedFields("product", "*categories,*shipping_profile,-variants")`
+ * (see `@medusajs/dashboard/src/routes/products/product-detail/constants.ts`).
+ * The `-variants` there is an explicit exclusion: the page fetches the variant
+ * table separately with `useProductVariants`. So `data.variants` is `undefined`
+ * here, this widget's SKU list was always empty, and the `skus.length === 0`
+ * guard below returned `null` on every product - the widget never appeared at
+ * all. It fetches its own variants now, the same way the dashboard's own
+ * variant section does, and still prefers `data.variants` if a future dashboard
+ * version starts passing it.
+ */
+const VARIANT_FETCH_LIMIT = 200;
+
 const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) => {
-  const variants = useMemo(() => data.variants ?? [], [data.variants]);
+  const [variants, setVariants] = useState<AdminProductVariant[]>(
+    () => (data.variants ?? []) as AdminProductVariant[],
+  );
   const skus = useMemo(
     () => [
       ...new Set(
@@ -54,6 +76,37 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
 
   const [offers, setOffers] = useState<OfferRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [variantsLoading, setVariantsLoading] = useState(!data.variants);
+
+  useEffect(() => {
+    if (data.variants) {
+      setVariants(data.variants as AdminProductVariant[]);
+      setVariantsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setVariantsLoading(true);
+    sdk.admin.product
+      .listVariants(data.id, { fields: "id,title,sku", limit: VARIANT_FETCH_LIMIT })
+      .then((response) => {
+        if (!cancelled) {
+          setVariants(response.variants ?? []);
+          setVariantsLoading(false);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setVariantsLoading(false);
+          toast.error(
+            error instanceof Error ? error.message : "Could not load this product's variants.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [data.id, data.variants]);
   const [busySku, setBusySku] = useState<string | undefined>();
   const [detail, setDetail] = useState<OfferDetailResponse | undefined>();
 
@@ -110,8 +163,10 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
   };
 
   // No SKUs means nothing can ever map to an Allegro offer - render nothing
-  // rather than an empty panel on every SKU-less product.
-  if (skus.length === 0) {
+  // rather than an empty panel on every SKU-less product. Only once the variant
+  // fetch has settled, though: bailing out before that is what kept this widget
+  // off the page entirely.
+  if (!variantsLoading && skus.length === 0) {
     return null;
   }
 
@@ -127,7 +182,7 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
         </div>
       </div>
 
-      {loading ? (
+      {loading || variantsLoading ? (
         <div className="px-6 py-4">
           <Text size="small">Loading...</Text>
         </div>
