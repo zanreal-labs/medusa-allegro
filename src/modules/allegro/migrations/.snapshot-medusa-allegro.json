@@ -1346,6 +1346,38 @@
           "enumItems": [],
           "mappedType": "text"
         },
+        "price_amount": {
+          "name": "price_amount",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "price_currency": {
+          "name": "price_currency",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
         "price_mode_new": {
           "name": "price_mode_new",
           "type": "text",
@@ -1741,6 +1773,22 @@
           "comment": null,
           "enumItems": [],
           "mappedType": "boolean"
+        },
+        "pricing_mode": {
+          "name": "pricing_mode",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
         },
         "price_sync_enabled": {
           "name": "price_sync_enabled",

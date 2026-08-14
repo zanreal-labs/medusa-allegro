@@ -633,6 +633,7 @@ describe("getPublicOptions", () => {
       marketplaceId: "allegro-pl",
       ordersSyncDisabled: false,
       priceSyncDisabled: false,
+      pricingMode: "automation_rule",
       redirectPath: "/admin/allegro/oauth/callback",
       salesChannelId: undefined,
       salesChannelName: undefined,
@@ -920,7 +921,7 @@ describe("getConfigFieldStates", () => {
         persistedValue: "admin-marketplace",
         wiringCritical: true,
       });
-      expect(states).toHaveLength(8);
+      expect(states).toHaveLength(9);
     } finally {
       if (previous === undefined) {
         delete process.env.ALLEGRO_MARKETPLACE_ID;

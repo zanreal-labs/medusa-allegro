@@ -13,6 +13,7 @@ import type {
   AllegroOrderEventStats,
   AllegroSettableFulfillmentStatus,
   AssignOfferPriceAutomationParams,
+  ChangeOfferPriceParams,
   ChangeOfferQuantityParams,
   CheckoutFormInvoices,
   CreatedCheckoutFormInvoice,
@@ -26,10 +27,13 @@ import type {
   OfferPriceAutomationState,
   OfferPriceAutomationTaskCount,
   OfferPriceAutomationTaskReport,
+  OfferPriceChangeCommandReport,
+  OfferPriceChangeTaskReport,
   OfferQuantityCommandReport,
   OfferQuantityTaskReport,
   OfferPromoOptions,
   PersistedToken,
+  RemoveOfferPriceAutomationParams,
 } from "./types";
 import { buildAllegroUserAgent } from "./user-agent";
 
@@ -337,6 +341,131 @@ export class AllegroClient {
         offerCriteria: [{ offers: [{ id: params.offerId }], type: "CONTAINS_OFFERS" }],
       },
     });
+  }
+
+  /**
+   * POST /sale/offer-price-automation-commands with a `remove` modification -
+   * take the price-automation rule OFF one offer, for one marketplace.
+   *
+   * The same async batch resource as `assignOfferPriceAutomation`, with the other
+   * arm of the `modification` union, and the same 403-on-missing-write-scope
+   * behaviour. No rule id is sent, because an offer carries at most one rule per
+   * marketplace and Allegro removes whichever it is.
+   *
+   * Fixed-price mode is the only caller: a Buy Now price written to an offer that
+   * still has a rule attached does not survive the rule's next recalculation, so
+   * the rule has to come off before the price goes on. Verified against Allegro's
+   * OpenAPI document, https://developer.allegro.pl/swagger.yaml, schema
+   * `OfferAutomaticPricingModificationRemove` (verbatim fragment):
+   *
+   *   OfferAutomaticPricingModificationRemove:
+   *     type: object
+   *     properties:
+   *       remove:
+   *         type: array
+   *         items:
+   *           type: object
+   *           required: [marketplace]
+   *           properties:
+   *             marketplace:
+   *               type: object
+   *               required: [id]
+   *               properties:
+   *                 id: { $ref: '#/components/schemas/MarketplaceId' }
+   */
+  removeOfferPriceAutomation(
+    params: RemoveOfferPriceAutomationParams,
+  ): Promise<OfferPriceAutomationCommandReport> {
+    const marketplaceId = params.marketplaceId ?? ALLEGRO_DEFAULT_MARKETPLACE_ID;
+    const id = params.commandId ?? crypto.randomUUID();
+    return this.request("POST", "/sale/offer-price-automation-commands", {
+      body: {
+        id,
+        modification: { remove: [{ marketplace: { id: marketplaceId } }] },
+        offerCriteria: [{ offers: [{ id: params.offerId }], type: "CONTAINS_OFFERS" }],
+      },
+    });
+  }
+
+  /**
+   * PUT /sale/offer-price-change-commands/{commandId} - set one offer's Buy Now
+   * price to an exact amount.
+   *
+   * The write behind fixed-price mode. Async and batch-shaped like its siblings:
+   * Allegro answers 201 with a `GeneralReport` and processes the change in the
+   * background, so resolve the outcome with `pollOfferPriceChangeCommand`.
+   * Requires `allegro:api:sale:offers:write` - the same scope the rule assignment
+   * needs, and already part of this plugin's default scope string, so no
+   * reconnect is needed to move a store to this mode.
+   *
+   * Only `FIXED_PRICE` is sent. Verified against
+   * https://developer.allegro.pl/swagger.yaml, schemas `OfferPriceChangeCommand`
+   * and `PriceModificationFixedPrice`: `modification.type` is the discriminator,
+   * `price` is a `Price` ({ amount: string, currency }), and `marketplaceId` is a
+   * property of the modification (omitted means the offer's base marketplace).
+   */
+  changeOfferPrice(params: ChangeOfferPriceParams): Promise<OfferPriceChangeCommandReport> {
+    return this.request(
+      "PUT",
+      `/sale/offer-price-change-commands/${encodeURIComponent(params.commandId)}`,
+      {
+        body: {
+          modification: {
+            ...(params.marketplaceId ? { marketplaceId: params.marketplaceId } : {}),
+            price: params.price,
+            type: "FIXED_PRICE",
+          },
+          offerCriteria: [{ offers: [{ id: params.offerId }], type: "CONTAINS_OFFERS" }],
+        },
+      },
+    );
+  }
+
+  /**
+   * GET /sale/offer-price-change-commands/{commandId} - status + summary of a
+   * submitted price-change command. Same `GeneralReport` shape, and therefore the
+   * same terminal test, as the automation command.
+   */
+  getOfferPriceChangeCommand(commandId: string): Promise<OfferPriceChangeCommandReport> {
+    return this.request("GET", `/sale/offer-price-change-commands/${encodeURIComponent(commandId)}`);
+  }
+
+  /**
+   * GET /sale/offer-price-change-commands/{commandId}/tasks - the per-offer task
+   * results, used to surface why one offer's price change failed.
+   */
+  getOfferPriceChangeCommandTasks(
+    commandId: string,
+    params: { limit?: number; offset?: number } = {},
+  ): Promise<OfferPriceChangeTaskReport> {
+    return this.request(
+      "GET",
+      `/sale/offer-price-change-commands/${encodeURIComponent(commandId)}/tasks`,
+      { query: { limit: params.limit, offset: params.offset } },
+    );
+  }
+
+  /**
+   * Poll `getOfferPriceChangeCommand` to terminal, or to the budget. Same
+   * contract and same defaults as `pollOfferPriceAutomationCommand`: the returned
+   * report failing `isCommandTerminal` means the caller timed out and must treat
+   * the command as still pending rather than as a failure.
+   */
+  async pollOfferPriceChangeCommand(
+    commandId: string,
+    opts: { intervalMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+  ): Promise<OfferPriceChangeCommandReport> {
+    const intervalMs = opts.intervalMs ?? 750;
+    const timeoutMs = opts.timeoutMs ?? 15_000;
+    const sleep = opts.sleep ?? ((ms: number) => delay(ms));
+    const deadline = Date.now() + timeoutMs;
+    let report = await this.getOfferPriceChangeCommand(commandId);
+    // Bounded status poll; the awaits are deliberately sequential.
+    while (!AllegroClient.isCommandTerminal(report) && Date.now() < deadline) {
+      await sleep(intervalMs);
+      report = await this.getOfferPriceChangeCommand(commandId);
+    }
+    return report;
   }
 
   /**

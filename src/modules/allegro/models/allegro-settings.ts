@@ -92,6 +92,22 @@ const AllegroSettings = model.define("allegro_settings", {
   marketplace_id: model.text().nullable(),
   /** When the order event journal is drained into Medusa orders. Defaults OFF. */
   orders_sync_enabled: model.boolean().default(false),
+  /**
+   * How this store prices its Allegro offers: `monitor`, `automation_rule` or
+   * `fixed_price` (see `src/lib/pricing-mode.ts` for what each one writes).
+   *
+   * Persisted counterpart of the `pricingMode` plugin option. `null` falls back
+   * to that option, which itself defaults to `automation_rule` - the behaviour
+   * this plugin had before the mode existed, so an upgrade never silently changes
+   * what a store writes.
+   *
+   * Text rather than an enum column on purpose: the valid set is enforced in one
+   * place (`isPricingMode`, checked by the write route and by the option
+   * resolver), and a database enum would need a migration every time the set
+   * moves. A value that is not a known mode reads as the default at runtime
+   * rather than throwing on every sync run.
+   */
+  pricing_mode: model.text().nullable(),
   /** When price-automation rules and bounds are written to Allegro. Defaults OFF. */
   price_sync_enabled: model.boolean().default(false),
   /**

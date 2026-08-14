@@ -3,6 +3,7 @@ import {
   automationRulePromotedEnvOverride,
   automationRuleStandardEnvOverride,
   changeCapEnvOverride,
+  pricingModeEnvOverride,
   DEFAULT_REDIRECT_PATH,
   DEFAULT_SCOPES,
   isPriceSyncDisabledByEnv,
@@ -219,5 +220,45 @@ describe("changeCapEnvOverride", () => {
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "-5" })).toBeUndefined();
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "1.5" })).toBeUndefined();
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "not-a-number" })).toBeUndefined();
+  });
+});
+
+describe("the pricing mode option", () => {
+  it("defaults to the behaviour this plugin had before the mode existed", () => {
+    expect(resolveAllegroOptions(validOptions()).pricingMode).toBe("automation_rule");
+  });
+
+  it("accepts each of the three modes", () => {
+    for (const mode of ["monitor", "automation_rule", "fixed_price"] as const) {
+      expect(resolveAllegroOptions({ ...validOptions(), pricingMode: mode }).pricingMode).toBe(mode);
+    }
+  });
+
+  it("fails loudly at boot on a mode that does not exist", () => {
+    // Loud here, unlike the environment lock: a value in `medusa-config.ts` is
+    // something a developer typed once and can fix, and running a store on a
+    // different pricing strategy than the config file states is the kind of
+    // surprise every other option check in this file exists to prevent.
+    expect(() =>
+      resolveAllegroOptions({ ...validOptions(), pricingMode: "fixed" as never }),
+    ).toThrow(/must be one of monitor, automation_rule, fixed_price/);
+  });
+});
+
+describe("pricingModeEnvOverride", () => {
+  it("locks the mode when the variable names a real one", () => {
+    expect(pricingModeEnvOverride({ ALLEGRO_PRICING_MODE: "monitor" })).toBe("monitor");
+  });
+
+  it("is absent when the variable is unset or blank", () => {
+    expect(pricingModeEnvOverride({})).toBeUndefined();
+    expect(pricingModeEnvOverride({ ALLEGRO_PRICING_MODE: "  " })).toBeUndefined();
+  });
+
+  it("reads a typo as no lock rather than throwing", () => {
+    // Evaluated on every `getSyncOptions()` call. A mistyped variable must not turn
+    // every price-sync run into a thrown error, and falling back to the chosen mode
+    // never invents one that writes more than the operator asked for.
+    expect(pricingModeEnvOverride({ ALLEGRO_PRICING_MODE: "fixed" })).toBeUndefined();
   });
 });

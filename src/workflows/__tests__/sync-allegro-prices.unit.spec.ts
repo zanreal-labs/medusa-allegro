@@ -45,6 +45,10 @@ interface CommandScript {
   inProgressFor?: string[];
   /** Offers whose command reports `completedAt` but carries no task tally at all. */
   noTallyFor?: string[];
+  /** Offers whose price-change command fails, by offer id. */
+  priceTallyFor?: Record<string, { failed: number; success: number; total: number }>;
+  /** Offers whose rule-REMOVAL command fails, by offer id. */
+  removalTallyFor?: Record<string, { failed: number; success: number; total: number }>;
 }
 
 const fakeClient = (input: {
@@ -54,8 +58,19 @@ const fakeClient = (input: {
   script?: CommandScript;
 }) => {
   const commands: { offerId: string; ruleId: string; min?: string; max?: string }[] = [];
+  /** Every fixed-price write, in order, exactly as the SDK would send it. */
+  const priceCommands: {
+    commandId: string;
+    offerId: string;
+    amount: string;
+    currency: string;
+    marketplaceId?: string;
+  }[] = [];
+  /** Every rule REMOVAL, in order. */
+  const removals: { offerId: string; marketplaceId?: string }[] = [];
   const script = input.script ?? {};
   const offerIdByCommand = new Map<string, string>();
+  const offerIdByRemoval = new Map<string, string>();
   let sequence = 0;
 
   return {
@@ -79,12 +94,34 @@ const fakeClient = (input: {
       });
       return Promise.resolve({ id: commandId });
     },
+    changeOfferPrice: (params: {
+      commandId: string;
+      offerId: string;
+      price: { amount: string; currency: string };
+      marketplaceId?: string;
+    }) => {
+      const failure = script.throwFor?.[params.offerId];
+      if (failure) {
+        return Promise.reject(failure);
+      }
+      priceCommands.push({
+        amount: params.price.amount,
+        commandId: params.commandId,
+        currency: params.price.currency,
+        marketplaceId: params.marketplaceId,
+        offerId: params.offerId,
+      });
+      offerIdByCommand.set(params.commandId, params.offerId);
+      return Promise.resolve({ id: params.commandId });
+    },
     commands,
     getOffer: (offerId: string) =>
       Promise.resolve(
         (input.offers ?? []).find((offer) => offer.id === offerId) ?? offerFixture({ id: offerId }),
       ),
     getOfferPriceAutomationCommandTasks: () =>
+      Promise.resolve({ tasks: [{ message: "rejected by Allegro", status: "FAIL" as const }] }),
+    getOfferPriceChangeCommandTasks: () =>
       Promise.resolve({ tasks: [{ message: "rejected by Allegro", status: "FAIL" as const }] }),
     listOffers: () =>
       Promise.resolve({
@@ -98,7 +135,32 @@ const fakeClient = (input: {
       }
       return Promise.resolve({ rules: input.rules ?? ACCOUNT_RULES });
     },
+    pollOfferPriceChangeCommand: (commandId: string) => {
+      const offerId = offerIdByCommand.get(commandId) ?? "";
+      return Promise.resolve({
+        completedAt: "2026-06-01T00:00:00.000Z",
+        id: commandId,
+        taskCount: script.priceTallyFor?.[offerId] ?? { failed: 0, success: 1, total: 1 },
+      });
+    },
+    priceCommands,
+    removals,
+    removeOfferPriceAutomation: (params: { offerId: string; marketplaceId?: string }) => {
+      sequence += 1;
+      const commandId = `rm-${sequence}`;
+      offerIdByRemoval.set(commandId, params.offerId);
+      removals.push({ marketplaceId: params.marketplaceId, offerId: params.offerId });
+      return Promise.resolve({ id: commandId });
+    },
     pollOfferPriceAutomationCommand: (commandId: string) => {
+      const removedOffer = offerIdByRemoval.get(commandId);
+      if (removedOffer !== undefined) {
+        return Promise.resolve({
+          completedAt: "2026-06-01T00:00:00.000Z",
+          id: commandId,
+          taskCount: script.removalTallyFor?.[removedOffer] ?? { failed: 0, success: 1, total: 1 },
+        });
+      }
       const offerId = offerIdByCommand.get(commandId) ?? "";
       if (script.pendingFor?.includes(offerId)) {
         return Promise.resolve({ completedAt: null, id: commandId });
@@ -773,7 +835,7 @@ describe("syncAllegroPrices: fail-loud rule resolution", () => {
   it("stays inert with no automationRules option, and says so", async () => {
     const { client, summary } = await runWith({ syncOptions: { automationRules: undefined } });
     expect(client.commands).toEqual([]);
-    expect(summary.error).toContain("`automationRules` option is not configured");
+    expect(summary.error).toContain("no two distinct rule names are configured");
   });
 });
 
@@ -1288,5 +1350,341 @@ describe("syncAllegroPrices: the kill switch is re-read mid-run", () => {
     await syncAllegroPrices(container as never);
 
     expect(client.commands).toHaveLength(1);
+  });
+});
+
+describe("syncAllegroPrices: monitor mode", () => {
+  /** Monitor needs no rule names at all, so the fixture states none. */
+  const monitoring = (over: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      live: [offerFixture({ id: "o1" })],
+      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
+      ...over,
+      syncOptions: {
+        automationRules: undefined,
+        pricingMode: "monitor",
+        srpMetadataKey: "srp",
+        ...over.syncOptions,
+      },
+    });
+
+  it("writes nothing to Allegro and reports the bounds it computed", async () => {
+    const { client, container } = monitoring();
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.commands).toEqual([]);
+    expect(client.priceCommands).toEqual([]);
+    expect(client.removals).toEqual([]);
+    expect(summary.mode).toBe("monitor");
+    expect(summary.scanned).toBe(1);
+    expect(summary.monitored).toBe(1);
+    expect(summary.synced).toBe(0);
+  });
+
+  it("runs without any automation rule names, rather than reporting itself inert", async () => {
+    // The whole point of naming this mode: with no rules configured the loop used
+    // to report an error and do nothing. A store that has DECIDED not to use rules
+    // is not misconfigured.
+    const { allegro, container } = monitoring();
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary.error).toBeUndefined();
+    expect(allegro.states.get("prices")?.status).toBe("ok");
+  });
+
+  it("counts an offer priced below its break-even floor", async () => {
+    // Break-even on a 100 net cost at 10% commission is 123 gross / 0.9 = 136.67,
+    // so an offer listed at 120 is under water.
+    const { container } = monitoring({
+      live: [
+        offerFixture({
+          id: "o1",
+          sellingMode: { price: { amount: "120.00", currency: "PLN" } },
+        }),
+      ],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary.belowFloor).toBe(1);
+    expect(summary.aboveCeiling).toBe(0);
+  });
+
+  it("counts an offer priced above its SRP ceiling", async () => {
+    const { container } = monitoring({
+      live: [
+        offerFixture({
+          id: "o1",
+          sellingMode: { price: { amount: "900.00", currency: "PLN" } },
+        }),
+      ],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary.aboveCeiling).toBe(1);
+    expect(summary.belowFloor).toBe(0);
+  });
+
+  it("reports the same skip reasons an armed run would, so the report is honest", async () => {
+    const { container } = monitoring({ noCosts: true });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary.skippedCounts["missing-break-even"]).toBe(1);
+    expect(summary.monitored).toBe(0);
+  });
+
+  it("runs even while the price-write toggle is disarmed, because it cannot write", async () => {
+    const { client, container } = monitoring({ priceSyncDisabled: true });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary.skipped).toBeUndefined();
+    expect(summary.monitored).toBe(1);
+    expect(client.commands).toEqual([]);
+    expect(client.priceCommands).toEqual([]);
+  });
+
+  it("refuses an operator's manual push, rather than writing one offer anyway", async () => {
+    const { client, container } = monitoring();
+
+    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("skipped");
+    expect(result.message).toContain("monitor");
+    expect(client.commands).toEqual([]);
+    expect(client.priceCommands).toEqual([]);
+  });
+});
+
+describe("syncAllegroPrices: fixed-price mode", () => {
+  /**
+   * A store pricing from Medusa. The variant's own price is 300 PLN, inside the
+   * 136.67 floor and the 500 SRP ceiling the other fixtures already establish.
+   */
+  const fixedPrice = (over: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      live: [offerFixture({ id: "o1" })],
+      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
+      variants: [
+        { id: "v1", metadata: { srp: 500 }, prices: [{ amount: 300 }], sku: "SKU-1" },
+      ],
+      ...over,
+      syncOptions: {
+        automationRules: undefined,
+        pricingMode: "fixed_price",
+        srpMetadataKey: "srp",
+        ...over.syncOptions,
+      },
+    });
+
+  it("pushes the Medusa variant price, and attaches no rule", async () => {
+    const { client, container } = fixedPrice();
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.priceCommands).toEqual([
+      {
+        amount: "300.00",
+        commandId: expect.any(String),
+        currency: "PLN",
+        marketplaceId: "allegro-pl",
+        offerId: "o1",
+      },
+    ]);
+    expect(client.commands).toEqual([]);
+    expect(summary.synced).toBe(1);
+    expect(summary.mode).toBe("fixed_price");
+  });
+
+  it("needs no automation rule names configured", async () => {
+    const { container } = fixedPrice();
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary.error).toBeUndefined();
+  });
+
+  it("removes an attached rule BEFORE setting the price", async () => {
+    const { client, container } = fixedPrice({
+      live: [
+        offerFixture({
+          id: "o1",
+          sellingMode: {
+            price: { amount: "199.99", currency: "PLN" },
+            priceAutomation: { rule: { id: "rule-standard" } },
+          },
+        }),
+      ],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.removals).toEqual([{ marketplaceId: "allegro-pl", offerId: "o1" }]);
+    expect(client.priceCommands).toHaveLength(1);
+    expect(summary.synced).toBe(1);
+  });
+
+  it("does not set the price when the rule removal did not confirm", async () => {
+    // A half-applied pair - rule still on, price changed - is exactly the fight
+    // with Allegro's engine the ordering exists to avoid.
+    const { client, container } = fixedPrice({
+      live: [
+        offerFixture({
+          id: "o1",
+          sellingMode: {
+            price: { amount: "199.99", currency: "PLN" },
+            priceAutomation: { rule: { id: "rule-standard" } },
+          },
+        }),
+      ],
+      script: { removalTallyFor: { o1: { failed: 1, success: 0, total: 1 } } },
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.priceCommands).toEqual([]);
+    expect(summary.synced).toBe(0);
+    expect(summary.failed).toBe(1);
+  });
+
+  it("refuses a Medusa price below the break-even floor rather than clamping it", async () => {
+    const { client, container } = fixedPrice({
+      variants: [{ id: "v1", metadata: { srp: 500 }, prices: [{ amount: 50 }], sku: "SKU-1" }],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.priceCommands).toEqual([]);
+    expect(summary.skippedCounts["price-outside-bounds"]).toBe(1);
+  });
+
+  it("refuses a Medusa price above the SRP ceiling", async () => {
+    const { client, container } = fixedPrice({
+      variants: [{ id: "v1", metadata: { srp: 500 }, prices: [{ amount: 900 }], sku: "SKU-1" }],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.priceCommands).toEqual([]);
+    expect(summary.skippedCounts["price-outside-bounds"]).toBe(1);
+  });
+
+  it("skips a variant with no Medusa price in the offer's currency", async () => {
+    const { client, container } = fixedPrice({
+      variants: [
+        { id: "v1", metadata: { srp: 500 }, prices: [{ amount: 300, currency: "eur" }], sku: "SKU-1" },
+      ],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.priceCommands).toEqual([]);
+    expect(summary.skippedCounts["missing-medusa-price"]).toBe(1);
+  });
+
+  it("ignores a price-list row, because a sale price is not the store's price", async () => {
+    const { client, container } = fixedPrice({
+      variants: [
+        {
+          id: "v1",
+          metadata: { srp: 500 },
+          prices: [{ amount: 199, priceListId: "plist_sale" }],
+          sku: "SKU-1",
+        },
+      ],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.priceCommands).toEqual([]);
+    expect(summary.skippedCounts["missing-medusa-price"]).toBe(1);
+  });
+
+  it("leaves an offer alone when it is already at the Medusa price with no rule", async () => {
+    const { client, container } = fixedPrice({
+      live: [
+        offerFixture({ id: "o1", sellingMode: { price: { amount: "300.00", currency: "PLN" } } }),
+      ],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.priceCommands).toEqual([]);
+    expect(summary.alreadyInSync).toBe(1);
+  });
+
+  it("records the pushed price on the audit row, and leaves the rule bounds null", async () => {
+    // `bound_floor` / `bound_ceiling` are the only memory of the price RANGE
+    // attached to an automation rule. A fixed price written into them would be
+    // read back as a range that was never attached.
+    const { allegro, container } = fixedPrice();
+
+    await syncAllegroPrices(container as never);
+
+    const [row] = allegro.pushes;
+    expect(row).toMatchObject({
+      price_amount: "300.00",
+      price_currency: "PLN",
+      price_mode_new: "fixed",
+      result: "success",
+    });
+    expect(row?.bound_floor ?? null).toBeNull();
+    expect(row?.bound_ceiling ?? null).toBeNull();
+    expect(row?.rule_name_new ?? null).toBeNull();
+  });
+
+  it("still respects the price-write kill switch", async () => {
+    const { client, container } = fixedPrice({ priceSyncDisabled: true });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(summary.skipped).toBeDefined();
+    expect(client.priceCommands).toEqual([]);
+  });
+
+  it("pushes one offer on an explicit operator action, and says what it set", async () => {
+    const { client, container } = fixedPrice();
+
+    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("synced");
+    expect(result.message).toContain("300.00 PLN");
+    expect(client.priceCommands).toHaveLength(1);
+  });
+});
+
+describe("syncAllegroPrices: a mode change between guard and claim", () => {
+  it("holds rather than writing without the kill switch it was started without", async () => {
+    // `getPricingMode` answers `monitor`, so the run is started with no
+    // price-write guard attached; `getSyncOptions` then reports a writing mode.
+    // Writing here would write past a toggle nobody consulted.
+    const client = fakeClient({ offers: [offerFixture({ id: "o1" })] });
+    const allegro = fakeAllegroService({
+      categories: CAT_RATES,
+      client,
+      offers: [
+        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+      ],
+      pushes: [],
+      states: [],
+      syncOptions: { automationRules: { ...RULES }, pricingMode: "automation_rule", srpMetadataKey: "srp" },
+    });
+    allegro.getPricingMode = () => Promise.resolve("monitor");
+    const container = fakeContainer({
+      allegro,
+      costs: fakeCostsService({ "SKU-1": 100 }),
+      variants: [{ id: "v1", metadata: { srp: 500 }, sku: "SKU-1" }],
+    });
+
+    const summary = await syncAllegroPrices(container as never);
+
+    expect(client.commands).toEqual([]);
+    expect(summary.error).toContain("the pricing mode changed");
   });
 });

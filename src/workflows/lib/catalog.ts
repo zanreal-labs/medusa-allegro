@@ -106,6 +106,17 @@ export interface CatalogVariant extends EligibleVariant {
   metadata?: Record<string, unknown> | null;
   /** Product metadata, the SRP fallback when the variant carries none. */
   productMetadata?: Record<string, unknown> | null;
+  /**
+   * The variant's own prices, one row per currency, as fixed-price mode reads
+   * them.
+   *
+   * Read here rather than in a second query because the catalogue is already
+   * being paged and the price set hangs off the variant through the pricing
+   * module's link. A row carrying a `price_list_id` is a price-list override
+   * rather than the variant's own price and is dropped by `buildVariantPriceBySku`
+   * - a sale price is not what a store means by "the Medusa price".
+   */
+  prices: { amount?: number | string | null; currency_code?: string | null; priceListId?: string | null }[];
 }
 
 /**
@@ -148,6 +159,9 @@ export const listEligibleVariants = async (
         "product_id",
         "product.metadata",
         "inventory_items.inventory_item_id",
+        "price_set.prices.amount",
+        "price_set.prices.currency_code",
+        "price_set.prices.price_list_id",
       ],
       ...(productIds ? { filters: { product_id: productIds } } : {}),
       pagination: { skip: page * PAGE_SIZE, take: PAGE_SIZE },
@@ -159,6 +173,11 @@ export const listEligibleVariants = async (
         continue;
       }
       const inventoryItems = (row.inventory_items ?? []) as { inventory_item_id?: string }[];
+      const priceRows = ((row.price_set as { prices?: unknown } | null)?.prices ?? []) as {
+        amount?: number | string | null;
+        currency_code?: string | null;
+        price_list_id?: string | null;
+      }[];
       variants.push({
         // `barcode` first, then `ean`: both exist on a Medusa variant, and a store
         // that fills in only one should still match. Matched against the offer's
@@ -170,6 +189,11 @@ export const listEligibleVariants = async (
           .filter((id): id is string => Boolean(id)),
         manageInventory: row.manage_inventory !== false,
         metadata: (row.metadata as Record<string, unknown> | null) ?? null,
+        prices: priceRows.map((price) => ({
+          amount: price.amount ?? null,
+          currency_code: price.currency_code ?? null,
+          priceListId: price.price_list_id ?? null,
+        })),
         productId: (row.product_id as string | null) ?? undefined,
         productMetadata:
           (row.product as { metadata?: Record<string, unknown> | null } | null)?.metadata ?? null,

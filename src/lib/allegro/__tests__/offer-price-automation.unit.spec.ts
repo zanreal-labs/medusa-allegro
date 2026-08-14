@@ -146,3 +146,122 @@ describe("pollOfferPriceAutomationCommand", () => {
     expect(report.completedAt).toBeNull();
   });
 });
+
+describe("removeOfferPriceAutomation", () => {
+  it("POSTs a single-offer remove command, scoped by marketplace and carrying no rule", async () => {
+    // An offer holds at most one rule per marketplace, so removal names the
+    // marketplace and Allegro removes whichever rule is there.
+    const fetchImpl: FetchMock = jest.fn(() =>
+      Promise.resolve(apiJson(201, { completedAt: null, id: "cmd-rm" })),
+    );
+
+    const report = await client(fetchImpl).removeOfferPriceAutomation({
+      commandId: "fixed-uuid",
+      marketplaceId: "allegro-cz",
+      offerId: "off-1",
+    });
+
+    expect(report.id).toBe("cmd-rm");
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/sale/offer-price-automation-commands");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      id: "fixed-uuid",
+      modification: { remove: [{ marketplace: { id: "allegro-cz" } }] },
+      offerCriteria: [{ offers: [{ id: "off-1" }], type: "CONTAINS_OFFERS" }],
+    });
+  });
+
+  it("defaults to the PL marketplace, like the assignment does", async () => {
+    const fetchImpl: FetchMock = jest.fn(() => Promise.resolve(apiJson(201, { id: "cmd-rm" })));
+
+    await client(fetchImpl).removeOfferPriceAutomation({ commandId: "u", offerId: "off-2" });
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0] as [string, RequestInit])[1].body));
+    expect(body.modification.remove[0].marketplace.id).toBe("allegro-pl");
+  });
+});
+
+describe("changeOfferPrice", () => {
+  it("PUTs a FIXED_PRICE modification on the command id", async () => {
+    const fetchImpl: FetchMock = jest.fn(() =>
+      Promise.resolve(apiJson(201, { completedAt: null, id: "cmd-price" })),
+    );
+
+    const report = await client(fetchImpl).changeOfferPrice({
+      commandId: "fixed-uuid",
+      marketplaceId: "allegro-pl",
+      offerId: "off-1",
+      price: { amount: "300.00", currency: "PLN" },
+    });
+
+    expect(report.id).toBe("cmd-price");
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    // The command id is the PATH, not a body field: this resource is a PUT.
+    expect(url).toContain("/sale/offer-price-change-commands/fixed-uuid");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(String(init.body))).toEqual({
+      modification: {
+        marketplaceId: "allegro-pl",
+        price: { amount: "300.00", currency: "PLN" },
+        type: "FIXED_PRICE",
+      },
+      offerCriteria: [{ offers: [{ id: "off-1" }], type: "CONTAINS_OFFERS" }],
+    });
+  });
+
+  it("omits the marketplace, which Allegro reads as the offer's base marketplace", async () => {
+    const fetchImpl: FetchMock = jest.fn(() => Promise.resolve(apiJson(201, { id: "c" })));
+
+    await client(fetchImpl).changeOfferPrice({
+      commandId: "u",
+      offerId: "off-2",
+      price: { amount: "10.00", currency: "PLN" },
+    });
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0] as [string, RequestInit])[1].body));
+    expect(body.modification.marketplaceId).toBeUndefined();
+  });
+
+  it("surfaces a 403 as a forbidden (write-scope-gap) error, like every other write", async () => {
+    const fetchImpl: FetchMock = jest.fn(() =>
+      Promise.resolve(apiJson(403, { errors: [{ message: "Forbidden" }] })),
+    );
+
+    await expect(
+      client(fetchImpl).changeOfferPrice({
+        commandId: "u",
+        offerId: "off-3",
+        price: { amount: "10.00", currency: "PLN" },
+      }),
+    ).rejects.toMatchObject({ httpStatus: 403 });
+    await expect(
+      client(fetchImpl).changeOfferPrice({
+        commandId: "u",
+        offerId: "off-3",
+        price: { amount: "10.00", currency: "PLN" },
+      }),
+    ).rejects.toBeInstanceOf(AllegroApiError);
+  });
+
+  it("polls the price command to terminal, on its own resource", async () => {
+    const fetchImpl: FetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(apiJson(200, { completedAt: null, id: "c" }))
+      .mockResolvedValueOnce(
+        apiJson(200, {
+          completedAt: "2026-06-01T00:00:00.000Z",
+          id: "c",
+          taskCount: { failed: 0, success: 1, total: 1 },
+        }),
+      );
+
+    const report = await client(fetchImpl).pollOfferPriceChangeCommand("c", {
+      sleep: () => Promise.resolve(),
+    });
+
+    expect(report.completedAt).toBe("2026-06-01T00:00:00.000Z");
+    const [url] = fetchImpl.mock.calls[0] as [string];
+    expect(url).toContain("/sale/offer-price-change-commands/c");
+  });
+});

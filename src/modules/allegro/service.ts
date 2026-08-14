@@ -22,6 +22,7 @@ import {
   isPriceSyncDisabledByEnv,
   isStockSyncDisabledByEnv,
   marketplaceIdEnvOverride,
+  pricingModeEnvOverride,
   resolveAllegroOptions,
   salesChannelIdEnvOverride,
   salesChannelNameEnvOverride,
@@ -35,6 +36,13 @@ import type {
   ResolvedAllegroOptions,
 } from "../../lib/options";
 import { mintOAuthState, verifyOAuthState } from "../../lib/oauth-state";
+import {
+  coercePricingMode,
+  DEFAULT_PRICING_MODE,
+  isPricingMode,
+  PRICING_MODE_VALUES,
+} from "../../lib/pricing-mode";
+import type { PricingMode } from "../../lib/pricing-mode";
 import type { OAuthStateVerification } from "../../lib/oauth-state";
 import {
   FRESH_INSTALL_SETTINGS,
@@ -121,6 +129,7 @@ export const SYNC_CLAIM_HELD = "a sync run is already in progress for this provi
  */
 export interface AllegroSettingsRow {
   id: string;
+  pricing_mode: string | null;
   price_sync_enabled: boolean;
   stock_sync_enabled: boolean;
   orders_sync_enabled: boolean;
@@ -173,7 +182,8 @@ export interface AllegroConfigFieldState {
   label: string;
   description: string;
   envVar: string;
-  kind: "text" | "number";
+  kind: "text" | "number" | "choice";
+  choices?: readonly { value: string; label: string; description: string }[];
   wiringCritical: boolean;
   persistedValue: string | number | null;
   envOverride: string | number | null;
@@ -195,6 +205,7 @@ export interface AllegroConfigFieldState {
  * actually being rejected.
  */
 export type AllegroSettingsPatch = Partial<Record<RuntimeToggleColumn, boolean>> & {
+  pricing_mode?: string | null;
   automation_rule_standard?: string | null;
   automation_rule_promoted?: string | null;
   srp_metadata_key?: string | null;
@@ -231,6 +242,8 @@ export interface AllegroSyncStateRow {
  * the engines need, and that is a property of this module.
  */
 export interface AllegroSyncOptions {
+  /** The chosen pricing strategy, and therefore what the price loop may write. */
+  pricingMode: PricingMode;
   automationRules?: { promoted: string; standard: string };
   changeCap: number;
   costsModuleKey: string;
@@ -397,6 +410,11 @@ class AllegroModuleService extends MedusaService({
       costsModuleKey: o.costsModuleKey,
       invoiceModuleKey: o.invoiceModuleKey,
       marketplaceId: (resolved.marketplaceId.effectiveValue as string | null) ?? o.marketplaceId,
+      // Coerced rather than cast: the column is free text, so a row written by an
+      // older build, by hand, or by a future mode this build does not know about
+      // must read as the default instead of steering the loop with a value it
+      // cannot honour.
+      pricingMode: coercePricingMode(resolved.pricingMode.effectiveValue),
       regionId: o.regionId,
       salesChannelId:
         typeof salesChannelId === "string" && salesChannelId ? salesChannelId : undefined,
@@ -408,6 +426,19 @@ class AllegroModuleService extends MedusaService({
         typeof srpPriceListId === "string" && srpPriceListId ? srpPriceListId : undefined,
       stockLocationIds: o.stockLocationIds,
     };
+  }
+
+  /**
+   * The pricing strategy in force right now.
+   *
+   * Its own accessor because the price loop has to know the mode BEFORE it takes
+   * the sync claim: `monitor` is not a run that writes nothing, it is a run that
+   * must not be allowed to write, and the loop reports that the same way it
+   * reports a kill switch rather than by taking a claim and then doing nothing.
+   */
+  async getPricingMode(): Promise<PricingMode> {
+    const resolved = await this.resolveAllConfigFields();
+    return coercePricingMode(resolved.pricingMode.effectiveValue);
   }
 
   // ─── Runtime toggles: the persisted, operator-flippable arming ───
@@ -600,6 +631,7 @@ class AllegroModuleService extends MedusaService({
       automationRuleStandard: automationRuleStandardEnvOverride(),
       changeCap: changeCapEnvOverride(),
       marketplaceId: marketplaceIdEnvOverride(),
+      pricingMode: pricingModeEnvOverride(),
       salesChannelId: salesChannelIdEnvOverride(),
       salesChannelName: salesChannelNameEnvOverride(),
       srpMetadataKey: srpMetadataKeyEnvOverride(),
@@ -621,6 +653,7 @@ class AllegroModuleService extends MedusaService({
       automationRuleStandard: o.automationRules?.standard ?? null,
       changeCap: o.changeCap,
       marketplaceId: o.marketplaceId,
+      pricingMode: o.pricingMode ?? DEFAULT_PRICING_MODE,
       salesChannelId: o.salesChannelId ?? null,
       salesChannelName: o.salesChannelName ?? null,
       srpMetadataKey: o.srpMetadataKey ?? null,
@@ -707,6 +740,20 @@ class AllegroModuleService extends MedusaService({
     const touchesConfig = CONFIG_FIELDS.some((field) => field.column in patch);
     if (!touchesConfig) {
       return;
+    }
+
+    // Checked here as well as in the write route, because the service is the
+    // module's public surface: a workflow or another plugin calling
+    // `updateSettings` directly must not be able to persist a mode the loop
+    // cannot honour, and "unknown mode silently means automation_rule" is a much
+    // worse answer at the moment of the write than it is at read time.
+    if ("pricing_mode" in patch && patch.pricing_mode !== null) {
+      if (!isPricingMode(patch.pricing_mode)) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          `\`pricing_mode\` must be one of ${PRICING_MODE_VALUES.join(", ")}, or null to fall back to the configured default (got "${String(patch.pricing_mode)}").`,
+        );
+      }
     }
 
     const current = await this.resolveAllConfigFields();

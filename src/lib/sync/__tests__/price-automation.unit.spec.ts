@@ -1,6 +1,7 @@
 import {
   boundsEqual,
   computeDrift,
+  decideFixedPriceAction,
   decideSyncAction,
   emptySkipCounts,
   evaluateSyncEligibility,
@@ -477,5 +478,97 @@ describe("decideSyncAction", () => {
         rules: RULES,
       }),
     ).toEqual({ act: true, expectedRule: "Store Sale", kind: "switch" });
+  });
+});
+
+describe("decideFixedPriceAction", () => {
+  /** The bounds `evaluateSyncEligibility` hands over: the floor is already rounded up. */
+  const BOUNDS = { ceiling: 500, floor: 137 };
+
+  it("sets the price on an offer with no rule attached", () => {
+    expect(
+      decideFixedPriceAction({ bounds: BOUNDS, desiredPrice: 300, observedPrice: 199.99 }),
+    ).toEqual({ act: true, kind: "price" });
+  });
+
+  it("removes the rule first when one is attached", () => {
+    // Allegro's engine recalculates on its own schedule, so a price pushed under a
+    // live rule does not survive.
+    expect(
+      decideFixedPriceAction({
+        attachedRuleId: "rule-standard",
+        bounds: BOUNDS,
+        desiredPrice: 300,
+        observedPrice: 199.99,
+      }),
+    ).toEqual({ act: true, kind: "detach-and-price" });
+  });
+
+  it("leaves an offer alone once it already carries the price", () => {
+    expect(
+      decideFixedPriceAction({ bounds: BOUNDS, desiredPrice: 300, observedPrice: 300 }),
+    ).toEqual({ act: false });
+  });
+
+  it("writes rather than assumes when the current price could not be read", () => {
+    // Fail-closed and idempotent: re-setting a price that already matches costs one
+    // command, whereas assuming a match leaves a wrong price up for ever.
+    expect(decideFixedPriceAction({ bounds: BOUNDS, desiredPrice: 300 })).toEqual({
+      act: true,
+      kind: "price",
+    });
+  });
+
+  it("still removes the rule on an offer already at the right price", () => {
+    // The price matching is not the whole story: while the rule is attached, the
+    // engine owns the price and will move it again.
+    expect(
+      decideFixedPriceAction({
+        attachedRuleId: "rule-standard",
+        bounds: BOUNDS,
+        desiredPrice: 300,
+        observedPrice: 300,
+      }),
+    ).toEqual({ act: true, kind: "detach-and-price" });
+  });
+
+  it("refuses a price below the break-even floor rather than clamping it", () => {
+    // Clamping sells at a price the store never set; pushing sells below cost.
+    // Refusing is the only answer that is neither.
+    expect(
+      decideFixedPriceAction({ bounds: BOUNDS, desiredPrice: 50, observedPrice: 199.99 }),
+    ).toEqual({ act: false, refuse: "price-outside-bounds" });
+  });
+
+  it("refuses a price above the SRP ceiling", () => {
+    expect(
+      decideFixedPriceAction({ bounds: BOUNDS, desiredPrice: 900, observedPrice: 199.99 }),
+    ).toEqual({ act: false, refuse: "price-outside-bounds" });
+  });
+
+  it("compares against the ROUNDED floor, so the two modes agree on where it is", () => {
+    // `roundAutomationFloor` rounds a break-even UP to the next whole unit, and it
+    // is what an automation rule's range would have been given. Applying it here
+    // too means a price the rule path would have refused cannot slip through this
+    // one, whichever of the two the caller handed over.
+    const floor = 136.666;
+    expect(roundAutomationFloor(floor)).toBe(137);
+    expect(
+      decideFixedPriceAction({ bounds: { ceiling: 500, floor }, desiredPrice: 136.99 }),
+    ).toEqual({ act: false, refuse: "price-outside-bounds" });
+    expect(
+      decideFixedPriceAction({ bounds: { ceiling: 500, floor }, desiredPrice: 137 }),
+    ).toEqual({ act: true, kind: "price" });
+  });
+
+  it("accepts a price exactly on either bound", () => {
+    expect(decideFixedPriceAction({ bounds: BOUNDS, desiredPrice: 137 })).toEqual({
+      act: true,
+      kind: "price",
+    });
+    expect(decideFixedPriceAction({ bounds: BOUNDS, desiredPrice: 500 })).toEqual({
+      act: true,
+      kind: "price",
+    });
   });
 });

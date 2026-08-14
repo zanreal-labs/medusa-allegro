@@ -23,7 +23,10 @@ import {
 } from "../lib/sync/failure-state";
 import type { FailureState } from "../lib/sync/failure-state";
 import { formatAmount, parseAmount } from "../lib/sync/money";
+import { modeNeedsAutomationRules, modeWrites } from "../lib/pricing-mode";
+import type { PricingMode } from "../lib/pricing-mode";
 import {
+  decideFixedPriceAction,
   decideSyncAction,
   emptySkipCounts,
   evaluateSyncEligibility,
@@ -39,6 +42,7 @@ import type {
   SyncBounds,
   SyncSkipReason,
 } from "../lib/sync/price-automation";
+import { ALLEGRO_MODULE } from "../modules/allegro";
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
 import type { AllegroSyncOptions } from "../modules/allegro/service";
 import type AllegroModuleService from "../modules/allegro/service";
@@ -50,9 +54,11 @@ import {
   buildBreakEvenResolver,
   buildCategoryRates,
   buildSrpBySku,
+  buildVariantPriceBySku,
   resolveCommissionFraction,
   resolveSrp,
   resolveCostsService,
+  resolveVariantPrice,
   warnOnMissingSrpSource,
 } from "./lib/pricing";
 import { runUnderSyncClaim } from "./lib/run";
@@ -61,12 +67,31 @@ import { warnOnUnscopedCatalogue } from "./lib/scope-warnings";
 /**
  * The armed price-sync loop.
  *
- * Keeps every eligible linked ACTIVE offer on the rule its promotion state calls
- * for, attaching the rule where it is missing, switching it on a promotion flip,
- * and re-asserting the `[break-even, SRP]` bounds whenever they drift from the
- * last successfully pushed ones. Allegro does not expose an attached rule's price
- * range, so `allegro_price_push` is the only bounds memory there is (see
- * `fetchLastSuccessfulBounds` and `decideSyncAction`).
+ * ## The three pricing modes
+ *
+ * What this loop does at all is a SETTING, not a property of the code (see
+ * `src/lib/pricing-mode.ts`). The mode is resolved before the claim is taken, and
+ * it decides which of three shapes the run has:
+ *
+ * - **`monitor`** works out the `[break-even, SRP]` bounds for every eligible
+ *   linked offer, counts how many are currently priced outside them, and sends
+ *   NOTHING to Allegro. It is a named, chosen state rather than the accidental
+ *   one a disarmed writer produces, and it needs no automation rules configured.
+ * - **`automation_rule`** keeps every eligible offer on the rule its promotion
+ *   state calls for, attaching the rule where it is missing, switching it on a
+ *   promotion flip, and re-asserting the bounds whenever they drift from the last
+ *   successfully pushed ones. Allegro's engine picks the number inside the range.
+ *   Allegro does not expose an attached rule's price range, so
+ *   `allegro_price_push` is the only bounds memory there is (see
+ *   `fetchLastSuccessfulBounds` and `decideSyncAction`).
+ * - **`fixed_price`** sets each offer's Buy Now price to the price the variant
+ *   already carries in Medusa, removing any attached rule first because a rule
+ *   would recalculate straight over it. The bounds still gate the write: a Medusa
+ *   price outside them is refused and counted, never clamped.
+ *
+ * The floor and the ceiling apply in every mode. They are the safety story of the
+ * whole plugin, and a mode that skipped them would be a mode that can sell below
+ * cost.
  *
  * ## The write-scope gap, and why it is not a failure
  *
@@ -100,10 +125,21 @@ import { warnOnUnscopedCatalogue } from "./lib/scope-warnings";
  */
 
 export interface PriceSyncSummary {
+  /** The pricing mode this run honoured, so a summary is never ambiguous about it. */
+  mode: PricingMode;
   /** Set when the run did nothing. */
   skipped?: string;
   /** Linked offers considered this run. */
   scanned: number;
+  /**
+   * Monitor mode only: offers whose floor and ceiling both resolved, and how many
+   * of those are currently priced outside them. This is what makes monitor a
+   * useful state rather than an idle one - it is the report you read before
+   * arming a mode that writes.
+   */
+  monitored: number;
+  belowFloor: number;
+  aboveCeiling: number;
   /** Commands Allegro confirmed applied. */
   synced: number;
   /** Offers already on the right rule with the right recorded bounds. */
@@ -127,11 +163,15 @@ export interface PriceSyncSummary {
   error?: string;
 }
 
-export const emptyPriceSyncSummary = (): PriceSyncSummary => ({
+export const emptyPriceSyncSummary = (mode: PricingMode): PriceSyncSummary => ({
+  aboveCeiling: 0,
   alreadyInSync: 0,
+  belowFloor: 0,
   capped: false,
   conflicted: 0,
   failed: 0,
+  mode,
+  monitored: 0,
   pending: 0,
   quarantined: [],
   scanned: 0,
@@ -166,9 +206,23 @@ interface OfferPlan {
   observedRuleId?: string;
   observedRuleName?: string;
   observedMode: PriceMode;
-  expectedRule: string;
-  expectedRuleId: string;
-  kind: "attach" | "switch" | "bounds";
+  /**
+   * Automation-rule mode only: the rule to end up on. Absent in fixed-price
+   * mode, where the point of the write is that no rule governs the offer.
+   */
+  expectedRule?: string;
+  expectedRuleId?: string;
+  /** Fixed-price mode only: the exact Buy Now price to set. */
+  price?: number;
+  /**
+   * What the write is:
+   *
+   * - `attach` / `switch` / `bounds` - automation-rule mode (see `decideSyncAction`).
+   * - `price` - fixed-price mode, no rule in the way.
+   * - `detach-and-price` - fixed-price mode on an offer that still carries a
+   *   rule: remove it first, or Allegro's engine recalculates over the new price.
+   */
+  kind: "attach" | "switch" | "bounds" | "price" | "detach-and-price";
 }
 
 type CommandOutcome =
@@ -278,62 +332,205 @@ const describeCommandFailure = async (
 };
 
 /**
- * Insert the audit row, issue the command, poll to terminal, finalize the row.
+ * What a terminal command report proves, read the same way for every resource.
  *
- * The audit row goes in FIRST, before the command. A push this plugin cannot
- * record is not one it wants to make: the row is the only bounds memory, so a
- * command whose bounds went unrecorded would be re-pushed on every subsequent run
- * forever. That ordering also means an audit-insert failure is a per-offer failure
- * rather than systemic - it is local to one row, and a database blip must not hold
- * the whole run.
+ * Shared by the rule-assignment and the price-change paths because both answer
+ * with Allegro's `GeneralReport` and both have exactly the same trap: success has
+ * to be asserted on POSITIVE evidence, never on the absence of a failure.
+ */
+type CommandVerdict =
+  | { kind: "success" }
+  | { kind: "failed"; error: string }
+  | { kind: "pending"; error: string };
+
+/**
+ * Read a terminal report into a verdict, and the audit patch that records it.
+ *
+ * Four shapes, and three of them used to read as success:
+ *
+ * - **Not terminal within the poll budget.** Submitted, unconfirmed. NOT a
+ *   failure - a slow command must not build a streak toward quarantining a
+ *   healthy offer - and crucially not a success either, so the row stays
+ *   invisible to the bounds memory and the next run re-pushes, which is
+ *   idempotent.
+ * - **Terminal with failed tasks.** A real per-offer failure; the task report
+ *   carries the reason.
+ * - **Terminal with no task tally at all.** Nothing is confirmed, so it settles
+ *   as pending and the next run re-checks.
+ * - **Terminal with a tally that scheduled nothing** (`total: 0`, the offer
+ *   criteria matched no offer). A command that scheduled no task did not change
+ *   anything, which is a failure worth surfacing rather than a quiet success.
+ */
+const interpretCommandReport = async (
+  terminal: { completedAt?: string | null; taskCount?: { failed: number; success: number; total: number } },
+  commandId: string,
+  describeFailure: () => Promise<string>,
+): Promise<{ verdict: CommandVerdict; patch: Record<string, unknown> }> => {
+  if (!AllegroClient.isCommandTerminal(terminal)) {
+    return {
+      patch: {
+        allegro_command_id: commandId,
+        error: "not terminal within the poll budget",
+        result: "skipped",
+      },
+      verdict: { error: "command still pending", kind: "pending" },
+    };
+  }
+  const tally = terminal.taskCount;
+  if (tally && tally.failed > 0) {
+    const detail = await describeFailure();
+    return {
+      patch: { allegro_command_id: commandId, error: detail },
+      verdict: { error: detail, kind: "failed" },
+    };
+  }
+  if (!tally) {
+    return {
+      patch: {
+        allegro_command_id: commandId,
+        error: "command reported terminal without a task tally, so nothing is confirmed",
+        result: "skipped",
+      },
+      verdict: { error: "command terminal without a task tally", kind: "pending" },
+    };
+  }
+  if (tally.success < 1) {
+    const detail = "command completed without scheduling a task for the offer";
+    return {
+      patch: { allegro_command_id: commandId, error: detail },
+      verdict: { error: detail, kind: "failed" },
+    };
+  }
+  return {
+    patch: { allegro_command_id: commandId, error: null, result: "success" },
+    verdict: { kind: "success" },
+  };
+};
+
+/**
+ * Classify a thrown error into an outcome, and the line the audit row records.
+ *
+ * Shared by both command paths: the 403 write-scope gap, an auth failure and a
+ * 429/5xx are systemic conditions about the connection rather than facts about
+ * one offer, whichever resource surfaced them.
+ */
+const mapCommandError = (error: unknown): { outcome: CommandOutcome; auditError: string } => {
+  if (error instanceof AllegroAuthError) {
+    return {
+      auditError: `auth: ${error.message}`,
+      outcome: { error: `auth error: ${error.message}`, kind: "systemic", scope: false },
+    };
+  }
+  if (error instanceof AllegroApiError) {
+    if (error.isForbidden()) {
+      return {
+        auditError: `write scope missing (403): ${error.message}`,
+        outcome: { error: "write scope missing (403)", kind: "systemic", scope: true },
+      };
+    }
+    if (error.isSystemic()) {
+      return {
+        auditError: `systemic ${error.httpStatus}: ${error.message}`,
+        outcome: {
+          error: `HTTP ${error.httpStatus}: ${error.message}`,
+          kind: "systemic",
+          scope: false,
+        },
+      };
+    }
+    return { auditError: error.message, outcome: { error: error.message, kind: "failed" } };
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return { auditError: message, outcome: { error: message, kind: "failed" } };
+};
+
+/**
+ * Open the audit row for one write, and hand back the way to close it.
+ *
+ * The row goes in FIRST, before any command. A push this plugin cannot record is
+ * not one it wants to make: in automation-rule mode the row is the only bounds
+ * memory, so a command whose bounds went unrecorded would be re-pushed on every
+ * subsequent run forever. That ordering also makes an audit-insert failure a
+ * per-offer failure rather than a systemic one - it is local to one row, and a
+ * database blip must not hold the whole run.
+ */
+const openAuditRow = async (
+  allegro: AllegroModuleService,
+  row: Record<string, unknown>,
+): Promise<
+  { ok: true; finalize: (patch: Record<string, unknown>) => Promise<void> } | { ok: false; error: string }
+> => {
+  let pushId: string;
+  try {
+    const [created] = (await allegro.createAllegroPricePushes([row] as never)) as unknown as {
+      id: string;
+    }[];
+    pushId = created.id;
+  } catch (error) {
+    return {
+      error: `audit insert failed: ${error instanceof Error ? error.message : String(error)}`,
+      ok: false,
+    };
+  }
+  return {
+    finalize: async (patch: Record<string, unknown>): Promise<void> => {
+      try {
+        await allegro.updateAllegroPricePushes([{ id: pushId, ...patch }] as never);
+      } catch {
+        // Swallowed deliberately: the command has already happened, and throwing here
+        // would report a successful push as a failure and re-push it next run.
+      }
+    },
+    ok: true,
+  };
+};
+
+/**
+ * Automation-rule mode: insert the audit row, assign the rule with its price
+ * range, poll to terminal, finalize the row.
  */
 const runCommand = async (
   allegro: AllegroModuleService,
   client: AllegroClient,
   plan: OfferPlan,
   pushedBy: string,
+  marketplaceId: string,
 ): Promise<CommandOutcome> => {
-  let pushId: string;
-  try {
-    const [created] = (await allegro.createAllegroPricePushes([
-      {
-        // Text, exactly as it goes to Allegro. The audit has to record the bytes
-        // that were sent, not a re-rendering of them.
-        bound_ceiling: formatAmount(plan.ceiling),
-        bound_floor: formatAmount(plan.floor),
-        offer_id: plan.offerId,
-        price_mode_new: "automated",
-        price_mode_old: plan.observedMode,
-        promotion_state: promotionStateLabel(plan.promoted),
-        pushed_at: new Date(),
-        pushed_by: pushedBy,
-        // Written as `failed` and corrected on success. A crash between the insert
-        // and the command leaves a row that overstates the damage, which is the
-        // safe direction: it does not claim bounds landed that may not have.
-        result: "failed",
-        rule_id_new: plan.expectedRuleId,
-        rule_id_old: plan.observedRuleId ?? null,
-        rule_name_new: plan.expectedRule,
-        rule_name_old: plan.observedRuleName ?? null,
-        sku: plan.sku,
-      },
-    ] as never)) as unknown as { id: string }[];
-    pushId = created.id;
-  } catch (error) {
+  if (!(plan.expectedRuleId && plan.expectedRule)) {
+    // Unreachable through the planner, which only produces rule-shaped plans in
+    // automation-rule mode. Stated rather than asserted with a non-null: a plan
+    // that reached here without a rule is a bug, and inventing one is the single
+    // thing this plugin promises never to do.
     return {
-      error: `audit insert failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: "internal: an automation-rule command was planned without a resolved rule",
       kind: "failed",
     };
   }
-
-  const finalize = async (patch: Record<string, unknown>): Promise<void> => {
-    try {
-      await allegro.updateAllegroPricePushes([{ id: pushId, ...patch }] as never);
-    } catch {
-      // Swallowed deliberately: the command has already happened, and throwing here
-      // would report a successful push as a failure and re-push it next run.
-    }
-  };
+  const opened = await openAuditRow(allegro, {
+    // Text, exactly as it goes to Allegro. The audit has to record the bytes
+    // that were sent, not a re-rendering of them.
+    bound_ceiling: formatAmount(plan.ceiling),
+    bound_floor: formatAmount(plan.floor),
+    offer_id: plan.offerId,
+    price_mode_new: "automated",
+    price_mode_old: plan.observedMode,
+    promotion_state: promotionStateLabel(plan.promoted),
+    pushed_at: new Date(),
+    pushed_by: pushedBy,
+    // Written as `failed` and corrected on success. A crash between the insert
+    // and the command leaves a row that overstates the damage, which is the
+    // safe direction: it does not claim bounds landed that may not have.
+    result: "failed",
+    rule_id_new: plan.expectedRuleId,
+    rule_id_old: plan.observedRuleId ?? null,
+    rule_name_new: plan.expectedRule,
+    rule_name_old: plan.observedRuleName ?? null,
+    sku: plan.sku,
+  });
+  if (!opened.ok) {
+    return { error: opened.error, kind: "failed" };
+  }
+  const { finalize } = opened;
 
   try {
     const report = await client.assignOfferPriceAutomation({
@@ -341,111 +538,190 @@ const runCommand = async (
         max: { amount: formatAmount(plan.ceiling), currency: plan.currency },
         min: { amount: formatAmount(plan.floor), currency: plan.currency },
       },
+      marketplaceId,
       offerId: plan.offerId,
       ruleId: plan.expectedRuleId,
     });
     const terminal = await client.pollOfferPriceAutomationCommand(report.id);
-    const tally = terminal.taskCount;
-
-    // `AllegroClient.isCommandTerminal`, never a local re-derivation. The test this
-    // replaces was `completedAt || taskCount.total > 0`, which is strictly WEAKER than
-    // the poll loop's own exit condition: a command that has SCHEDULED one task and
-    // finished none (total 1, success 0, failed 0) satisfies it. Such a report
-    // arriving at the 15s poll budget therefore fell straight through to
-    // `result: "success"` - which stamps `price_synced_at` and writes the bounds into
-    // the only bounds memory this plugin has. `fetchLastSuccessfulBounds` then
-    // reported bounds that may never have landed, `decideSyncAction` answered
-    // `act: false` on every later run, and the offer was silently never corrected
-    // again. The pending branch below was unreachable for exactly that shape.
-    if (!AllegroClient.isCommandTerminal(terminal)) {
-      // Submitted but not confirmed terminal within the poll budget. NOT a failure:
-      // a slow command must not build a streak toward quarantining a healthy offer.
-      // Settled as `skipped` - honest about what is known - and crucially NOT
-      // `success`, so the row is invisible to the bounds memory and the next run
-      // re-pushes, which is idempotent.
-      await finalize({
-        allegro_command_id: report.id,
-        error: "not terminal within the poll budget",
-        result: "skipped",
-      });
-      return { commandId: report.id, error: "command still pending", kind: "pending" };
-    }
-    if (tally && tally.failed > 0) {
-      const detail = await describeCommandFailure(client, report.id);
-      await finalize({ allegro_command_id: report.id, error: detail });
-      return { error: detail, kind: "failed" };
-    }
-    // Success is asserted on POSITIVE evidence, never on the absence of a failure.
-    // Two terminal reports carry no such evidence and both used to read as success:
-    // one with `completedAt` set and no `taskCount` at all, and one whose tally
-    // scheduled nothing (`total: 0`, i.e. the offer criteria matched no offer). The
-    // first is unknown, so it settles as pending and the next run re-checks; the
-    // second is a real failure worth surfacing, because a command that scheduled no
-    // task did not attach anything.
-    if (!tally) {
-      await finalize({
-        allegro_command_id: report.id,
-        error: "command reported terminal without a task tally, so nothing is confirmed",
-        result: "skipped",
-      });
-      return {
-        commandId: report.id,
-        error: "command terminal without a task tally",
-        kind: "pending",
-      };
-    }
-    if (tally.success < 1) {
-      const detail = "command completed without scheduling a task for the offer";
-      await finalize({ allegro_command_id: report.id, error: detail });
-      return { error: detail, kind: "failed" };
-    }
-    await finalize({ allegro_command_id: report.id, error: null, result: "success" });
-    return { commandId: report.id, kind: "success" };
+    // `AllegroClient.isCommandTerminal`, never a local re-derivation - see
+    // `interpretCommandReport`, which owns that test for both command paths.
+    const { patch, verdict } = await interpretCommandReport(terminal, report.id, () =>
+      describeCommandFailure(client, report.id),
+    );
+    await finalize(patch);
+    return verdict.kind === "success"
+      ? { commandId: report.id, kind: "success" }
+      : verdict.kind === "pending"
+        ? { commandId: report.id, error: verdict.error, kind: "pending" }
+        : { error: verdict.error, kind: "failed" };
   } catch (error) {
-    if (error instanceof AllegroAuthError) {
-      await finalize({ error: `auth: ${error.message}` });
-      return { error: `auth error: ${error.message}`, kind: "systemic", scope: false };
-    }
-    if (error instanceof AllegroApiError) {
-      if (error.isForbidden()) {
-        await finalize({ error: `write scope missing (403): ${error.message}` });
-        return { error: "write scope missing (403)", kind: "systemic", scope: true };
-      }
-      if (error.isSystemic()) {
-        await finalize({ error: `systemic ${error.httpStatus}: ${error.message}` });
-        return {
-          error: `HTTP ${error.httpStatus}: ${error.message}`,
-          kind: "systemic",
-          scope: false,
-        };
-      }
-      await finalize({ error: error.message });
-      return { error: error.message, kind: "failed" };
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    await finalize({ error: message });
-    return { error: message, kind: "failed" };
+    const { auditError, outcome } = mapCommandError(error);
+    await finalize({ error: auditError });
+    return outcome;
   }
 };
+
+/**
+ * Fixed-price mode: insert the audit row, remove any attached rule, set the Buy
+ * Now price, poll each command to terminal, finalize the row.
+ *
+ * Two Allegro commands where the automation path issues one, and the ORDER is
+ * load-bearing. A price written under a live automation rule does not survive the
+ * rule's next recalculation, so the rule comes off first. If the removal does not
+ * confirm, the price is NOT sent: a half-applied pair that left the rule on and
+ * the price changed would be exactly the fight with Allegro's engine this
+ * sequencing exists to avoid, and re-running the pair next tick is idempotent.
+ *
+ * The audit row carries the price that was sent (`price_amount` /
+ * `price_currency`) and deliberately leaves `bound_floor` / `bound_ceiling` NULL:
+ * no price range was attached to anything, and writing the guard rails into those
+ * columns would make `fetchLastSuccessfulBounds` report a rule range that does not
+ * exist, so a later automation-rule run would skip an offer it should re-attach.
+ */
+const runFixedPriceCommand = async (
+  allegro: AllegroModuleService,
+  client: AllegroClient,
+  plan: OfferPlan,
+  pushedBy: string,
+  marketplaceId: string,
+): Promise<CommandOutcome> => {
+  if (plan.price === undefined) {
+    return { error: "internal: a fixed-price command was planned without a price", kind: "failed" };
+  }
+  const amount = formatAmount(plan.price);
+  const opened = await openAuditRow(allegro, {
+    offer_id: plan.offerId,
+    price_amount: amount,
+    price_currency: plan.currency,
+    price_mode_new: "fixed",
+    price_mode_old: plan.observedMode,
+    promotion_state: promotionStateLabel(plan.promoted),
+    pushed_at: new Date(),
+    pushed_by: pushedBy,
+    result: "failed",
+    // The rule that was REMOVED, when one was. `rule_*_new` stays null: the point
+    // of this write is that no rule governs the offer afterwards.
+    rule_id_old: plan.observedRuleId ?? null,
+    rule_name_old: plan.observedRuleName ?? null,
+    sku: plan.sku,
+  });
+  if (!opened.ok) {
+    return { error: opened.error, kind: "failed" };
+  }
+  const { finalize } = opened;
+
+  try {
+    if (plan.kind === "detach-and-price") {
+      const removal = await client.removeOfferPriceAutomation({
+        marketplaceId,
+        offerId: plan.offerId,
+      });
+      const removalTerminal = await client.pollOfferPriceAutomationCommand(removal.id);
+      const removalRead = await interpretCommandReport(removalTerminal, removal.id, () =>
+        describeCommandFailure(client, removal.id),
+      );
+      if (removalRead.verdict.kind !== "success") {
+        // The price is NOT sent. Reported verbatim so an operator reads "the rule
+        // could not be removed" rather than a price failure that would send them
+        // looking at the wrong thing.
+        const detail = `the price-automation rule could not be removed, so the price was not set: ${removalRead.verdict.error}`;
+        await finalize({ allegro_command_id: removal.id, error: detail });
+        return removalRead.verdict.kind === "pending"
+          ? { commandId: removal.id, error: detail, kind: "pending" }
+          : { error: detail, kind: "failed" };
+      }
+    }
+
+    // A caller-generated id, because the price resource is a PUT on the command
+    // id rather than a POST that mints one. Fresh per attempt: reusing it across
+    // runs would make a legitimate re-push answer 409 instead of applying.
+    const commandId = crypto.randomUUID();
+    const report = await client.changeOfferPrice({
+      commandId,
+      marketplaceId,
+      offerId: plan.offerId,
+      price: { amount, currency: plan.currency },
+    });
+    const reportId = report.id ?? commandId;
+    const terminal = await client.pollOfferPriceChangeCommand(reportId);
+    const { patch, verdict } = await interpretCommandReport(terminal, reportId, async () => {
+      try {
+        const { tasks } = await client.getOfferPriceChangeCommandTasks(reportId);
+        const failed = (tasks ?? []).find((task) => task.status === "FAIL");
+        const detail =
+          failed?.errors?.[0]?.userMessage ?? failed?.errors?.[0]?.message ?? failed?.message;
+        return detail ? `command reported failure: ${detail}` : "command reported a failed task";
+      } catch {
+        return "command reported a failed task";
+      }
+    });
+    await finalize(patch);
+    return verdict.kind === "success"
+      ? { commandId: reportId, kind: "success" }
+      : verdict.kind === "pending"
+        ? { commandId: reportId, error: verdict.error, kind: "pending" }
+        : { error: verdict.error, kind: "failed" };
+  } catch (error) {
+    const { auditError, outcome } = mapCommandError(error);
+    await finalize({ error: auditError });
+    return outcome;
+  }
+};
+
+/** Issue the write one plan calls for, in whichever mode produced it. */
+const runPlan = async (
+  allegro: AllegroModuleService,
+  client: AllegroClient,
+  plan: OfferPlan,
+  pushedBy: string,
+  marketplaceId: string,
+): Promise<CommandOutcome> =>
+  plan.kind === "price" || plan.kind === "detach-and-price"
+    ? await runFixedPriceCommand(allegro, client, plan, pushedBy, marketplaceId)
+    : await runCommand(allegro, client, plan, pushedBy, marketplaceId);
 
 /** Everything the planner needs, resolved once per run. */
 interface PlanningInputs {
   ruleNames: Map<string, string>;
-  expectedIds: { standardId: string; promotedId: string };
-  rules: AutomationRuleNames;
+  /**
+   * The two rules resolved to ids. Present ONLY in automation-rule mode - the
+   * other two modes never attach a rule, and demanding two rule names from a
+   * store that prices with fixed prices would be asking for configuration it has
+   * no use for.
+   */
+  expectedIds?: { standardId: string; promotedId: string };
+  rules?: AutomationRuleNames;
   categoryRates: ReturnType<typeof buildCategoryRates>;
   breakEvenFor: (sku: string, commission: number | undefined) => Promise<number | undefined>;
   srp: SrpSource;
+  /** The Medusa price per SKU per currency; the number fixed-price mode pushes. */
+  variantPrices: Map<string, Map<string, number>>;
   lastBounds: Map<string, SyncBounds>;
 }
 
-/** Build a plan for one mapping row plus its live offer, or say why not. */
-const planOffer = async (
+/** The bounds and promotion state one offer resolved to, in any mode. */
+interface OfferBounds {
+  promoted: boolean;
+  floor: number;
+  ceiling: number;
+  currency: string;
+}
+
+/**
+ * The mode-independent half of planning: is this offer safe to price at all, and
+ * between which two numbers?
+ *
+ * Shared by all three modes on purpose. The floor and the ceiling are not an
+ * automation-rule detail - they are what stops this plugin selling below cost -
+ * so monitoring, rule attachment and fixed pricing all go through exactly the
+ * same eligibility ladder and get exactly the same counted skip reasons.
+ */
+const resolveOfferBounds = async (
   row: OfferRow,
   offer: AllegroOffer,
   inputs: PlanningInputs,
   opts: { ignoreDisabled?: boolean } = {},
-): Promise<{ plan: OfferPlan } | { skip: SyncSkipReason } | { noop: true }> => {
+): Promise<{ bounds: OfferBounds } | { skip: SyncSkipReason }> => {
   // The promoted flag selects BOTH the expected rule and the commission rate, so it is
   // resolved before anything else that depends on it.
   //
@@ -480,15 +756,63 @@ const planOffer = async (
   if (!eligibility.eligible) {
     return { skip: eligibility.reason };
   }
+  return {
+    bounds: {
+      ceiling: eligibility.ceiling,
+      currency,
+      floor: eligibility.floor,
+      promoted: eligibility.promoted,
+    },
+  };
+};
 
-  const observedRuleId = offer.sellingMode?.priceAutomation?.rule?.id;
-  const observedRuleName = observedRuleId ? inputs.ruleNames.get(observedRuleId) : undefined;
+/** The observed automation state of an offer, as both write planners read it. */
+const observedRule = (
+  offer: AllegroOffer,
+  inputs: PlanningInputs,
+): { id?: string; name?: string } => {
+  const id = offer.sellingMode?.priceAutomation?.rule?.id;
+  return { id, name: id ? inputs.ruleNames.get(id) : undefined };
+};
+
+/** The price mode this run observed on the offer, for the audit row. */
+const observedPriceMode = (offer: AllegroOffer, ruleId?: string): PriceMode =>
+  resolvePriceMode({
+    attachedRuleId: ruleId,
+    observed: true,
+    status: offer.publication?.status as OfferStatus | undefined,
+  });
+
+/**
+ * Automation-rule mode: build a plan for one mapping row plus its live offer, or
+ * say why not.
+ */
+const planOffer = async (
+  row: OfferRow,
+  offer: AllegroOffer,
+  inputs: PlanningInputs,
+  opts: { ignoreDisabled?: boolean } = {},
+): Promise<{ plan: OfferPlan } | { skip: SyncSkipReason } | { noop: true }> => {
+  const resolved = await resolveOfferBounds(row, offer, inputs, opts);
+  if ("skip" in resolved) {
+    return resolved;
+  }
+  const { ceiling, currency, floor, promoted } = resolved.bounds;
+  if (!(inputs.rules && inputs.expectedIds)) {
+    // Unreachable: the caller only selects this planner in automation-rule mode,
+    // where `resolvePlanningInputs` has already resolved both rules or aborted the
+    // whole run. Stated rather than asserted away, because "attach whichever rule
+    // seems likely" is the one behaviour this plugin promises never to have.
+    return { skip: "sync-disabled" };
+  }
+
+  const rule = observedRule(offer, inputs);
   const decision = decideSyncAction({
-    attachedRuleId: observedRuleId,
-    attachedRuleName: observedRuleName,
-    desiredBounds: { ceiling: eligibility.ceiling, floor: eligibility.floor },
+    attachedRuleId: rule.id,
+    attachedRuleName: rule.name,
+    desiredBounds: { ceiling, floor },
     lastPushedBounds: inputs.lastBounds.get(offer.id),
-    promoted: eligibility.promoted,
+    promoted,
     rules: inputs.rules,
   });
   if (!decision.act) {
@@ -497,31 +821,94 @@ const planOffer = async (
 
   return {
     plan: {
-      ceiling: eligibility.ceiling,
+      ceiling,
       // The offer's own currency, as Allegro reported it. Allegro rejects a range
       // in any other currency, and defaulting to PLN would break a seller listing
       // on a non-PLN marketplace.
       currency,
       expectedRule: decision.expectedRule,
-      expectedRuleId: eligibility.promoted
-        ? inputs.expectedIds.promotedId
-        : inputs.expectedIds.standardId,
-      floor: eligibility.floor,
+      expectedRuleId: promoted ? inputs.expectedIds.promotedId : inputs.expectedIds.standardId,
+      floor,
       kind: decision.kind,
-      observedMode: resolvePriceMode({
-        attachedRuleId: observedRuleId,
-        observed: true,
-        status: offer.publication?.status as OfferStatus | undefined,
-      }),
-      observedRuleId,
-      observedRuleName,
+      observedMode: observedPriceMode(offer, rule.id),
+      observedRuleId: rule.id,
+      observedRuleName: rule.name,
       offerId: offer.id,
-      promoted: eligibility.promoted,
+      promoted,
       rowId: row.id,
       sku: row.sku,
     },
   };
 };
+
+/**
+ * Fixed-price mode: build a plan to put the Medusa price on this offer, or say
+ * why not.
+ *
+ * Two failure modes of its own, both counted rather than silent: the variant has
+ * no Medusa price in the offer's currency (`missing-medusa-price`), and the price
+ * it does have sits outside the break-even floor or the SRP ceiling
+ * (`price-outside-bounds`). The second is refused rather than clamped - see
+ * `decideFixedPriceAction` - because clamping sells at a price the store never
+ * set, and pushing sells below cost.
+ */
+const planFixedPriceOffer = async (
+  row: OfferRow,
+  offer: AllegroOffer,
+  inputs: PlanningInputs,
+  opts: { ignoreDisabled?: boolean } = {},
+): Promise<{ plan: OfferPlan } | { skip: SyncSkipReason } | { noop: true }> => {
+  const resolved = await resolveOfferBounds(row, offer, inputs, opts);
+  if ("skip" in resolved) {
+    return resolved;
+  }
+  const { ceiling, currency, floor, promoted } = resolved.bounds;
+
+  const desiredPrice = resolveVariantPrice(inputs.variantPrices, row.sku, currency);
+  if (desiredPrice === undefined) {
+    return { skip: "missing-medusa-price" };
+  }
+
+  const rule = observedRule(offer, inputs);
+  const decision = decideFixedPriceAction({
+    attachedRuleId: rule.id,
+    bounds: { ceiling, floor },
+    desiredPrice,
+    observedPrice: parseAmount(offer.sellingMode?.price?.amount ?? null),
+  });
+  if (!decision.act) {
+    return "refuse" in decision ? { skip: decision.refuse } : { noop: true };
+  }
+
+  return {
+    plan: {
+      ceiling,
+      currency,
+      floor,
+      kind: decision.kind,
+      observedMode: observedPriceMode(offer, rule.id),
+      observedRuleId: rule.id,
+      observedRuleName: rule.name,
+      offerId: offer.id,
+      price: desiredPrice,
+      promoted,
+      rowId: row.id,
+      sku: row.sku,
+    },
+  };
+};
+
+/** Plan one offer in whichever mode is in force. */
+const planForMode = async (
+  mode: PricingMode,
+  row: OfferRow,
+  offer: AllegroOffer,
+  inputs: PlanningInputs,
+  opts: { ignoreDisabled?: boolean } = {},
+): Promise<{ plan: OfferPlan } | { skip: SyncSkipReason } | { noop: true }> =>
+  mode === "fixed_price"
+    ? await planFixedPriceOffer(row, offer, inputs, opts)
+    : await planOffer(row, offer, inputs, opts);
 
 /** Resolve everything a run plans against. */
 const resolvePlanningInputs = async (
@@ -530,22 +917,31 @@ const resolvePlanningInputs = async (
   client: AllegroClient,
   logger: Logger,
   options: AllegroSyncOptions,
-  rules: AutomationRuleNames,
+  rules: AutomationRuleNames | undefined,
   skus: readonly string[],
 ): Promise<{ ok: true; inputs: PlanningInputs } | { ok: false; error: string }> => {
+  // The account's rules are read in EVERY mode, but they are only RESOLVED to ids
+  // in automation-rule mode. The names are what turn an offer's attached rule id
+  // into something an operator can read, and monitor and fixed-price modes both
+  // report that state - the first as an observation, the second on the audit row
+  // for the rule it removed.
   const { rules: accountRules } = await client.listPriceAutomationRules();
-  const expected = resolveExpectedRuleIds(accountRules ?? [], rules);
-  if (!expected.ok) {
-    // The fail-loud abort. Nothing is written: this plugin does not guess which rule
-    // an operator meant, and it never creates or edits one.
-    return { error: expected.error, ok: false };
-  }
-
   const ruleNames = new Map<string, string>();
   for (const rule of accountRules ?? []) {
     if (rule.id && rule.name) {
       ruleNames.set(rule.id, rule.name);
     }
+  }
+
+  let expectedIds: { promotedId: string; standardId: string } | undefined;
+  if (rules) {
+    const expected = resolveExpectedRuleIds(accountRules ?? [], rules);
+    if (!expected.ok) {
+      // The fail-loud abort. Nothing is written: this plugin does not guess which rule
+      // an operator meant, and it never creates or edits one.
+      return { error: expected.error, ok: false };
+    }
+    expectedIds = { promotedId: expected.promotedId, standardId: expected.standardId };
   }
 
   warnOnMissingSrpSource(logger, options);
@@ -562,11 +958,12 @@ const resolvePlanningInputs = async (
     inputs: {
       breakEvenFor,
       categoryRates: buildCategoryRates(rateRows),
-      expectedIds: { promotedId: expected.promotedId, standardId: expected.standardId },
+      ...(expectedIds ? { expectedIds } : {}),
       lastBounds,
       ruleNames,
-      rules,
+      ...(rules ? { rules } : {}),
       srp: srpSource,
+      variantPrices: buildVariantPriceBySku(variants),
     },
     ok: true,
   };
@@ -601,31 +998,80 @@ const buildPriceSyncError = (summary: PriceSyncSummary, systemicError?: string):
 };
 
 /**
- * Run one price-sync tick.
+ * Count one offer against its bounds, for monitor mode.
+ *
+ * The whole output of a monitor run: how many offers are priced below the floor
+ * they may not go under, and how many above the ceiling they may not exceed.
+ * That is the report an operator reads before arming a mode that writes.
+ */
+const countAgainstBounds = (
+  summary: PriceSyncSummary,
+  offer: AllegroOffer,
+  bounds: { floor: number; ceiling: number },
+): void => {
+  summary.monitored += 1;
+  const observed = parseAmount(offer.sellingMode?.price?.amount ?? null);
+  if (observed === undefined) {
+    return;
+  }
+  if (observed < bounds.floor) {
+    summary.belowFloor += 1;
+  } else if (observed > bounds.ceiling) {
+    summary.aboveCeiling += 1;
+  }
+};
+
+/**
+ * Run one price-sync tick, in whichever pricing mode is in force.
  *
  * `listing` may be supplied by a caller that already fetched the catalogue.
+ *
+ * The mode is resolved BEFORE the claim, because it decides whether this run has
+ * a kill switch at all. In `monitor` the loop cannot write - there is no command
+ * path to reach - so it runs regardless of the price-write toggle, exactly like
+ * the read-only price-automation monitor already does. In the two writing modes
+ * the toggle governs as it always has, and is re-read before every single
+ * command.
  */
 export const syncAllegroPrices = async (
   container: MedusaContainer,
   listing?: OfferListing,
 ): Promise<PriceSyncSummary> => {
-  const summary = emptyPriceSyncSummary();
+  const allegroService = container.resolve<AllegroModuleService>(ALLEGRO_MODULE);
+  const modeAtStart = await allegroService.getPricingMode();
+  const summary = emptyPriceSyncSummary(modeAtStart);
 
   const run = await runUnderSyncClaim(
     container,
     ALLEGRO_SYNC_PROVIDERS.PRICES,
     async ({ allegro, client, logger, mayContinue, state }) => {
       const options = await allegro.getSyncOptions();
+      const mode = options.pricingMode;
+      summary.mode = mode;
       const priorFailures = readFailureState(state.failures);
       const priorScopeMissing = state.write_scope_missing;
       summary.writeScopeMissing = priorScopeMissing;
 
-      if (!options.automationRules) {
+      if (modeWrites(mode) && !modeWrites(modeAtStart)) {
+        // The mode was changed between selecting this run's guard and taking the
+        // claim. This run was started WITHOUT the price-write kill switch, because
+        // monitor mode has nothing to switch off, so letting it write now would
+        // write past a disarmed toggle. The next tick picks the new mode up with
+        // the right guard attached.
+        const message = `the pricing mode changed to \`${mode}\` while this run was starting, so it held rather than writing without its kill switch. The next run picks up the new mode.`;
+        summary.error = message;
+        return {
+          outcome: { counts: toCounts(summary), lastError: message, status: "error" as const },
+          value: undefined,
+        };
+      }
+
+      if (modeNeedsAutomationRules(mode) && !options.automationRules) {
         // Inert by construction rather than by accident, and loudly so. Without two
         // rule names there is nothing to attach, and inventing one would attach the
         // wrong pricing policy to a live catalogue.
         const message =
-          "the `automationRules` option is not configured, so no rule can be attached and nothing was written. Set the two rule names that exist on the Allegro account.";
+          "the pricing mode is `automation_rule` but no two distinct rule names are configured, so no rule can be attached and nothing was written. Set the two rule names that exist on the Allegro account, or choose a different pricing mode.";
         summary.error = message;
         return {
           outcome: { counts: toCounts(summary), lastError: message, status: "error" as const },
@@ -640,7 +1086,7 @@ export const syncAllegroPrices = async (
         client,
         logger,
         options,
-        options.automationRules,
+        modeNeedsAutomationRules(mode) ? options.automationRules : undefined,
         rows.map((row) => row.sku),
       );
       if (!inputs.ok) {
@@ -675,7 +1121,21 @@ export const syncAllegroPrices = async (
           continue;
         }
         summary.scanned += 1;
-        const outcome = await planOffer(row, offer, inputs.inputs);
+
+        if (mode === "monitor") {
+          // The same eligibility ladder the writing modes use, so a monitor run
+          // reports exactly the skip reasons an armed run would hit. Nothing is
+          // planned and nothing is quarantined: there is no command to fail.
+          const resolved = await resolveOfferBounds(row, offer, inputs.inputs);
+          if ("skip" in resolved) {
+            summary.skippedCounts[resolved.skip] += 1;
+            continue;
+          }
+          countAgainstBounds(summary, offer, resolved.bounds);
+          continue;
+        }
+
+        const outcome = await planForMode(mode, row, offer, inputs.inputs);
         if ("skip" in outcome) {
           summary.skippedCounts[outcome.skip] += 1;
           continue;
@@ -691,6 +1151,24 @@ export const syncAllegroPrices = async (
           continue;
         }
         plans.push(outcome.plan);
+      }
+
+      if (mode === "monitor") {
+        // Settled here, before any of the write machinery below. A monitor run has
+        // no commands, so it has no failures to quarantine, no scope to observe and
+        // nothing to stamp - and running that machinery over an empty batch would
+        // report a clean write run that never happened.
+        logger.info(
+          `[allegro-prices] monitor mode: ${summary.monitored} offer(s) priced, ${summary.belowFloor} below the break-even floor, ${summary.aboveCeiling} above the SRP ceiling. Nothing was sent to Allegro.`,
+        );
+        return {
+          outcome: {
+            counts: toCounts(summary),
+            lastError: null,
+            status: "ok" as const,
+          },
+          value: undefined,
+        };
       }
 
       if (plans.length > options.changeCap) {
@@ -725,7 +1203,7 @@ export const syncAllegroPrices = async (
         // Sequential on purpose: it keeps Allegro and database load flat, and the
         // circuit breaker has to stop on the FIRST systemic signal rather than
         // discovering it after a fan-out has already fired every command.
-        const outcome = await runCommand(allegro, client, plan, "price-sync");
+        const outcome = await runPlan(allegro, client, plan, "price-sync", options.marketplaceId);
         if (outcome.kind === "systemic") {
           systemic = true;
           systemicError = outcome.error;
@@ -797,11 +1275,13 @@ export const syncAllegroPrices = async (
         value: undefined,
       };
     },
-    {
-      disabled: (allegro) => allegro.isPriceSyncDisabled(),
-      reason:
-        "price sync is disabled (the `priceSyncDisabled` option, or ALLEGRO_PRICE_SYNC_DISABLED). No price-affecting write was sent to Allegro.",
-    },
+    modeWrites(modeAtStart)
+      ? {
+          disabled: (allegro) => allegro.isPriceSyncDisabled(),
+          reason:
+            "price sync is disabled (the `priceSyncDisabled` option, or ALLEGRO_PRICE_SYNC_DISABLED). No price-affecting write was sent to Allegro.",
+        }
+      : undefined,
   );
 
   if (!run.ran) {
@@ -830,6 +1310,25 @@ const toCounts = (summary: PriceSyncSummary): Record<string, unknown> => ({
   ...summary,
   skippedCounts: { ...summary.skippedCounts },
 });
+
+/**
+ * What a successful manual push did, in the operator's terms.
+ *
+ * Mode-specific because the two writes are genuinely different acts: one hands
+ * the offer to Allegro's engine between two bounds, the other sets an exact
+ * price. Reporting "attached <rule>" after a fixed-price push would name a rule
+ * that was in fact REMOVED.
+ */
+const describePushSuccess = (plan: OfferPlan): string => {
+  if (plan.price === undefined) {
+    return `Attached "${plan.expectedRule}" with bounds ${formatAmount(plan.floor)}-${formatAmount(plan.ceiling)} ${plan.currency}.`;
+  }
+  const removed =
+    plan.kind === "detach-and-price"
+      ? ` The price-automation rule${plan.observedRuleName ? ` "${plan.observedRuleName}"` : ""} was removed first, so it cannot recalculate over it.`
+      : "";
+  return `Set the price to ${formatAmount(plan.price)} ${plan.currency}, inside the ${formatAmount(plan.floor)}-${formatAmount(plan.ceiling)} ${plan.currency} bounds.${removed}`;
+};
 
 export interface SingleOfferPushResult {
   ok: boolean;
@@ -985,15 +1484,30 @@ export const pushSingleAllegroOffer = async (
         };
       };
 
-      if (!options.automationRules) {
+      // Monitor mode has no write path at all, so an explicit push is refused
+      // rather than quietly performed: an operator who chose "write nothing" must
+      // not be able to write one offer by pressing a button on a product page.
+      if (!modeWrites(options.pricingMode)) {
         return settle(
           {
             message:
-              "The `automationRules` plugin option is not configured, so there is no rule to attach.",
+              "The pricing mode is `monitor`, which never writes to Allegro. Choose a pricing mode that writes in Settings > Allegro before pushing an offer.",
+            ok: false,
+            status: "skipped",
+          },
+          { lastError: standingLine(priorScopeMissing) },
+        );
+      }
+
+      if (modeNeedsAutomationRules(options.pricingMode) && !options.automationRules) {
+        return settle(
+          {
+            message:
+              "The pricing mode is `automation_rule` but no two distinct rule names are configured, so there is no rule to attach.",
             ok: false,
             status: "error",
           },
-          { lastError: "the `automationRules` option is not configured" },
+          { lastError: "no automation rule names are configured" },
         );
       }
 
@@ -1047,7 +1561,7 @@ export const pushSingleAllegroOffer = async (
         client,
         logger,
         options,
-        options.automationRules,
+        modeNeedsAutomationRules(options.pricingMode) ? options.automationRules : undefined,
         [sku],
       );
       if (!inputs.ok) {
@@ -1058,7 +1572,9 @@ export const pushSingleAllegroOffer = async (
       }
 
       const offer = await client.getOffer(row.offer_id);
-      const planned = await planOffer(row, offer, inputs.inputs, { ignoreDisabled: true });
+      const planned = await planForMode(options.pricingMode, row, offer, inputs.inputs, {
+        ignoreDisabled: true,
+      });
       if ("skip" in planned) {
         return settle({
           message: `Skipped: ${SYNC_SKIP_LABEL[planned.skip]}.`,
@@ -1074,7 +1590,13 @@ export const pushSingleAllegroOffer = async (
         });
       }
 
-      const outcome = await runCommand(allegro, client, planned.plan, pushedBy);
+      const outcome = await runPlan(
+        allegro,
+        client,
+        planned.plan,
+        pushedBy,
+        options.marketplaceId,
+      );
       if (outcome.kind === "systemic") {
         return settle(
           {
@@ -1106,7 +1628,7 @@ export const pushSingleAllegroOffer = async (
         ] as never);
         return settle(
           {
-            message: `Attached "${planned.plan.expectedRule}" with bounds ${formatAmount(planned.plan.floor)}-${formatAmount(planned.plan.ceiling)} ${planned.plan.currency}.`,
+            message: describePushSuccess(planned.plan),
             ok: true,
             status: "synced",
           },
