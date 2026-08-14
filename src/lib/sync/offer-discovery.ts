@@ -16,11 +16,18 @@ import type { AllegroOffer } from "../allegro/types";
  * - **Conflicts are recorded, never resolved.** A duplicate sygnatura, an offer
  *   with no sygnatura at all, and a sygnatura matching no variant are three
  *   different operator problems. Picking a winner would push a price or a quantity
- *   to the wrong offer, which is a real mispricing or a real oversell.
+ *   to the wrong offer, which is a real mispricing or a real oversell. The one
+ *   exception is not a resolution at all: an offer that cannot sell is not a
+ *   claimant in the first place, so it is discounted before the count is taken.
+ *   See `isSellable`.
  */
 
 /** Conflict codes, mirroring `allegro_offer.conflict`. */
-export type OfferConflict = "missing-external-id" | "duplicate-sku" | "no-variant" | "no-offer";
+export type OfferConflict =
+  | "missing-external-id"
+  | "duplicate-sku"
+  | "no-variant"
+  | "no-offer";
 
 /** A sync-eligible Medusa variant, reduced to what matching needs. */
 export interface EligibleVariant {
@@ -90,7 +97,9 @@ export interface DiscoveryPlan {
  * barcode rather than assumed to BE a SKU. `matchedBy` is carried so a conflict
  * message can say which of the two produced it.
  */
-const offerKey = (offer: AllegroOffer): { key: string; matchedBy: "sygnatura" | "ean" } | null => {
+const offerKey = (
+  offer: AllegroOffer,
+): { key: string; matchedBy: "sygnatura" | "ean" } | null => {
   const external = offer.external?.id?.trim();
   if (external) {
     return { key: external, matchedBy: "sygnatura" };
@@ -100,6 +109,34 @@ const offerKey = (offer: AllegroOffer): { key: string; matchedBy: "sygnatura" | 
     return { key: ean, matchedBy: "ean" };
   }
   return null;
+};
+
+/**
+ * Statuses in which an offer can actually take an order.
+ *
+ * `GOING_TO_BE_ACTIVATED` counts: a scheduled offer will sell without anyone
+ * touching it again, so handing its sygnatura to a different offer now only
+ * defers the collision to activation time. `INACTIVE` and `ENDED` do not: an
+ * unpublished draft and a finished offer cannot be mispriced or oversold,
+ * because neither can be bought.
+ */
+const SELLABLE_STATUSES = new Set([
+  "ACTIVE",
+  "GOING_TO_BE_ACTIVATED",
+  "GOING_TO_BE_ENDED",
+]);
+
+/**
+ * Whether an offer competes for a sygnatura.
+ *
+ * A missing status counts as competing. It means Allegro did not tell us, and
+ * "unknown" must not be the reading that quietly awards a contested SKU: the
+ * cost of a needless conflict is an operator glance, the cost of a wrong award
+ * is a price or a quantity on the wrong live offer.
+ */
+const isSellable = (offer: AllegroOffer): boolean => {
+  const status = offer.publication?.status;
+  return status === undefined || SELLABLE_STATUSES.has(status);
 };
 
 /**
@@ -135,7 +172,10 @@ export const planOfferDiscovery = (input: {
   // First pass: group live offers by the key they present, so a duplicate
   // sygnatura is seen as a duplicate rather than as two independent upserts
   // racing to own one row.
-  const offersByKey = new Map<string, { offer: AllegroOffer; matchedBy: "sygnatura" | "ean" }[]>();
+  const offersByKey = new Map<
+    string,
+    { offer: AllegroOffer; matchedBy: "sygnatura" | "ean" }[]
+  >();
   let skippedNoSku = 0;
   const noKeyOffers: AllegroOffer[] = [];
   for (const offer of offers) {
@@ -168,27 +208,47 @@ export const planOfferDiscovery = (input: {
       }
     }
 
-    if (group.length > 1) {
+    // Only sellable offers contest a key. A never-published draft that happens to
+    // carry a real sygnatura would otherwise hold that SKU hostage forever: it
+    // cannot be bought, so no push to it can go wrong, yet it blocked the live
+    // offer beside it from being priced or restocked at all. Drafts are also the
+    // one claimant an operator often cannot even see - Allegro's panel does not
+    // list an offer that never went live - so the conflict was unresolvable by
+    // the person being asked to resolve it.
+    const contenders =
+      group.length > 1
+        ? group.filter((entry) => isSellable(entry.offer))
+        : group;
+
+    if (contenders.length !== 1) {
       // Nothing is written for a contested key, and the mapping row is marked so
-      // the admin shows it. Both offers are named: resolving this means deciding
-      // which one keeps the sygnatura, and that needs the ids.
+      // the admin shows it. Every claimant is named, sellable or not: resolving
+      // this means deciding which one keeps the sygnatura, and that needs the ids.
+      const ids = group.map((entry) => entry.offer.id).join(", ");
       conflicts.push({
         conflict: "duplicate-sku",
-        conflict_detail: `${group.length} live offers claim this sygnatura: ${group
-          .map((entry) => entry.offer.id)
-          .join(", ")}. Nothing is synced until exactly one offer carries it.`,
+        conflict_detail:
+          contenders.length === 0
+            ? `${group.length} offers claim this sygnatura and none of them can sell (every one is unpublished or ended): ${ids}. Nothing is synced, and nothing is at risk until one is published.`
+            : `${contenders.length} sellable offers claim this sygnatura: ${contenders
+                .map((entry) => entry.offer.id)
+                .join(
+                  ", ",
+                )}. Nothing is synced until exactly one offer carries it. All claimants, including any unpublished or ended: ${ids}.`,
         sku: key,
       });
       continue;
     }
 
-    const entry = group[0];
+    const entry = contenders[0];
     if (!entry) {
       continue;
     }
     const { matchedBy, offer } = entry;
     const candidates =
-      matchedBy === "sygnatura" ? (variantsBySku.get(key) ?? []) : (variantsByEan.get(key) ?? []);
+      matchedBy === "sygnatura"
+        ? (variantsBySku.get(key) ?? [])
+        : (variantsByEan.get(key) ?? []);
 
     if (candidates.length === 0) {
       conflicts.push({
@@ -240,20 +300,34 @@ export const planOfferDiscovery = (input: {
   }
 
   for (const [sku, claimants] of claimantsBySku) {
-    if (claimants.length > 1) {
+    // Same rule as the per-key pass: a draft or an ended offer reaching this
+    // variant by its EAN cannot sell, so it does not get to block the live offer
+    // that reached it by sygnatura.
+    const contenders =
+      claimants.length > 1
+        ? claimants.filter((entry) => isSellable(entry.offer))
+        : claimants;
+
+    if (contenders.length !== 1) {
       // The same class of ambiguity as two offers sharing a sygnatura, and reported under
       // the same code, because the operator's question is identical: which of these offers
       // owns the SKU? Naming the ids is the actionable part.
+      const ids = claimants.map((entry) => entry.offer.id).join(", ");
       conflicts.push({
         conflict: "duplicate-sku",
-        conflict_detail: `${claimants.length} live offers resolve to this SKU by different keys (sygnatura or EAN): ${claimants
-          .map((entry) => entry.offer.id)
-          .join(", ")}. Nothing is synced until exactly one offer maps to it.`,
+        conflict_detail:
+          contenders.length === 0
+            ? `${claimants.length} offers resolve to this SKU by different keys (sygnatura or EAN) and none of them can sell (every one is unpublished or ended): ${ids}. Nothing is synced, and nothing is at risk until one is published.`
+            : `${contenders.length} sellable offers resolve to this SKU by different keys (sygnatura or EAN): ${contenders
+                .map((entry) => entry.offer.id)
+                .join(
+                  ", ",
+                )}. Nothing is synced until exactly one offer maps to it. All claimants, including any unpublished or ended: ${ids}.`,
         sku,
       });
       continue;
     }
-    const entry = claimants[0];
+    const entry = contenders[0];
     if (!entry) {
       continue;
     }
@@ -336,7 +410,9 @@ export const planOfferDiscovery = (input: {
   // every write path treats as safe to push to. Withholding the upsert is the safe
   // direction - the next run re-establishes it once the conflict is genuinely gone.
   const conflictedSkus = new Set(conflicts.map((conflict) => conflict.sku));
-  const safeUpserts = upserts.filter((upsert) => !conflictedSkus.has(upsert.sku));
+  const safeUpserts = upserts.filter(
+    (upsert) => !conflictedSkus.has(upsert.sku),
+  );
 
   return {
     categoryIds: [...categoryIds],
@@ -345,7 +421,9 @@ export const planOfferDiscovery = (input: {
     matched: matched - (upserts.length - safeUpserts.length),
     skippedNoSku,
     unlink,
-    unmatchedVariants: variants.filter((variant) => !matchedVariantSkus.has(variant.sku)).length,
+    unmatchedVariants: variants.filter(
+      (variant) => !matchedVariantSkus.has(variant.sku),
+    ).length,
     upserts: safeUpserts,
   };
 };
