@@ -420,21 +420,42 @@ so every non-per-product view lives under Settings.
   only record of the bounds ever sent - opens in a drawer. This is where an
   operator checks or opts a single product out, without touching the catalogue
   table.
+
+  **It fetches its own variants, and must.** The dashboard loads the product for
+  this zone with
+  `PRODUCT_DETAIL_FIELDS = getLinkedFields("product", "*categories,*shipping_profile,-variants")`
+  (`@medusajs/dashboard/src/routes/products/product-detail/constants.ts`). That
+  `-variants` is an explicit exclusion - the page fetches the variant table
+  separately with `useProductVariants` - so `data.variants` handed to a
+  `product.details.*` widget is `undefined`. This widget derived its SKU list
+  from `data.variants` and returned `null` when that list was empty, which meant
+  it rendered nothing, on every product, on every store. It now calls
+  `sdk.admin.product.listVariants(productId, { fields: "id,title,sku" })` itself
+  and still prefers `data.variants` if a future dashboard version passes it.
 - **Product list banner** (`product.list.before`) - a compact roll-up (N linked
-  / N unlinked / N drifting / N conflicts) above the products table, each count
-  linking into Settings -> Allegro offers filtered to those rows. This is the
-  best-supported approximation of "Allegro status while browsing products":
-  **Medusa 2.18 does not allow injecting a custom column into the core products
-  data table**, and it exposes no list-row widget zone, so a per-row status column
-  is genuinely not possible from a plugin today. The list zone
-  (`product.list.before`/`after`) is the only list surface a plugin gets, so the
-  roll-up lives there and the per-product detail widget carries the row-level truth.
-  **A real per-row "Allegro status" column is deferred to
-  [`@zanreal/medusa-admin-kit`](https://github.com/zanreal-labs)**, a shared package
-  building an extensible products list; this plugin will register its column there
-  once it ships, rather than shipping a competing full products list of its own. Until
-  then, the banner plus the detail widget are the surfaces, and this limitation is a
-  platform constraint, not a design choice.
+  / N unlinked / N drifting / N conflicts) above the **stock** products table, each
+  count linking into Settings -> Allegro offers filtered to those rows. **Medusa
+  2.18 does not allow injecting a custom column into the core products data
+  table**, and it exposes no list-row widget zone, so on that page a roll-up is
+  the only thing a plugin can offer. It stays as the zero-dependency fallback for
+  a store that has not installed admin-kit.
+- **Catalog column** (`src/admin/widgets/register-variant-columns.tsx`) - an
+  `Allegro` column registered into
+  [`@zanreal/medusa-admin-kit`](https://github.com/zanreal-labs)'s Catalog route,
+  which lists **one variant per row**. The cell names what is wrong with that one
+  SKU: the conflict code (`duplicate-sku`, `no-offer`, ...) in red, `drift` in
+  orange, Allegro's own offer status in green when it is listed and healthy,
+  `unlinked` in grey, and a muted "not listed" when the SKU has no mapping at all.
+  This is the real per-row status the banner could only approximate, and it does
+  not cost this plugin a competing products list of its own.
+
+  It used to read `"3 offers / 1 conflict"`, because an admin-kit row was a
+  product and a product spans many SKUs - which told an operator that something
+  was broken without telling them which SKU, the one thing they needed in order
+  to act. Now a row is one variant with at most one offer. The registration moved
+  from `registerProductColumn` to `registerVariantColumn` and the SKU roll-up in
+  `src/admin/lib` is gone: `summarizeOfferStatus` / `formatOfferStatus` became
+  `resolveVariantOffer` / `formatVariantOffer` / `variantOfferColor`.
 - **Settings -> Allegro** - the configuration and control home: the OAuth
   connection, the **live writer toggles** (interactive switches backed by the
   persisted [runtime settings](#runtime-toggles) - arm or disarm each writer without
@@ -448,7 +469,7 @@ so every non-per-product view lives under Settings.
   conflict and drift filters, bulk rediscovery, and manual push. An operator
   triage surface for catalogue-wide "which offers are not syncing, and fix them"
   work - a genuine multi-item workflow the per-product widget cannot serve, and
-  distinct from the browse case that the deferred admin-kit column will cover.
+  distinct from the browse case the admin-kit Catalog column covers.
 - **Settings -> Allegro -> Orders** - the orders quarantine repair and import
   window. Operational task-flow, not a setting itself, but still nested here
   rather than in the main sidebar.
