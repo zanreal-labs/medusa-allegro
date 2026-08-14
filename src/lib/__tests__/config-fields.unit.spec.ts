@@ -35,8 +35,12 @@ describe("resolveEffectiveConfigValue", () => {
 });
 
 describe("CONFIG_FIELDS", () => {
-  it("declares exactly the eight editable configuration fields", () => {
+  it("declares exactly the nine editable configuration fields, mode first", () => {
+    // `pricingMode` leads deliberately: it decides which of the others matter at
+    // all, and reading the rule names before knowing whether rules are in use is
+    // reading the settings in the wrong order.
     expect(CONFIG_FIELDS.map((field) => field.key)).toEqual([
+      "pricingMode",
       "automationRuleStandard",
       "automationRulePromoted",
       "srpMetadataKey",
@@ -74,10 +78,37 @@ describe("CONFIG_FIELDS", () => {
     expect(critical.toSorted()).toEqual(["marketplaceId", "salesChannelId"]);
   });
 
-  it("gives change_cap a number input and every other field a text input", () => {
+  it("gives change_cap a number input, pricing_mode a picker, and every other field a text input", () => {
     const numberFields = CONFIG_FIELDS.filter((field) => field.kind === "number").map(
       (field) => field.key,
     );
     expect(numberFields).toEqual(["changeCap"]);
+
+    const choiceFields = CONFIG_FIELDS.filter((field) => field.kind === "choice").map(
+      (field) => field.key,
+    );
+    expect(choiceFields).toEqual(["pricingMode"]);
+  });
+
+  it("gives every choice field a non-empty option set, and no empty-string value", () => {
+    // An empty `value` is not a cosmetic problem: the admin renders these through
+    // a Select, and a `<Select.Item value="">` crashes the whole page on mount.
+    // "Nothing chosen" is expressed by the persisted column being null, never by
+    // an option.
+    for (const field of CONFIG_FIELDS.filter((entry) => entry.kind === "choice")) {
+      expect(field.choices?.length).toBeGreaterThan(0);
+      for (const choice of field.choices ?? []) {
+        expect(choice.value).not.toBe("");
+        expect(choice.label.length).toBeGreaterThan(0);
+        expect(choice.description.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("gives no other field a choice list", () => {
+    const withChoices = CONFIG_FIELDS.filter((field) => field.choices !== undefined).map(
+      (field) => field.key,
+    );
+    expect(withChoices).toEqual(["pricingMode"]);
   });
 });

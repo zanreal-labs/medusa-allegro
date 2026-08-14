@@ -1,6 +1,8 @@
 import { decodeEncryptionKey } from "./crypto";
 import type { AllegroEnvironment } from "./allegro/types";
 import { buildAllegroUserAgent } from "./allegro/user-agent";
+import { DEFAULT_PRICING_MODE, isPricingMode, PRICING_MODE_VALUES } from "./pricing-mode";
+import type { PricingMode } from "./pricing-mode";
 
 /**
  * Options accepted by the Allegro plugin.
@@ -88,6 +90,17 @@ export interface AllegroPluginOptions {
    */
   invoiceModuleKey?: string;
   /**
+   * How this store prices its Allegro offers - `"monitor"`, `"automation_rule"`
+   * or `"fixed_price"`. See `src/lib/pricing-mode.ts` for exactly what each one
+   * writes.
+   *
+   * This is the DEFAULT for a fresh install; an operator can change the mode from
+   * Settings > Allegro without a redeploy, and that persisted choice wins over
+   * this option. Omit it and the mode is `automation_rule`, which is what this
+   * plugin did before the mode existed.
+   */
+  pricingMode?: PricingMode;
+  /**
    * The two named price-automation rules this plugin attaches, by promotion
    * state. These MUST already exist on the Allegro account: the plugin resolves
    * them by name on every run and refuses to write anything when a name is
@@ -174,6 +187,7 @@ export interface ResolvedAllegroOptions {
   ordersSyncDisabled: boolean;
   fulfillmentWritebackDisabled: boolean;
   invoiceAttachDisabled: boolean;
+  pricingMode: PricingMode;
   automationRules?: { promoted: string; standard: string };
   changeCap: number;
   salesChannelId?: string;
@@ -210,6 +224,8 @@ export interface AllegroPublicOptions {
   stockSyncDisabled: boolean;
   ordersSyncDisabled: boolean;
   invoiceAttachDisabled: boolean;
+  /** The configured default pricing mode. The persisted admin choice wins over it. */
+  pricingMode: PricingMode;
   /**
    * The configured rule names, so the admin can say which two rules the account
    * must carry. Names, not ids - a name is what an operator sees in the seller
@@ -236,6 +252,7 @@ export const toPublicAllegroOptions = (options: ResolvedAllegroOptions): Allegro
   marketplaceId: options.marketplaceId,
   ordersSyncDisabled: options.ordersSyncDisabled,
   priceSyncDisabled: options.priceSyncDisabled,
+  pricingMode: options.pricingMode,
   redirectPath: options.redirectPath,
   salesChannelId: options.salesChannelId,
   salesChannelName: options.salesChannelName,
@@ -320,6 +337,8 @@ const MARKETPLACE_ID_ENV = "ALLEGRO_MARKETPLACE_ID";
 const SALES_CHANNEL_ID_ENV = "ALLEGRO_SALES_CHANNEL_ID";
 /** Same contract, for the sales-channel name scope. */
 const SALES_CHANNEL_NAME_ENV = "ALLEGRO_SALES_CHANNEL_NAME";
+/** Same contract, for the pricing mode. */
+const PRICING_MODE_ENV = "ALLEGRO_PRICING_MODE";
 
 /** A trimmed, non-empty environment value, or undefined when the variable is unset. */
 const optionalEnvString = (env: NodeJS.ProcessEnv, name: string): string | undefined =>
@@ -352,6 +371,23 @@ export const salesChannelIdEnvOverride = (
 export const salesChannelNameEnvOverride = (
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined => optionalEnvString(env, SALES_CHANNEL_NAME_ENV);
+
+/**
+ * The pricing-mode lock.
+ *
+ * An unrecognised value is read as "no lock" rather than thrown, matching
+ * `changeCapEnvOverride`: this is evaluated on every `getSyncOptions()` call, and
+ * a typo in an environment variable must not turn every price-sync run into a
+ * thrown error. An operator who mistypes it sees the mode they chose in the admin
+ * still in force, which is the safe direction - it never invents a mode that
+ * writes more than the one that was chosen.
+ */
+export const pricingModeEnvOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+): PricingMode | undefined => {
+  const raw = optionalEnvString(env, PRICING_MODE_ENV);
+  return isPricingMode(raw) ? raw : undefined;
+};
 
 /**
  * The change-cap lock, parsed as a positive integer.
@@ -489,6 +525,26 @@ const resolveChangeCap = (value: AllegroPluginOptions["changeCap"]): number => {
   return value;
 };
 
+/**
+ * Validate the configured default pricing mode.
+ *
+ * Loud at boot, unlike the environment lock: a value in `medusa-config.ts` is
+ * something a developer typed once and can fix, and silently running a store on a
+ * different pricing strategy than the config file states is exactly the kind of
+ * surprise this plugin's other option checks exist to prevent.
+ */
+const resolvePricingMode = (value: AllegroPluginOptions["pricingMode"]): PricingMode => {
+  if (value === undefined) {
+    return DEFAULT_PRICING_MODE;
+  }
+  if (!isPricingMode(value)) {
+    throw new Error(
+      `medusa-allegro: plugin option \`pricingMode\` must be one of ${PRICING_MODE_VALUES.join(", ")} (got "${String(value)}").`,
+    );
+  }
+  return value;
+};
+
 const requireString = (value: unknown, field: keyof AllegroPluginOptions): string => {
   const trimmed = typeof value === "string" ? value.trim() : "";
   if (!trimmed) {
@@ -615,6 +671,7 @@ export const resolveAllegroOptions = (
     marketplaceId: optionalString(options.marketplaceId) ?? DEFAULT_MARKETPLACE_ID,
     ordersSyncDisabled: options.ordersSyncDisabled === true || isOrdersSyncDisabledByEnv(),
     priceSyncDisabled: options.priceSyncDisabled === true || isPriceSyncDisabledByEnv(),
+    pricingMode: resolvePricingMode(options.pricingMode),
     redirectPath,
     regionId: optionalString(options.regionId),
     salesChannelId: optionalString(options.salesChannelId),

@@ -17,6 +17,8 @@
  * no redeploy.
  */
 
+import { PRICING_MODES } from "./pricing-mode";
+
 /**
  * The effective value of one configuration field.
  *
@@ -55,6 +57,7 @@ export const resolveEffectiveConfigValue = <T>(
 
 /** The stable key for each governed configuration field. */
 export type ConfigFieldKey =
+  | "pricingMode"
   | "automationRuleStandard"
   | "automationRulePromoted"
   | "srpMetadataKey"
@@ -66,6 +69,7 @@ export type ConfigFieldKey =
 
 /** The persisted column on `allegro_settings` backing each field. */
 export type ConfigFieldColumn =
+  | "pricing_mode"
   | "automation_rule_standard"
   | "automation_rule_promoted"
   | "srp_metadata_key"
@@ -85,8 +89,24 @@ export interface ConfigFieldMeta {
   label: string;
   /** One line of what the field controls. */
   description: string;
-  /** Whether the admin renders a text input or a number input for this field. */
-  kind: "text" | "number";
+  /**
+   * Which control the admin renders: a text box, a number box, or a picker.
+   *
+   * A `choice` field is genuinely different from the other two rather than a text
+   * box with a hint: the set of valid values is closed, so the admin offers
+   * exactly those and the write route rejects anything else. It also has no
+   * "blank" state - there is always a mode in force - which is why the picker
+   * carries no empty option.
+   */
+  kind: "text" | "number" | "choice";
+  /**
+   * The closed set of values, for a `choice` field. Absent for the others.
+   *
+   * Each option carries the sentence the admin shows under the picker, because
+   * "what does this mode actually write?" is the question the setting exists to
+   * answer and a bare label does not answer it.
+   */
+  choices?: readonly { value: string; label: string; description: string }[];
   /**
    * True when a wrong value silently breaks the Allegro<->Medusa mapping rather
    * than merely mis-tuning a run. The admin renders an explicit re-scoping
@@ -104,6 +124,17 @@ export interface ConfigFieldMeta {
  * `medusa-config.ts` default; the admin renders one input per entry.
  */
 export const CONFIG_FIELDS: readonly ConfigFieldMeta[] = [
+  {
+    choices: PRICING_MODES,
+    column: "pricing_mode",
+    description:
+      "How this store prices its Allegro offers. Everything else in this section only matters to the modes that use it. Leave it alone and the plugin keeps offers on your Allegro automation rules, which is what it has always done.",
+    envVar: "ALLEGRO_PRICING_MODE",
+    key: "pricingMode",
+    kind: "choice",
+    label: "Pricing mode",
+    wiringCritical: false,
+  },
   {
     column: "automation_rule_standard",
     description:

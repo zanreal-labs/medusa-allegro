@@ -1,4 +1,5 @@
 import { defineRouteConfig } from "@medusajs/admin-sdk";
+import { LockClosedSolidMini } from "@medusajs/icons";
 import {
   Alert,
   Badge,
@@ -6,6 +7,7 @@ import {
   Container,
   Heading,
   Input,
+  Select,
   StatusBadge,
   Switch,
   Table,
@@ -77,7 +79,7 @@ const PROVIDER_DESCRIPTION: Record<string, string> = {
   offers: "Maps SKUs to offers, sweeps promotion state, discovers categories. Read-only.",
   orders: "Drains the order event journal into Medusa orders.",
   "price-automation": "Observes each offer's pricing rule and its drift. Read-only.",
-  prices: "Attaches price-automation rules and asserts the break-even/SRP bounds.",
+  prices: "Applies this store's pricing mode to every linked offer, inside the break-even and SRP bounds.",
   stock: "Pushes Medusa available quantity to Allegro.",
 };
 
@@ -110,6 +112,28 @@ const formatCounters = (provider: string, counts?: Record<string, unknown> | nul
 /** A field's stored value, as the input shows it. `null` renders as a blank input. */
 const formatFieldValue = (value: string | number | null): string =>
   value === null || value === undefined ? "" : String(value);
+
+/**
+ * What an empty text field means, said once, in the input itself.
+ *
+ * Not the value it would fall back to: that value belongs to whoever installed
+ * this plugin, may be nothing at all, and naming a file the operator may have no
+ * access to is not an explanation.
+ */
+const LEAVE_BLANK_PLACEHOLDER = "Leave blank to use the installed default";
+
+/**
+ * The value a control starts on.
+ *
+ * A picker starts on the EFFECTIVE value, not the persisted one: there is always
+ * a mode in force, and showing an empty picker on a store that has never touched
+ * the setting would suggest no mode is chosen. A text box starts on the persisted
+ * value, because blank there genuinely means "nothing entered here".
+ */
+const initialDraft = (field: ConfigField): string =>
+  field.kind === "choice"
+    ? formatFieldValue(field.effectiveValue)
+    : formatFieldValue(field.persistedValue);
 
 const AllegroSettingsPage = () => {
   const [data, setData] = useState<OverviewResponse | undefined>();
@@ -158,7 +182,7 @@ const AllegroSettingsPage = () => {
       const next = { ...current };
       for (const field of data.configFields) {
         if (!(field.column in next)) {
-          next[field.column] = formatFieldValue(field.persistedValue);
+          next[field.column] = initialDraft(field);
           changed = true;
         }
       }
@@ -212,11 +236,11 @@ const AllegroSettingsPage = () => {
   /**
    * Save one configuration field.
    *
-   * A blank draft is sent as `null`, which CLEARS the field back to its
-   * `medusa-config.ts` fallback - the same "clear" contract the category-rate save
-   * already uses. `change_cap` is parsed and range-checked here too, so a bad value
-   * shows a toast immediately rather than a round trip just to learn the server
-   * rejected it.
+   * A blank draft is sent as `null`, which CLEARS the field back to the default
+   * the plugin was installed with - the same "clear" contract the category-rate
+   * save already uses. `change_cap` is parsed and range-checked here too, so a bad
+   * value shows a toast immediately rather than a round trip just to learn the
+   * server rejected it.
    */
   const saveConfigField = async (field: ConfigField) => {
     const draft = (fieldDrafts[field.column] ?? "").trim();
@@ -248,7 +272,7 @@ const AllegroSettingsPage = () => {
       );
       toast.success(
         value === null
-          ? `${field.label} cleared. It falls back to the medusa-config.ts value.`
+          ? `${field.label} cleared. It falls back to the default this plugin was installed with.`
           : `Saved ${field.label}.`,
       );
     } catch (error) {
@@ -294,6 +318,14 @@ const AllegroSettingsPage = () => {
   };
 
   const connection = data?.connection;
+  /**
+   * The mode in force, read from the same resolved field the picker binds to.
+   *
+   * The banners below are mode-specific because the advice is: telling a
+   * fixed-price store to configure two automation rule names it will never use is
+   * how a settings screen teaches people to ignore its warnings.
+   */
+  const pricingMode = findConfigField(data, "pricingMode")?.effectiveValue;
   /**
    * The persistent reconnect banner.
    *
@@ -428,12 +460,11 @@ const AllegroSettingsPage = () => {
           Writers
         </Heading>
         <Text className="text-ui-fg-subtle mb-4" size="small">
-          Every writer that reaches Allegro has its own switch, armed live from here - a flip takes
-          effect on the next run, no redeploy. They are listed separately because "price sync is
-          off" does not mean nothing is written. A fresh install ships with every writer disarmed;
-          arm each one deliberately once you have connected and mapped your offers. A switch shown
-          as forced off is held down by an environment override and cannot be armed here until the
-          override is cleared.
+          Each of these is one thing this plugin sends to Allegro, and each has its own switch. They
+          are separate because "prices are off" does not mean nothing is written. A flip takes
+          effect on the next run; nothing needs restarting. A fresh install starts with every writer
+          off, so connect your account and check your offer mapping first, then turn on one writer
+          at a time.
         </Text>
         <div className="flex flex-col gap-y-3">
           {(data?.toggles ?? []).map((toggle) => (
@@ -454,36 +485,55 @@ const AllegroSettingsPage = () => {
 
       <div className="px-6 py-4">
         <Heading className="mb-2" level="h2">
-          Sync configuration
+          Pricing and sync configuration
         </Heading>
         <Text className="text-ui-fg-subtle mb-4" size="small">
-          These used to be set only in `medusa-config.ts` and shown here as read-only text. Editing
-          a field here persists it and takes effect on the next sync run, no redeploy. Clearing a
-          field (blank it and Save) falls back to the `medusa-config.ts` value. A field shown as
-          locked is pinned by an environment variable that always wins over both this admin and the
-          config file.
+          Start with the pricing mode: it decides what this plugin does with prices at all, and
+          which of the settings under it matter. Everything here is saved in this store and takes
+          effect on the next sync run, with nothing to restart. A field left blank uses the default
+          the plugin was installed with, which for most of them is "not set" - and a setting that is
+          not set is named in the warnings above whenever that stops a run from doing anything. A
+          setting can also be fixed for the whole deployment, in which case it is shown locked here
+          with the reason, and an edit would not take effect.
         </Text>
 
-        {data &&
+        {data && pricingMode === "automation_rule" &&
         !(
           findConfigField(data, "automationRuleStandard")?.effectiveValue &&
           findConfigField(data, "automationRulePromoted")?.effectiveValue
         ) ? (
           <Alert className="mb-4" variant="warning">
-            No two distinct automation rule names resolve yet, so price sync is inert: there are no
-            rule names to attach and the plugin never invents one. Set both below, or in
-            `medusa-config.ts`. Both must already exist on the Allegro account.
+            This store prices with Allegro automation rules, but two distinct rule names are not set
+            yet, so nothing can be written: there is no rule to attach and this plugin never invents
+            one. Fill both in below. Each must already exist on your Allegro account, under exactly
+            that name.
           </Alert>
         ) : null}
-        {data &&
+        {data && pricingMode === "fixed_price" ? (
+          <Alert className="mb-4" variant="info">
+            This store pushes each variant's own Medusa price to its Allegro offer. A price below
+            the break-even floor or above the SRP ceiling is refused rather than pushed, and an
+            offer that still carries an Allegro automation rule has that rule removed first,
+            because otherwise Allegro would recalculate straight over the price.
+          </Alert>
+        ) : null}
+        {data && pricingMode === "monitor" ? (
+          <Alert className="mb-4" variant="info">
+            This store writes no prices to Allegro at all. Each run still works out every offer's
+            break-even floor and SRP ceiling and records how many offers sit outside them, which is
+            the report to read before choosing a mode that writes.
+          </Alert>
+        ) : null}
+        {data && pricingMode !== "monitor" &&
         !(
           findConfigField(data, "srpMetadataKey")?.effectiveValue ||
           findConfigField(data, "srpPriceListId")?.effectiveValue
         ) ? (
           <Alert className="mb-4" variant="warning">
-            No SRP source resolves yet, so every offer is skipped with reason `missing-srp`. The SRP
-            is the price-range ceiling, and there is deliberately no fallback to the current selling
-            price - that would let a rule ratchet the price down on every run.
+            No source for the SRP is set, so every offer is skipped with the reason `missing-srp`.
+            The SRP is the ceiling no offer may be priced above, and there is deliberately no
+            fallback to the price an offer currently has - that would let each run's price become
+            the next run's ceiling and walk the price down for ever.
           </Alert>
         ) : null}
 
@@ -491,7 +541,7 @@ const AllegroSettingsPage = () => {
           {(data?.configFields ?? []).map((field) => (
             <ConfigFieldRow
               busy={busyField === field.column}
-              draft={fieldDrafts[field.column] ?? formatFieldValue(field.persistedValue)}
+              draft={fieldDrafts[field.column] ?? initialDraft(field)}
               field={field}
               key={field.key}
               onChange={(value) =>
@@ -648,13 +698,33 @@ const AllegroSettingsPage = () => {
 };
 
 /**
+ * The one line shown when, and only when, something is being held from outside
+ * this screen.
+ *
+ * An override is an exceptional state, not a caption. A variable name printed
+ * under every control is a deployment detail leaking into a product surface: it
+ * tells someone whose settings are working perfectly about a variable they have
+ * no reason to touch, and it buries the one case where the name IS the remedy.
+ * So the name appears here - in the locked state, next to the sentence that
+ * explains what the lock is doing - and nowhere else.
+ */
+const OverrideLock = ({ children, envVar }: { children: React.ReactNode; envVar: string }) => (
+  <div className="text-ui-fg-muted txt-compact-xsmall flex items-start gap-x-1.5">
+    <LockClosedSolidMini className="text-ui-fg-muted mt-0.5 shrink-0" />
+    <span>
+      {children} It is being held by the <code>{envVar}</code> environment variable on this
+      deployment; clearing that variable hands control back to this screen.
+    </span>
+  </div>
+);
+
+/**
  * One writer's live switch.
  *
- * The switch reflects and controls the PERSISTED arming. When the environment forces
- * the writer off it is locked and labelled so - the switch still shows what is
- * persisted, but the "forced off" note and the disabled control say the truth about why
- * nothing runs, rather than pretending an armed writer is live. Named after what the
- * writer does, with its override env var on screen so the remedy is visible.
+ * The switch reflects and controls the PERSISTED arming. When something outside
+ * this screen forces the writer off it is locked and says so - the switch still
+ * shows what is persisted, but the lock and the disabled control tell the truth
+ * about why nothing runs, rather than pretending an armed writer is live.
  */
 const WriterToggle = ({
   toggle,
@@ -679,12 +749,11 @@ const WriterToggle = ({
       </div>
       <span className="text-ui-fg-subtle txt-compact-xsmall">{toggle.description}</span>
       {toggle.forceDisabled ? (
-        <span className="text-ui-fg-muted txt-compact-xsmall">
-          Forced off by the environment. Clear <code>{toggle.envVar}</code> to control it here.
-        </span>
-      ) : (
-        <code className="text-ui-fg-muted txt-compact-xsmall">{toggle.envVar}</code>
-      )}
+        <OverrideLock envVar={toggle.envVar}>
+          This writer is switched off for the whole deployment, so it stays off however this
+          switch is set.
+        </OverrideLock>
+      ) : null}
     </div>
     <Switch
       checked={toggle.persistedEnabled}
@@ -697,13 +766,18 @@ const WriterToggle = ({
 /**
  * One editable sync-configuration field.
  *
- * Sibling of `WriterToggle`, same shape: the input binds to the LOCAL draft (not
+ * Sibling of `WriterToggle`, same shape: the control binds to the LOCAL draft (not
  * straight to the persisted value, so typing does not fire a save on every
- * keystroke), a `locked` field is disabled with the same "the environment is
- * pinning this" note a forced-off toggle gets, and a `wiringCritical` field gets
- * an extra warning ABOVE the input - re-scoping which Medusa products this
- * plugin matches against Allegro is not a tuning knob, and the input alone does
- * not say that.
+ * keystroke), a `locked` field is disabled with the same lock a forced-off toggle
+ * gets, and a `wiringCritical` field gets an extra warning ABOVE the control -
+ * re-scoping which Medusa products this plugin matches against Allegro is not a
+ * tuning knob, and an input alone does not say that.
+ *
+ * A `choice` field renders a picker rather than a text box, and one deliberate
+ * difference follows from that: it has no blank state and therefore no "clear"
+ * path. Every option carries a real value, because a `Select.Item` with an empty
+ * value crashes the page on mount - and because "no pricing mode" is not a state
+ * this plugin can be in.
  */
 const ConfigFieldRow = ({
   field,
@@ -717,44 +791,61 @@ const ConfigFieldRow = ({
   busy: boolean;
   onChange: (value: string) => void;
   onSave: () => void;
-}) => (
-  <div className="flex flex-col gap-y-2 rounded-lg border px-3 py-3">
-    <div className="flex items-center gap-x-2">
-      <span className="txt-compact-small-plus">{field.label}</span>
-      {field.locked ? <StatusBadge color="red">locked by environment</StatusBadge> : null}
+}) => {
+  const chosen = field.choices?.find((choice) => choice.value === draft);
+  return (
+    <div className="flex flex-col gap-y-2 rounded-lg border px-3 py-3">
+      <div className="flex items-center gap-x-2">
+        <span className="txt-compact-small-plus">{field.label}</span>
+        {field.locked ? <StatusBadge color="red">locked</StatusBadge> : null}
+      </div>
+      <span className="text-ui-fg-subtle txt-compact-xsmall">{field.description}</span>
+      {field.wiringCritical ? (
+        <Alert variant="warning">
+          Changing this re-scopes which Medusa products this plugin matches against Allegro offers.
+          A wrong value here breaks the mapping silently rather than merely mis-tuning a run.
+        </Alert>
+      ) : null}
+      <div className="flex items-end gap-x-2">
+        {field.kind === "choice" ? (
+          <Select disabled={busy || field.locked} onValueChange={onChange} value={draft}>
+            <Select.Trigger className="max-w-sm">
+              <Select.Value placeholder="Choose one" />
+            </Select.Trigger>
+            <Select.Content>
+              {(field.choices ?? []).map((choice) => (
+                <Select.Item key={choice.value} value={choice.value}>
+                  {choice.label}
+                </Select.Item>
+              ))}
+            </Select.Content>
+          </Select>
+        ) : (
+          <Input
+            className="max-w-sm"
+            disabled={busy || field.locked}
+            onChange={(changeEvent) => onChange(changeEvent.target.value)}
+            placeholder={LEAVE_BLANK_PLACEHOLDER}
+            type={field.kind === "number" ? "number" : "text"}
+            value={draft}
+          />
+        )}
+        <Button disabled={busy || field.locked} onClick={onSave} size="small" variant="secondary">
+          Save
+        </Button>
+      </div>
+      {chosen ? (
+        <span className="text-ui-fg-subtle txt-compact-xsmall">{chosen.description}</span>
+      ) : null}
+      {field.locked ? (
+        <OverrideLock envVar={field.envVar}>
+          This is fixed at <code>{field.effectiveValue}</code> for the whole deployment, so an edit
+          here would not take effect.
+        </OverrideLock>
+      ) : null}
     </div>
-    <span className="text-ui-fg-subtle txt-compact-xsmall">{field.description}</span>
-    {field.wiringCritical ? (
-      <Alert variant="warning">
-        Changing this re-scopes which Medusa products this plugin matches against Allegro offers. A
-        wrong value here breaks the mapping silently rather than merely mis-tuning a run.
-      </Alert>
-    ) : null}
-    <div className="flex items-end gap-x-2">
-      <Input
-        className="max-w-sm"
-        disabled={busy || field.locked}
-        onChange={(changeEvent) => onChange(changeEvent.target.value)}
-        placeholder={
-          field.configDefault !== null ? `medusa-config.ts: ${field.configDefault}` : "not set"
-        }
-        type={field.kind === "number" ? "number" : "text"}
-        value={draft}
-      />
-      <Button disabled={busy || field.locked} onClick={onSave} size="small" variant="secondary">
-        Save
-      </Button>
-    </div>
-    {field.locked ? (
-      <span className="text-ui-fg-muted txt-compact-xsmall">
-        Locked by the environment at <code>{field.effectiveValue}</code>. Clear{" "}
-        <code>{field.envVar}</code> to control it here.
-      </span>
-    ) : (
-      <code className="text-ui-fg-muted txt-compact-xsmall">{field.envVar}</code>
-    )}
-  </div>
-);
+  );
+};
 
 const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
   <div>

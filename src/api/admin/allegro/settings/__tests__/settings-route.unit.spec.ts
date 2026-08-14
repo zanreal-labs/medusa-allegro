@@ -28,6 +28,25 @@ const toggleStates = [
 
 const configFieldStates = [
   {
+    choices: [
+      { description: "Writes nothing.", label: "Monitor only", value: "monitor" },
+      { description: "Attaches a rule.", label: "Allegro automation rule", value: "automation_rule" },
+      { description: "Pushes the Medusa price.", label: "Fixed price from Medusa", value: "fixed_price" },
+    ],
+    column: "pricing_mode",
+    configDefault: "automation_rule",
+    description: "How this store prices its Allegro offers.",
+    effectiveValue: "automation_rule",
+    envOverride: null,
+    envVar: "ALLEGRO_PRICING_MODE",
+    key: "pricingMode",
+    kind: "choice",
+    label: "Pricing mode",
+    locked: false,
+    persistedValue: null,
+    wiringCritical: false,
+  },
+  {
     column: "marketplace_id",
     configDefault: "allegro-pl",
     description: "Marketplace the price-automation rule assignment targets.",
@@ -184,5 +203,48 @@ describe("POST /admin/allegro/settings", () => {
     await POST(h.makeReq({ marketplace_id: "allegro-pl", price_sync_enabled: true }), h.res);
 
     expect(h.updates).toEqual([{ marketplace_id: "allegro-pl", price_sync_enabled: true }]);
+  });
+});
+
+describe("POST /admin/allegro/settings: the pricing mode is a closed set", () => {
+  it("accepts each mode the field declares", async () => {
+    for (const mode of ["monitor", "automation_rule", "fixed_price"]) {
+      const h = harness();
+      await POST(h.makeReq({ pricing_mode: mode }), h.res);
+      expect(h.updates).toEqual([{ pricing_mode: mode }]);
+    }
+  });
+
+  it("rejects a value that is not one of them, naming the ones that are", async () => {
+    const h = harness();
+
+    await expect(POST(h.makeReq({ pricing_mode: "fixed" }), h.res)).rejects.toThrow(
+      /must be one of monitor, automation_rule, fixed_price/,
+    );
+    expect(h.updates).toEqual([]);
+  });
+
+  it("rejects an empty string rather than storing a mode nothing can honour", async () => {
+    // Also the shape the admin can never send: the picker has no empty option,
+    // because a `Select.Item` with an empty value crashes the page on mount.
+    const h = harness();
+
+    await expect(POST(h.makeReq({ pricing_mode: "" }), h.res)).rejects.toThrow(MedusaError);
+    expect(h.updates).toEqual([]);
+  });
+
+  it("rejects a non-string, rather than coercing it", async () => {
+    const h = harness();
+
+    await expect(POST(h.makeReq({ pricing_mode: 2 }), h.res)).rejects.toThrow(MedusaError);
+    expect(h.updates).toEqual([]);
+  });
+
+  it("accepts null, which falls the mode back to the installed default", async () => {
+    const h = harness();
+
+    await POST(h.makeReq({ pricing_mode: null }), h.res);
+
+    expect(h.updates).toEqual([{ pricing_mode: null }]);
   });
 });

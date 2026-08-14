@@ -70,6 +70,20 @@ const parseConfigValue = (value: unknown, field: ConfigFieldMeta): string | numb
   if (value === null) {
     return null;
   }
+  // A closed set, checked against the field's own choices rather than against a
+  // list repeated here: the picker and the validator must never disagree about
+  // which values exist, and the only way to guarantee that is for both to read
+  // `CONFIG_FIELDS`.
+  if (field.kind === "choice") {
+    const allowed = (field.choices ?? []).map((choice) => choice.value);
+    if (typeof value !== "string" || !allowed.includes(value)) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `\`${field.column}\` must be one of ${allowed.join(", ")}, or null to fall back to the configured default (got ${typeof value === "string" ? `"${value}"` : typeof value}).`,
+      );
+    }
+    return value;
+  }
   if (field.kind === "number") {
     if (typeof value !== "number") {
       throw new MedusaError(

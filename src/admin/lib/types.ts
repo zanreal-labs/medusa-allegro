@@ -47,8 +47,10 @@ export type RuntimeToggleKey =
  * One runtime writer as the settings page renders it.
  *
  * The switch binds to `persistedEnabled`; when `forceDisabled` is set the environment is
- * holding the writer off whatever is persisted, so the UI locks the switch and says
- * "forced off by environment" instead of showing an armed writer that never runs.
+ * holding the writer off whatever is persisted, so the UI locks the switch shows a lock
+ * with a plain-language reason instead of an armed writer that never runs. `envVar` is
+ * shown ONLY in that locked state, where it is the remedy - never as a caption under a
+ * switch that is working normally.
  */
 export interface RuntimeToggle {
   key: RuntimeToggleKey;
@@ -63,6 +65,7 @@ export interface RuntimeToggle {
 
 export interface PublicOptions {
   environment: string;
+  pricingMode: string;
   automationRules?: { promoted: string; standard: string };
   changeCap: number;
   salesChannelId?: string;
@@ -75,6 +78,7 @@ export interface PublicOptions {
 }
 
 export type ConfigFieldKey =
+  | "pricingMode"
   | "automationRuleStandard"
   | "automationRulePromoted"
   | "srpMetadataKey"
@@ -95,13 +99,22 @@ export type ConfigFieldKey =
  * Allegro, rather than merely mis-tuning a run - the page renders an explicit
  * warning next to those two.
  */
+/** One option of a `choice` field, with the sentence the picker shows for it. */
+export interface ConfigFieldChoice {
+  value: string;
+  label: string;
+  description: string;
+}
+
 export interface ConfigField {
   key: ConfigFieldKey;
   column: string;
   label: string;
   description: string;
   envVar: string;
-  kind: "text" | "number";
+  kind: "text" | "number" | "choice";
+  /** Present only on a `choice` field. Never contains an empty `value`. */
+  choices?: ConfigFieldChoice[];
   wiringCritical: boolean;
   persistedValue: string | number | null;
   envOverride: string | number | null;

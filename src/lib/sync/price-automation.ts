@@ -157,16 +157,22 @@ export type SyncSkipReason =
   | "promotion-unresolved"
   | "missing-break-even"
   | "missing-srp"
-  | "invalid-bounds";
+  | "invalid-bounds"
+  | "missing-medusa-price"
+  | "price-outside-bounds";
 
 /** Human sentence for a skip reason, for logs and the admin. */
 export const SYNC_SKIP_LABEL: Record<SyncSkipReason, string> = {
   "invalid-bounds": "break-even floor is at or above the SRP ceiling",
   "missing-break-even":
     "missing break-even price (needs a purchase cost and a category commission rate)",
+  "missing-medusa-price":
+    "the Medusa variant has no price in the offer's currency, so there is no fixed price to push",
   "missing-srp": "missing SRP (the ceiling bound)",
   "not-linked": "not linked to an Allegro offer",
   "offer-not-active": "linked offer is not ACTIVE",
+  "price-outside-bounds":
+    "the Medusa price is below the break-even floor or above the SRP ceiling, so it was refused rather than pushed",
   "promotion-unresolved": "promotion state could not be resolved",
   "status-unknown": "offer publication status could not be read",
   "sync-disabled": "price sync is disabled for this offer",
@@ -360,13 +366,68 @@ export const decideSyncAction = (input: SyncDecisionInput): SyncDecision => {
   return { act: false };
 };
 
+export interface FixedPriceDecisionInput {
+  /** The Medusa variant's price, in the offer's currency. */
+  desiredPrice: number;
+  /** The offer's current Buy Now price, when Allegro reported one. */
+  observedPrice?: number;
+  /** Observed attached rule id (undefined = no rule attached). */
+  attachedRuleId?: string;
+  /** The bounds the desired price has to sit inside. */
+  bounds: SyncBounds;
+}
+
+export type FixedPriceDecision =
+  | { act: false }
+  | { act: false; refuse: "price-outside-bounds" }
+  | { act: true; kind: "price" | "detach-and-price" };
+
+/**
+ * Whether fixed-price mode should write to this offer, and what that write is.
+ *
+ * Three facts decide it, in this order:
+ *
+ * - **The bounds still apply.** A Medusa price below the break-even floor or
+ *   above the SRP ceiling is REFUSED, not clamped. Clamping would quietly sell at
+ *   a price the store never set, and pushing it would sell below cost - the two
+ *   failure modes the floor exists to prevent. It is reported as its own counted
+ *   reason so an operator sees which variants are mispriced in Medusa rather than
+ *   a silent no-op. The floor is passed through `roundAutomationFloor` again -
+ *   idempotent on the already-rounded figure `evaluateSyncEligibility` hands over,
+ *   and what keeps this function honest for a caller that passes a raw break-even.
+ * - **An attached rule wins over a fixed price.** Allegro's engine recalculates
+ *   the offer on its own schedule, so a price pushed under a live rule does not
+ *   survive. The rule is removed first, and only then is the price set.
+ * - **Otherwise, does the price already match?** The Buy Now price is READABLE on
+ *   the offer, unlike a rule's price range, so fixed-price mode needs no audit
+ *   memory: an offer already at the desired price with no rule attached is left
+ *   alone. An offer whose price could not be read is written to rather than
+ *   assumed correct, which is idempotent and the fail-closed direction.
+ */
+export const decideFixedPriceAction = (input: FixedPriceDecisionInput): FixedPriceDecision => {
+  const cents = (value: number): number => Math.round(value * 100);
+  const floor = roundAutomationFloor(input.bounds.floor);
+  if (cents(input.desiredPrice) < cents(floor) || cents(input.desiredPrice) > cents(input.bounds.ceiling)) {
+    return { act: false, refuse: "price-outside-bounds" };
+  }
+  if (input.attachedRuleId) {
+    return { act: true, kind: "detach-and-price" };
+  }
+  if (input.observedPrice !== undefined && cents(input.observedPrice) === cents(input.desiredPrice)) {
+    return { act: false };
+  }
+  return { act: true, kind: "price" };
+};
+
 /** Every skip reason at zero, for a run that has counted nothing yet. */
 export const emptySkipCounts = (): Record<SyncSkipReason, number> => ({
   "invalid-bounds": 0,
   "missing-break-even": 0,
+  "missing-medusa-price": 0,
   "missing-srp": 0,
   "not-linked": 0,
   "offer-not-active": 0,
+  "price-outside-bounds": 0,
   "promotion-unresolved": 0,
   "status-unknown": 0,
   "sync-disabled": 0,

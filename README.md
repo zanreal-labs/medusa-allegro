@@ -116,6 +116,7 @@ npx medusa db:migrate
 
 | Option               | Type                                     | Required | Default          | Notes                                                                                                                                                                                                                                                                                                                                 |
 | -------------------- | ---------------------------------------- | -------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pricingMode`        | `"monitor" \| "automation_rule" \| "fixed_price"` | no | `"automation_rule"` | How this store prices its Allegro offers - see [Pricing modes](#pricing-modes). This is the DEFAULT; the persisted admin choice wins over it. `"automation_rule"` is what this plugin did before the mode existed, so an upgrade changes nothing. |
 | `automationRules`    | `{ promoted: string; standard: string }` | no       | -                | Names of two price-automation rules that must **already exist** on the Allegro account. Resolved by name every run; missing, renamed or ambiguous aborts the run with nothing written. **Omit it and price sync is inert.** Also editable and persisted from the admin - see [Sync configuration fields](#sync-configuration-fields). |
 | `changeCap`          | `number`                                 | no       | `100`            | Price-automation commands per run. Positive integer; `0` is rejected - use a kill switch to stop writes, not a zero cap. Also editable and persisted from the admin.                                                                                                                                                                  |
 | `stockSyncDisabled`  | `boolean`                                | no       | `false`          | Force-disable override for quantity writes. Can only force OFF; the live arming is the [runtime toggle](#runtime-toggles). Same boolean-only contract as `priceSyncDisabled`.                                                                                                                                                         |
@@ -159,6 +160,7 @@ process.env.X` yields `"true"`, which a truthiness test honours and a `=== true`
 | `ALLEGRO_ORDERS_SYNC_INTERVAL_MS`        | Interval, in ms, for the order drain. Default `20000` (20s). The drain schedules on an interval by default because Medusa's cron only resolves to the minute and a fresh order should be drained sub-minute.                                    |
 | `ALLEGRO_ORDERS_SYNC_CRON`               | Switches the order drain back to a cron expression instead of an interval. The two are mutually exclusive in Medusa's scheduler; when both are set the cron wins.                                                                               |
 | `ALLEGRO_STOCK_LOCATION_IDS`             | Comma-separated stock location ids, overriding `stockLocationIds`.                                                                                                                                                                              |
+| `ALLEGRO_PRICING_MODE`                   | **Locks** the pricing mode, beating both the admin picker and `pricingMode`. Ignored (read as unset) unless it names a real mode. See [Pricing modes](#pricing-modes).                                                                            |
 | `ALLEGRO_AUTOMATION_RULE_STANDARD`       | **Locks** the standard-offer automation rule name, beating both the admin field and `automationRules.standard`. See [Sync configuration fields](#sync-configuration-fields).                                                                    |
 | `ALLEGRO_AUTOMATION_RULE_PROMOTED`       | The same, for the promoted-offer rule name.                                                                                                                                                                                                     |
 | `ALLEGRO_SRP_METADATA_KEY`               | The same, for the SRP metadata key.                                                                                                                                                                                                             |
@@ -182,6 +184,91 @@ read paths are harmless (discovery and the monitor write nothing to Allegro). If
 are staging a cutover from another system and want belt-and-braces, set the
 force-disable env vars BEFORE the version that reads them ships. See
 [Runtime toggles](#runtime-toggles) and [Turning the writers on](#turning-the-writers-on).
+
+## Pricing modes
+
+**How this store prices its Allegro offers is a setting, not an assumption.** Pick one
+of three modes under **Settings -> Allegro**; it takes effect on the next sync run,
+with nothing to restart.
+
+| Mode                                | What it writes to Allegro                                                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `monitor` (Monitor only)            | Nothing at all. Every run still works out each linked offer's break-even floor and SRP ceiling and counts how many offers sit outside them.                  |
+| `automation_rule` (Allegro automation rule) | One `POST /sale/offer-price-automation-commands` per offer: attach the named rule its promotion state calls for, with `[floor, ceiling]` as the rule's price range. Allegro's engine then picks the number inside that range. |
+| `fixed_price` (Fixed price from Medusa)     | One `PUT /sale/offer-price-change-commands/{id}` per offer, setting the Buy Now price to the variant's own Medusa price - preceded by a rule-REMOVAL command when the offer still carries an automation rule. |
+
+`automation_rule` is the default, because it is what this plugin did before the mode
+existed. Upgrading changes nothing about what your store writes.
+
+### The floor and the ceiling apply in every mode
+
+The break-even floor (from `@zanreal/medusa-product-costs`, grossed for VAT and for the
+category commission) and the SRP ceiling (from variant metadata or a price list) are the
+safety story of this whole plugin, so no mode is allowed to skip them:
+
+- `monitor` computes both and reports how many offers are priced outside them. That
+  report is what you read **before** choosing a mode that writes.
+- `automation_rule` sends them as the rule's price range, so Allegro's engine cannot
+  move the price outside them.
+- `fixed_price` checks the Medusa price against them and **refuses** to push a price
+  below the floor or above the ceiling, counting it as `price-outside-bounds`.
+
+A refusal is deliberate, and it is not a clamp. Clamping would sell at a price the store
+never set; pushing would sell below cost. Refusing does neither, and it names the
+variants whose Medusa price needs fixing.
+
+### What fixed-price mode needs, and what it does about it
+
+Two things are true and worth stating plainly before you switch a live store to it:
+
+- **The scope is already there.** `PUT /sale/offer-price-change-commands/{commandId}`
+  needs `allegro:api:sale:offers:write`, which is in this plugin's default scope string
+  and is the same scope the rule assignment already uses. Moving to fixed-price mode
+  needs no reconnect and no new consent.
+- **An automation rule beats a fixed price, so the rule has to go first.** Allegro's
+  engine recalculates an offer on its own schedule, so a price pushed under a live rule
+  does not survive it. Fixed-price mode therefore issues
+  `POST /sale/offer-price-automation-commands` with a `remove` modification for the
+  offer's marketplace, waits for it to confirm, and only then sets the price. **If the
+  removal does not confirm, the price is not sent at all** - a half-applied pair that
+  left the rule attached and the price changed is precisely the fight with Allegro's
+  engine the sequencing exists to avoid. Re-running the pair next tick is idempotent.
+
+Both commands count as one offer against the per-run [change cap](#sync-options).
+
+### Where the fixed price comes from
+
+The variant's own default price in Medusa, in the offer's own currency. Two rules, both
+fail-closed:
+
+- **Price-list rows are ignored.** A price carrying a `price_list_id` is a sale or a
+  customer-group override with its own validity window and conditions, none of which this
+  plugin evaluates. Pushing one would leave a sale price on Allegro long after the sale
+  ended.
+- **There is no currency conversion.** A variant with no price in the offer's currency is
+  skipped as `missing-medusa-price` rather than priced from a rate this plugin cannot
+  audit.
+
+### Auditing
+
+Every mode writes to the same append-only `allegro_price_push` trail, but they fill
+different columns, and the difference is load-bearing:
+
+- automation-rule rows carry `bound_floor` / `bound_ceiling` and the rule ids. Those two
+  columns are the **only** memory of the price range attached to a rule, because Allegro
+  accepts a range and never returns one.
+- fixed-price rows carry `price_amount` / `price_currency` and leave the bounds columns
+  null, plus `rule_id_old` / `rule_name_old` for the rule that was removed. Writing the
+  guard rails into the bounds columns would make a later automation-rule run read back a
+  price range that was never attached, and skip an offer it should have re-attached.
+
+### Monitor mode and the price-write toggle
+
+Monitor mode runs even while the **Price writes** toggle is off, because it has no
+command path to reach - exactly like the read-only price-automation monitor, which has
+never had a kill switch. The two writing modes honour the toggle as they always have,
+re-reading it before every single command. An explicit per-offer push from a product page
+is refused in monitor mode rather than quietly performed.
 
 ## Runtime toggles
 
@@ -238,8 +325,8 @@ table; the row appears the first time any runtime path or the admin reads it.
 
 ## Sync configuration fields
 
-Eight of the [sync options](#sync-options) - the two automation rule names, the SRP
-source, the change cap, the marketplace id and the sales-channel scope - are also
+Nine settings - the [pricing mode](#pricing-modes), the two automation rule names, the
+SRP source, the change cap, the marketplace id and the sales-channel scope - are
 **editable from Settings -> Allegro**, on the same `allegro_settings` singleton the
 runtime toggles use. An edit persists and takes effect on the next sync run, no
 redeploy - the same property the toggles have. A store that never touches these admin
@@ -248,6 +335,7 @@ falls through to the `medusa-config.ts` option.
 
 | Field                              | Column                     | `medusa-config.ts` option  | Env lock                           |
 | ---------------------------------- | -------------------------- | -------------------------- | ---------------------------------- |
+| Pricing mode                       | `pricing_mode`             | `pricingMode`              | `ALLEGRO_PRICING_MODE`             |
 | Automation rule (standard)         | `automation_rule_standard` | `automationRules.standard` | `ALLEGRO_AUTOMATION_RULE_STANDARD` |
 | Automation rule (promoted)         | `automation_rule_promoted` | `automationRules.promoted` | `ALLEGRO_AUTOMATION_RULE_PROMOTED` |
 | SRP source: metadata key           | `srp_metadata_key`         | `srpMetadataKey`           | `ALLEGRO_SRP_METADATA_KEY`         |
@@ -507,10 +595,10 @@ simply by leaving the field empty.
 | `allegro_auth`          | The OAuth connection. Both tokens AES-256-GCM encrypted, plus expiry, granted scope, and the account login.                                                          |
 | `allegro_offer`         | SKU-to-offer mapping. `sku` unique, `offer_id` a resolved cache. Money as text, verbatim from Allegro.                                                               |
 | `allegro_category_rate` | Sale commission per Allegro category, plain and promoted. Maintained by an operator - see below.                                                                     |
-| `allegro_price_push`    | Append-only audit of price-automation decisions, including the pushed `[floor, ceiling]`.                                                                            |
+| `allegro_price_push`    | Append-only audit of every pricing decision: the rule and the pushed `[floor, ceiling]` in automation-rule mode, the exact `price_amount` / `price_currency` in fixed-price mode.                                        |
 | `allegro_order`         | One row per Allegro checkout form: the Medusa order it produced, the raw and derived statuses, conflicts, and the attached invoice document.                         |
 | `allegro_sync_state`    | Per-loop health: status, cursor, counters, last error, failure state, the write-scope flag, and the claim's fencing token plus its heartbeat.                        |
-| `allegro_settings`      | The one-row singleton of persisted [runtime toggles](#runtime-toggles) - the live, operator-flippable arming of each writer. Writers default off, invoice-attach on. |
+| `allegro_settings`      | The one-row singleton of persisted settings: the [pricing mode](#pricing-modes), the [sync configuration fields](#sync-configuration-fields), and the [runtime toggles](#runtime-toggles) - the live, operator-flippable arming of each writer. Writers default off, invoice-attach on. |
 
 Three of these carry non-obvious constraints worth knowing before you build on
 them.
@@ -675,7 +763,9 @@ offer's absence.
 
 ### Price sync: the bounds
 
-Bounds are `[ceil(break-even), SRP]`.
+Bounds are `[ceil(break-even), SRP]`, and they apply in every
+[pricing mode](#pricing-modes) - as the rule's price range in `automation_rule`, as the
+range a pushed price has to sit inside in `fixed_price`, and as the report in `monitor`.
 
 - **The floor** is `grossCost / (1 - commissionRate)`, the smallest gross price at
   which net income reaches zero. `grossCost` comes from
@@ -698,6 +788,11 @@ order the ladder reports them:
 
 `not-linked`, `sync-disabled`, `status-unknown`, `offer-not-active`,
 `promotion-unresolved`, `missing-break-even`, `missing-srp`, `invalid-bounds`.
+
+Fixed-price mode adds two of its own, for the two ways a Medusa price can fail to be a
+usable Allegro price: `missing-medusa-price` (the variant has no price in the offer's
+currency) and `price-outside-bounds` (it has one, and it is below the floor or above the
+ceiling, so it is refused rather than clamped).
 
 `promotion-unresolved` is worth understanding, because it is the one an operator is most
 likely to meet on a fresh install. `allegro_offer.promoted` is **three-state**: `true`,

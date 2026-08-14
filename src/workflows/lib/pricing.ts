@@ -284,6 +284,56 @@ export const resolveSrp = (source: SrpSource, sku: string, currency: string): nu
   source.byCurrency.get(sku)?.get(currency.trim().toLowerCase()) ?? source.bySku.get(sku);
 
 /**
+ * The Medusa price per variant SKU, per currency - the number fixed-price mode
+ * pushes.
+ *
+ * Read off the variants the catalogue pass already loaded, so this costs no extra
+ * query. Two rules, both fail-closed:
+ *
+ * - **Currency is not optional.** A price row with no currency cannot be matched
+ *   to an offer, and guessing one would push a EUR figure onto a PLN offer. It is
+ *   dropped, and the offer reports `missing-medusa-price` rather than being
+ *   priced from something that merely looked like a number.
+ * - **Price-list rows are not the variant's price.** A row carrying a
+ *   `price_list_id` is a sale or a customer-group override with its own validity
+ *   window and conditions, none of which this plugin evaluates. Pushing one as
+ *   "the Medusa price" would leave a sale price on Allegro long after the sale
+ *   ended, so only the variant's own default price counts.
+ *
+ * Same shape as the price-list half of `SrpSource` on purpose: both answer "what
+ * number applies to this SKU in this currency", and sharing the shape means
+ * `resolveSrp`'s currency-matching reasoning does not have to be re-derived.
+ */
+export const buildVariantPriceBySku = (
+  variants: readonly CatalogVariant[],
+): Map<string, Map<string, number>> => {
+  const byCurrency = new Map<string, Map<string, number>>();
+  for (const variant of variants) {
+    for (const price of variant.prices ?? []) {
+      if (price.priceListId) {
+        continue;
+      }
+      const currency = price.currency_code?.trim().toLowerCase();
+      const amount = parseAmount(price.amount ?? null);
+      if (!currency || amount === undefined || amount <= 0) {
+        continue;
+      }
+      const forSku = byCurrency.get(variant.sku) ?? new Map<string, number>();
+      forSku.set(currency, amount);
+      byCurrency.set(variant.sku, forSku);
+    }
+  }
+  return byCurrency;
+};
+
+/** One SKU's Medusa price in a given currency, or undefined when it has none. */
+export const resolveVariantPrice = (
+  prices: Map<string, Map<string, number>>,
+  sku: string,
+  currency: string,
+): number | undefined => prices.get(sku)?.get(currency.trim().toLowerCase());
+
+/**
  * Warn once when the SRP source is not configured at all.
  *
  * Worth a dedicated line because the symptom is a whole catalogue skipped with

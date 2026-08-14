@@ -190,12 +190,26 @@ export const fakeAllegroService = (seed: {
       return Promise.resolve(created);
     },
     getClient: () => Promise.resolve(seed.client ?? null),
+    /**
+     * The pricing mode, resolved the way the real service resolves it.
+     *
+     * Read from the same seeded `syncOptions` the loop itself reads, so a fixture
+     * can never express the impossible state of a run whose pre-claim mode
+     * disagrees with the mode its options report - except deliberately, by seeding
+     * `pricingMode` on one and not the other.
+     */
+    getPricingMode: () =>
+      Promise.resolve((seed.syncOptions?.pricingMode as string | undefined) ?? "automation_rule"),
     getSyncOptions: () =>
       Promise.resolve({
         changeCap: 100,
         costsModuleKey: "productCosts",
         invoiceModuleKey: "infakt",
         marketplaceId: "allegro-pl",
+        // The default this plugin shipped with before the mode existed, so a
+        // fixture that says nothing about pricing gets the behaviour every one of
+        // these specs was written against.
+        pricingMode: "automation_rule",
         stockLocationIds: [],
         ...seed.syncOptions,
       }),
@@ -360,6 +374,15 @@ export interface VariantFixture {
   metadata?: Record<string, unknown>;
   inventoryItemIds?: string[];
   manageInventory?: boolean;
+  /**
+   * The variant's own prices, as fixed-price mode reads them off the catalogue.
+   *
+   * `currency` defaults to PLN, matching the offer fixtures. `priceListId` marks a
+   * row as a price-list override rather than the variant's own price - stated per
+   * row so a fixture can prove those are dropped, which is the difference between
+   * pushing a store's price and pushing whatever sale happened to be running.
+   */
+  prices?: { amount: number; currency?: string; priceListId?: string }[];
 }
 
 /** A container resolving the fakes, with a query graph over the given variants. */
@@ -428,6 +451,13 @@ export const fakeContainer = (input: {
                   })),
                   manage_inventory: variant.manageInventory ?? true,
                   metadata: variant.metadata ?? null,
+                  price_set: {
+                    prices: (variant.prices ?? []).map((price) => ({
+                      amount: price.amount,
+                      currency_code: price.currency ?? "pln",
+                      price_list_id: price.priceListId ?? null,
+                    })),
+                  },
                   product: null,
                   product_id: `prod_${variant.id}`,
                   sku: variant.sku,

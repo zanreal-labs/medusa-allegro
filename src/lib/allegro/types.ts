@@ -662,6 +662,55 @@ export interface AssignOfferPriceAutomationParams {
   commandId?: string;
 }
 
+/**
+ * One offer's rule REMOVAL request.
+ *
+ * The mirror of `AssignOfferPriceAutomationParams`, on the same resource: the
+ * command body carries a `remove` modification instead of a `set` one. Removal is
+ * scoped by marketplace and needs no rule name or id, because an offer carries at
+ * most one rule per marketplace.
+ *
+ * Fixed-price mode is the caller. Setting a Buy Now price on an offer that still
+ * has an automation rule attached is not a price change, it is the opening move
+ * of a fight with Allegro's engine - the rule recalculates and the pushed price
+ * is gone. So the rule comes off first, and only then does the price go on.
+ * Docs: swagger `OfferAutomaticPricingModificationRemove`.
+ */
+export interface RemoveOfferPriceAutomationParams {
+  /** Target offer id. */
+  offerId: string;
+  /** Marketplace to remove the rule from; defaults to `allegro-pl`. */
+  marketplaceId?: string;
+  /** Idempotency key; generated when omitted. See `AssignOfferPriceAutomationParams`. */
+  commandId?: string;
+}
+
+/**
+ * One offer's Buy Now price change, distilled to the fields a caller sets.
+ *
+ * The SDK expands this into the full `OfferPriceChangeCommand` body: a
+ * `FIXED_PRICE` modification plus a single-offer `CONTAINS_OFFERS` criterium.
+ * Only the fixed-price form is exposed, deliberately - Allegro also accepts
+ * INCREASE/DECREASE by value or percentage, and a relative change is a price this
+ * plugin could not have checked against the break-even floor before sending it.
+ * Docs: PUT /sale/offer-price-change-commands/{commandId}
+ * (swagger `OfferPriceChangeCommand` / `PriceModificationFixedPrice`).
+ */
+export interface ChangeOfferPriceParams {
+  /**
+   * Caller-generated idempotency key, and the path segment of the request. Not
+   * optional here, unlike the automation command: the price resource is a PUT on
+   * the command id, so there is nothing for the SDK to fall back to.
+   */
+  commandId: string;
+  /** Target offer id. */
+  offerId: string;
+  /** The exact new Buy Now price. */
+  price: AllegroMoney;
+  /** Marketplace to change the price on; omitted means the offer's base marketplace. */
+  marketplaceId?: string;
+}
+
 /** Per-marketplace failed/success/total tally on a command report. */
 export interface OfferPriceAutomationTaskCount {
   failed: number;
@@ -702,6 +751,17 @@ export interface OfferPriceAutomationTask {
 export interface OfferPriceAutomationTaskReport {
   tasks?: OfferPriceAutomationTask[];
 }
+
+/**
+ * `GeneralReport` for a price-change command, and its per-offer task list.
+ *
+ * Aliases rather than new shapes: Allegro answers both batch resources with the
+ * same `GeneralReport` and the same `CommandTask` list, so the poll helper and
+ * the failure-description helper work on either. Named separately anyway, so a
+ * caller reads which command it is holding.
+ */
+export type OfferPriceChangeCommandReport = OfferPriceAutomationCommandReport;
+export type OfferPriceChangeTaskReport = OfferPriceAutomationTaskReport;
 
 /** One stable bulk quantity command. Every offer in the command gets the same FIXED value. */
 export interface ChangeOfferQuantityParams {

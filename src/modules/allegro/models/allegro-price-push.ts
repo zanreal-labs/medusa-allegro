@@ -32,6 +32,21 @@ const AllegroPricePush = model.define("allegro_price_push", {
   id: model.id({ prefix: "algpush" }).primaryKey(),
   /** Allegro offer id the command targeted, when one was resolved. */
   offer_id: model.text().nullable(),
+  /**
+   * The exact Buy Now price sent in fixed-price mode (decimal string), and its
+   * currency. Null on an automation-rule row, where no price was sent at all -
+   * the rule's engine picks the number and this plugin only supplies the range.
+   *
+   * Separate columns from `bound_floor` / `bound_ceiling` rather than reusing
+   * them, because the two are different facts and one of them is load-bearing:
+   * `fetchLastSuccessfulBounds` reads the bounds off success rows as the ONLY
+   * memory of the price range attached to a rule. A fixed price written into
+   * those columns would be read back as a rule range that was never attached, and
+   * the offer would then be left alone by a later automation-rule run that should
+   * have re-attached it.
+   */
+  price_amount: model.text().nullable(),
+  price_currency: model.text().nullable(),
   price_mode_new: model.text().nullable(),
   /** Pricing mode before and after, e.g. "fixed" or "automation". */
   price_mode_old: model.text().nullable(),
