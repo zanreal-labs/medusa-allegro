@@ -587,7 +587,7 @@ export type PriceAutomationRuleType =
  */
 export interface PriceAutomationRule {
   id: string;
-  /** Human-readable rule name shown in the seller panel (e.g. "Bitdefender"). */
+  /** Human-readable rule name, exactly as the seller typed it in the Allegro seller panel. */
   name?: string;
   type?: PriceAutomationRuleType;
   /** True when Allegro created the rule automatically rather than the seller. */

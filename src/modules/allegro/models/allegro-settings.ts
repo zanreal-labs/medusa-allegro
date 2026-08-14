@@ -56,8 +56,10 @@ const AllegroSettings = model.define("allegro_settings", {
   automation_rule_standard: model.text().nullable(),
   /**
    * Commands issued per price-sync run. Persisted counterpart of the `changeCap`
-   * plugin option. `null` falls back to that option (which itself defaults to
-   * `DEFAULT_CHANGE_CAP`). The write-side check rejects anything that is not a
+   * plugin option. `null` falls back to that option, which itself defaults to
+   * `DEFAULT_CHANGE_CAP` - a deliberately minimal placeholder rather than a
+   * recommended figure, so this column is where a store records the blast radius
+   * it actually chose. The write-side check rejects anything that is not a
    * positive integer, for the same reason `resolveChangeCap` does at boot: a cap
    * of 0 or less is not "no writes" - the kill switches exist for that.
    */

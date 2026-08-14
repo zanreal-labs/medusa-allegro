@@ -416,8 +416,28 @@ export const DEFAULT_MARKETPLACE_ID = "allegro-pl";
 export const DEFAULT_COSTS_MODULE_KEY = "productCosts";
 /** Default container key of the optional `@zanreal/medusa-infakt` module. */
 export const DEFAULT_INVOICE_MODULE_KEY = "infakt";
-/** Default per-run cap on price-automation commands. */
-export const DEFAULT_CHANGE_CAP = 100;
+/**
+ * Default per-run cap on price-automation commands: deliberately the smallest
+ * one that still does anything.
+ *
+ * This is a PLACEHOLDER, not a recommendation. A blast radius is a risk
+ * decision belonging to the store that bears the risk, and the number that
+ * used to sit here was one store's tuned figure shipped to everyone else as if
+ * it were a sensible starting point. Rather than publish somebody's risk
+ * appetite, this ships the most cautious value that is still a working
+ * configuration, and expects every operator to raise it deliberately.
+ *
+ * Erring low is the safe direction and it is not silent: `syncAllegroPrices`
+ * logs "change cap (N) hit; M offer(s) wait for the next tick" on every run
+ * that touches it, so a store left on this value can see exactly why the
+ * catalogue is converging one offer at a time. Erring high is the direction
+ * that lets a bad run reach further, which is the whole thing this cap exists
+ * to prevent.
+ *
+ * Raise it from Settings > Allegro (persisted, no restart), from
+ * `ALLEGRO_CHANGE_CAP`, or with the `changeCap` plugin option.
+ */
+export const DEFAULT_CHANGE_CAP = 1;
 
 /**
  * Reject a boolean-looking string on a kill-switch.

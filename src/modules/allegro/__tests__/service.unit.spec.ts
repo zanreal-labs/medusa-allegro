@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { MedusaError } from "@medusajs/framework/utils";
 import { encryptValue } from "../../../lib/crypto";
+import { DEFAULT_CHANGE_CAP } from "../../../lib/options";
 import type { AllegroPluginOptions } from "../../../lib/options";
 import AllegroModuleService from "../service";
 
@@ -627,7 +628,8 @@ describe("getPublicOptions", () => {
       // "not configured" (price sync inert, SRP unresolvable) from a default, and
       // a key silently disappearing from this shape would break that.
       automationRules: undefined,
-      changeCap: 100,
+      // The shipped placeholder, not a recommendation - see DEFAULT_CHANGE_CAP.
+      changeCap: DEFAULT_CHANGE_CAP,
       environment: "production",
       invoiceAttachDisabled: false,
       marketplaceId: "allegro-pl",
