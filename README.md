@@ -439,15 +439,43 @@ so every non-per-product view lives under Settings.
   table**, and it exposes no list-row widget zone, so on that page a roll-up is
   the only thing a plugin can offer. It stays as the zero-dependency fallback for
   a store that has not installed admin-kit.
-- **Catalog column** (`src/admin/widgets/register-variant-columns.tsx`) - an
-  `Allegro` column registered into
+- **Catalog columns** (`src/admin/widgets/register-variant-columns.tsx`) - two
+  columns registered into
   [`@zanreal/medusa-admin-kit`](https://github.com/zanreal-labs)'s Catalog route,
-  which lists **one variant per row**. The cell names what is wrong with that one
-  SKU: the conflict code (`duplicate-sku`, `no-offer`, ...) in red, `drift` in
-  orange, Allegro's own offer status in green when it is listed and healthy,
-  `unlinked` in grey, and a muted "not listed" when the SKU has no mapping at all.
-  This is the real per-row status the banner could only approximate, and it does
-  not cost this plugin a competing products list of its own.
+  which lists **one variant per row**.
+
+  `Allegro` is the **live offer price**, from `allegro_offer.price_amount` with
+  its `price_currency`. It is a separate column rather than a second line inside
+  the status badge, because the whole point of showing it is comparing it with
+  the shop price and the SRP the kit renders two columns to the left, and that
+  comparison needs a figure in a money column lined up with those, not a number
+  inside a coloured badge. Priority 9 puts it immediately before the status
+  column, so the three prices sit together. A price on a `paused` or `ended`
+  offer is muted: the figure is real, but nobody can buy at it, and rendering it
+  like a live price would read as current. A SKU with no offer, or an offer with
+  no price observed yet, renders a muted `-`; never `0`, and never an error.
+
+  `Allegro status` is the mapping state. The cell names what is wrong with that
+  one SKU: the conflict code (`duplicate-sku`, `no-offer`, ...) in red, `drift`
+  in orange, Allegro's own offer status in green when it is listed and healthy,
+  `unlinked` in grey, and a muted "not listed" when the SKU has no mapping at
+  all. This is the real per-row status the banner could only approximate, and it
+  does not cost this plugin a competing products list of its own.
+
+  **Both columns share one request per page.** `loadData` runs per row, so two
+  columns over a 100-row page would be 200 single-SKU requests for the same
+  table. `src/admin/lib/offer-batch.ts` coalesces every SKU asked for within a
+  tick - React flushes all the cells' effects in one pass - into a single
+  `/admin/allegro/offers?skus=...` call, de-duplicating the SKU the two columns
+  both want. It deliberately keeps no cache across batches: a price is exactly
+  the thing a sync changes underneath the operator, so a re-render has to be
+  able to re-read it.
+
+  `price_amount` is a **decimal string** (`model.text()`, Allegro's own value
+  verbatim), not a Medusa `BigNumber`, and `resolveVariantOfferPrice` reads it as
+  one - with `Number` rather than `Number.parseFloat`, so `"365,31"` is rejected
+  instead of silently becoming `365`. An unreadable amount is `null`, which
+  renders as the dash; `0` is left meaning zero.
 
   It used to read `"3 offers / 1 conflict"`, because an admin-kit row was a
   product and a product spans many SKUs - which told an operator that something
@@ -455,7 +483,9 @@ so every non-per-product view lives under Settings.
   to act. Now a row is one variant with at most one offer. The registration moved
   from `registerProductColumn` to `registerVariantColumn` and the SKU roll-up in
   `src/admin/lib` is gone: `summarizeOfferStatus` / `formatOfferStatus` became
-  `resolveVariantOffer` / `formatVariantOffer` / `variantOfferColor`.
+  `resolveVariantOffer` / `formatVariantOffer` / `variantOfferColor`. The status
+  column's header also changed from `Allegro` to `Allegro status`, so that the
+  price column can carry the plainer name next to `Shop` and `SRP`.
 - **Settings -> Allegro** - the configuration and control home: the OAuth
   connection, the **live writer toggles** (interactive switches backed by the
   persisted [runtime settings](#runtime-toggles) - arm or disarm each writer without

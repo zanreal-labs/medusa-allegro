@@ -2,32 +2,128 @@ import { defineWidgetConfig } from "@medusajs/admin-sdk";
 import { StatusBadge, Text } from "@medusajs/ui";
 import { registerVariantColumn } from "@zanreal/medusa-admin-kit";
 import type { CatalogProduct } from "@zanreal/medusa-admin-kit";
-import { formatVariantOffer, resolveVariantOffer, variantOfferColor } from "../lib/variant-offer";
-import type { VariantOffer } from "../lib/variant-offer";
+import { createOfferBatcher } from "../lib/offer-batch";
+import type { OfferFetcher } from "../lib/offer-batch";
 import { sdk } from "../lib/sdk";
 import type { OffersResponse } from "../lib/types";
+import {
+  classifyVariantOffer,
+  formatVariantOffer,
+  isLiveOfferPrice,
+  resolveVariantOfferPrice,
+  variantOfferColor,
+} from "../lib/variant-offer";
+import type { VariantOffer, VariantOfferPrice } from "../lib/variant-offer";
 
 /**
- * Registers the per-variant Allegro offer-status column in the shared,
- * extensible catalogue list (`@zanreal/medusa-admin-kit`'s Catalog route).
+ * Registers this plugin's per-variant columns in the shared, extensible
+ * catalogue list (`@zanreal/medusa-admin-kit`'s Catalog route).
  *
- * This call must live at the top level of this file - not in the component
+ * These calls must live at the top level of this file - not in the component
  * body, not in an effect - because the admin build statically imports every
  * widget into `virtual:medusa/widgets`, which the dashboard evaluates once at
- * boot. `registerVariantColumn` runs then, strictly before anyone can
- * navigate to Catalog, so the column is always present by the time that
- * route's table reads the registry. See the admin-kit README's "contributor
- * contract" for the full explanation of why this is not optional.
+ * boot. `registerVariantColumn` runs then, strictly before anyone can navigate
+ * to Catalog, so the columns are always present by the time that route's table
+ * reads the registry. See the admin-kit README's "contributor contract" for the
+ * full explanation of why this is not optional.
  *
- * The lookup is a network call keyed by the row's SKU, so it goes through
- * `loadData` rather than `cell`: the Catalog table renders immediately with
- * this column showing its loading state, then re-renders once that SKU's offer
- * resolves. A variant with no SKU never hits the network at all.
+ * ## Two columns, not one
  *
- * The cell names what is wrong with this one SKU. It used to read
- * "3 offers / 1 conflict" because a row was a product and a product spans many
- * SKUs; a row is now one variant with at most one offer, so the column can say
- * which state that offer is in.
+ * The price is a **separate** column from the offer status rather than a second
+ * line inside it. The status column renders a badge whose text is a state name;
+ * a number inside a coloured badge reads as a label, not as money. More
+ * practically, the point of showing the Allegro price is comparing it against
+ * the shop price and the SRP that the kit renders two columns to the left, and
+ * that comparison only works if this is a figure in a right-aligned money
+ * column lined up with those - which it cannot be while it is a sub-line of a
+ * status cell. Priority 9 puts it immediately before the status column, so the
+ * three prices sit together and the badge that qualifies this one sits right
+ * after it.
+ *
+ * ## One request per page, not one per cell
+ *
+ * Both columns need the same offer row, and `loadData` runs per row. Left
+ * alone, that is `2 x pageSize` requests for one page. Both go through
+ * `offerBatcher` instead, which coalesces every SKU asked for within a tick
+ * into a single `/admin/allegro/offers?skus=...` call. See `lib/offer-batch.ts`.
+ */
+
+/**
+ * Ask the offers route for an exact SKU set.
+ *
+ * `limit` is set to the size of that set: the route defaults to 50 and would
+ * otherwise truncate a full page's worth of SKUs, and a truncated response is
+ * indistinguishable from "these SKUs have no offers" - every dropped row would
+ * render as a calm, wrong "not listed".
+ */
+const fetchOffersBySkus: OfferFetcher = async (skus) => {
+  const response = await sdk.client.fetch<OffersResponse>("/admin/allegro/offers", {
+    query: { limit: skus.length, skus },
+  });
+  return response.offers ?? [];
+};
+
+/** One batcher for both columns, so they share a request rather than race. */
+const offerBatcher = createOfferBatcher(fetchOffersBySkus);
+
+/** A SKU-less variant cannot be matched to an offer; skip the network entirely. */
+const loadOfferRow = async (sku: string | null) => (sku ? offerBatcher.load(sku) : null);
+
+registerVariantColumn<CatalogProduct, VariantOfferPrice | null>({
+  cell: (_ctx, async) => {
+    if (!async || async.isLoading) {
+      return (
+        <Text className="text-ui-fg-muted" size="small">
+          ...
+        </Text>
+      );
+    }
+    if (async.error) {
+      return (
+        <Text className="text-ui-fg-error" size="small">
+          error
+        </Text>
+      );
+    }
+    const price = async.data;
+    if (!price) {
+      // Not listed on Allegro, or listed with no price observed yet. Neither is
+      // a fault: most of this catalogue is not on Allegro at all, so this has
+      // to be as quiet as an empty cell while still being a definite "no
+      // price" rather than a zero.
+      return (
+        <span className="flex w-full justify-end">
+          <Text className="text-ui-fg-muted" size="small">
+            -
+          </Text>
+        </span>
+      );
+    }
+    const live = isLiveOfferPrice(price);
+    return (
+      <span className="flex w-full items-baseline justify-end gap-x-1 tabular-nums">
+        <Text className={live ? undefined : "text-ui-fg-muted"} size="small">
+          {price.amount.toFixed(2)}
+        </Text>
+        {price.currency ? (
+          <Text className="text-ui-fg-muted" size="xsmall">
+            {price.currency}
+          </Text>
+        ) : null}
+      </span>
+    );
+  },
+  header: "Allegro",
+  id: "allegro.price",
+  loadData: async (ctx) => resolveVariantOfferPrice(await loadOfferRow(ctx.sku)),
+  priority: 9,
+});
+
+/**
+ * The offer-status column. The cell names what is wrong with this one SKU: it
+ * used to read "3 offers / 1 conflict" because a row was a product and a
+ * product spans many SKUs; a row is now one variant with at most one offer, so
+ * the column can say which state that offer is in.
  */
 registerVariantColumn<CatalogProduct, VariantOffer | null>({
   cell: (_ctx, async) => {
@@ -51,17 +147,9 @@ registerVariantColumn<CatalogProduct, VariantOffer | null>({
     }
     return <StatusBadge color={variantOfferColor(offer)}>{formatVariantOffer(offer)}</StatusBadge>;
   },
-  header: "Allegro",
+  header: "Allegro status",
   id: "allegro.offer_status",
-  loadData: async (ctx) => {
-    if (!ctx.sku) {
-      return null;
-    }
-    const response = await sdk.client.fetch<OffersResponse>("/admin/allegro/offers", {
-      query: { limit: 1, skus: ctx.sku },
-    });
-    return resolveVariantOffer(response.offers, ctx.sku);
-  },
+  loadData: async (ctx) => classifyVariantOffer(await loadOfferRow(ctx.sku)),
   priority: 10,
 });
 
