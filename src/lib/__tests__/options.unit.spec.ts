@@ -36,11 +36,17 @@ describe("resolveAllegroOptions", () => {
     expect(resolved.backendUrl).toBeUndefined();
   });
 
-  it("requests offer read, offer write and order read by default", () => {
+  it("requests every scope the plugin's features need, in one consent", () => {
+    // Including the two that nothing reads until a writer is armed. A scope
+    // added later costs another trip through Allegro's consent screen, and
+    // `profile:read` is what lets the admin name the account it connected to
+    // instead of showing "unknown".
     expect(DEFAULT_SCOPES.split(" ")).toEqual([
       "allegro:api:sale:offers:read",
       "allegro:api:sale:offers:write",
       "allegro:api:orders:read",
+      "allegro:api:orders:write",
+      "allegro:api:profile:read",
     ]);
   });
 
@@ -58,7 +64,9 @@ describe("resolveAllegroOptions", () => {
   ] as const)("throws when %s is missing", (field) => {
     const options: Partial<AllegroPluginOptions> = validOptions();
     delete options[field];
-    expect(() => resolveAllegroOptions(options)).toThrow(new RegExp(`\`${field}\` is required`));
+    expect(() => resolveAllegroOptions(options)).toThrow(
+      new RegExp(`\`${field}\` is required`),
+    );
   });
 
   it("rejects an unknown environment", () => {
@@ -71,9 +79,10 @@ describe("resolveAllegroOptions", () => {
   });
 
   it("accepts sandbox", () => {
-    expect(resolveAllegroOptions({ ...validOptions(), environment: "sandbox" }).environment).toBe(
-      "sandbox",
-    );
+    expect(
+      resolveAllegroOptions({ ...validOptions(), environment: "sandbox" })
+        .environment,
+    ).toBe("sandbox");
   });
 
   it("rejects an encryption key that is not 32 bytes, at boot", () => {
@@ -87,17 +96,20 @@ describe("resolveAllegroOptions", () => {
 
   it("rejects an all-zero encryption key at boot", () => {
     expect(() =>
-      resolveAllegroOptions({ ...validOptions(), encryptionKey: "A".repeat(43) }),
+      resolveAllegroOptions({
+        ...validOptions(),
+        encryptionKey: "A".repeat(43),
+      }),
     ).toThrow(/zero bytes/);
   });
 
   it("rejects app identity that Allegro's User-Agent rule would reject", () => {
-    expect(() => resolveAllegroOptions({ ...validOptions(), appName: "My App" })).toThrow(
-      /User-Agent token/,
-    );
-    expect(() => resolveAllegroOptions({ ...validOptions(), docsUrl: "not-a-url" })).toThrow(
-      /valid absolute URL/,
-    );
+    expect(() =>
+      resolveAllegroOptions({ ...validOptions(), appName: "My App" }),
+    ).toThrow(/User-Agent token/);
+    expect(() =>
+      resolveAllegroOptions({ ...validOptions(), docsUrl: "not-a-url" }),
+    ).toThrow(/valid absolute URL/);
   });
 
   it("rejects a redirectPath that is not rooted", () => {
@@ -110,15 +122,15 @@ describe("resolveAllegroOptions", () => {
   });
 
   it("rejects a protocol-relative redirectPath, which would move the redirect_uri off-origin", () => {
-    expect(() => resolveAllegroOptions({ ...validOptions(), redirectPath: "//host/x" })).toThrow(
-      /protocol-relative/,
-    );
+    expect(() =>
+      resolveAllegroOptions({ ...validOptions(), redirectPath: "//host/x" }),
+    ).toThrow(/protocol-relative/);
   });
 
   it("rejects a relative backendUrl", () => {
-    expect(() => resolveAllegroOptions({ ...validOptions(), backendUrl: "/backend" })).toThrow(
-      /absolute URL/,
-    );
+    expect(() =>
+      resolveAllegroOptions({ ...validOptions(), backendUrl: "/backend" }),
+    ).toThrow(/absolute URL/);
   });
 
   it("rejects a non-boolean priceSyncDisabled instead of failing open", () => {
@@ -138,17 +150,21 @@ describe("resolveAllegroOptions", () => {
 
   it("still accepts an explicit false for priceSyncDisabled", () => {
     expect(
-      resolveAllegroOptions({ ...validOptions(), priceSyncDisabled: false }).priceSyncDisabled,
+      resolveAllegroOptions({ ...validOptions(), priceSyncDisabled: false })
+        .priceSyncDisabled,
     ).toBe(false);
   });
 
   it("falls back to the default scopes when an empty string is given", () => {
-    expect(resolveAllegroOptions({ ...validOptions(), scopes: "   " }).scopes).toBe(DEFAULT_SCOPES);
+    expect(
+      resolveAllegroOptions({ ...validOptions(), scopes: "   " }).scopes,
+    ).toBe(DEFAULT_SCOPES);
   });
 
   it("honours the priceSyncDisabled option", () => {
     expect(
-      resolveAllegroOptions({ ...validOptions(), priceSyncDisabled: true }).priceSyncDisabled,
+      resolveAllegroOptions({ ...validOptions(), priceSyncDisabled: true })
+        .priceSyncDisabled,
     ).toBe(true);
   });
 
@@ -157,7 +173,8 @@ describe("resolveAllegroOptions", () => {
     process.env.ALLEGRO_PRICE_SYNC_DISABLED = "yes";
     try {
       expect(
-        resolveAllegroOptions({ ...validOptions(), priceSyncDisabled: false }).priceSyncDisabled,
+        resolveAllegroOptions({ ...validOptions(), priceSyncDisabled: false })
+          .priceSyncDisabled,
       ).toBe(true);
     } finally {
       if (previous === undefined) {
@@ -170,36 +187,62 @@ describe("resolveAllegroOptions", () => {
 });
 
 describe("isPriceSyncDisabledByEnv", () => {
-  it.each(["1", "true", "TRUE", "yes", " Yes "])("treats %p as disabled", (value) => {
-    expect(isPriceSyncDisabledByEnv({ ALLEGRO_PRICE_SYNC_DISABLED: value })).toBe(true);
-  });
+  it.each(["1", "true", "TRUE", "yes", " Yes "])(
+    "treats %p as disabled",
+    (value) => {
+      expect(
+        isPriceSyncDisabledByEnv({ ALLEGRO_PRICE_SYNC_DISABLED: value }),
+      ).toBe(true);
+    },
+  );
 
-  it.each(["0", "false", "no", "", undefined])("treats %p as enabled", (value) => {
-    expect(isPriceSyncDisabledByEnv({ ALLEGRO_PRICE_SYNC_DISABLED: value })).toBe(false);
-  });
+  it.each(["0", "false", "no", "", undefined])(
+    "treats %p as enabled",
+    (value) => {
+      expect(
+        isPriceSyncDisabledByEnv({ ALLEGRO_PRICE_SYNC_DISABLED: value }),
+      ).toBe(false);
+    },
+  );
 });
 
 describe("the configuration-field environment locks", () => {
   it("reads a set variable as the lock value, trimmed", () => {
-    expect(marketplaceIdEnvOverride({ ALLEGRO_MARKETPLACE_ID: "  allegro-pl  " })).toBe(
-      "allegro-pl",
-    );
-    expect(salesChannelIdEnvOverride({ ALLEGRO_SALES_CHANNEL_ID: "sc_123" })).toBe("sc_123");
-    expect(salesChannelNameEnvOverride({ ALLEGRO_SALES_CHANNEL_NAME: "Allegro" })).toBe("Allegro");
-    expect(srpMetadataKeyEnvOverride({ ALLEGRO_SRP_METADATA_KEY: "srp" })).toBe("srp");
-    expect(srpPriceListIdEnvOverride({ ALLEGRO_SRP_PRICE_LIST_ID: "pl_1" })).toBe("pl_1");
-    expect(automationRuleStandardEnvOverride({ ALLEGRO_AUTOMATION_RULE_STANDARD: "Store" })).toBe(
-      "Store",
+    expect(
+      marketplaceIdEnvOverride({ ALLEGRO_MARKETPLACE_ID: "  allegro-pl  " }),
+    ).toBe("allegro-pl");
+    expect(
+      salesChannelIdEnvOverride({ ALLEGRO_SALES_CHANNEL_ID: "sc_123" }),
+    ).toBe("sc_123");
+    expect(
+      salesChannelNameEnvOverride({ ALLEGRO_SALES_CHANNEL_NAME: "Allegro" }),
+    ).toBe("Allegro");
+    expect(srpMetadataKeyEnvOverride({ ALLEGRO_SRP_METADATA_KEY: "srp" })).toBe(
+      "srp",
     );
     expect(
-      automationRulePromotedEnvOverride({ ALLEGRO_AUTOMATION_RULE_PROMOTED: "Store Sale" }),
+      srpPriceListIdEnvOverride({ ALLEGRO_SRP_PRICE_LIST_ID: "pl_1" }),
+    ).toBe("pl_1");
+    expect(
+      automationRuleStandardEnvOverride({
+        ALLEGRO_AUTOMATION_RULE_STANDARD: "Store",
+      }),
+    ).toBe("Store");
+    expect(
+      automationRulePromotedEnvOverride({
+        ALLEGRO_AUTOMATION_RULE_PROMOTED: "Store Sale",
+      }),
     ).toBe("Store Sale");
   });
 
   it("reads an absent or blank variable as no lock", () => {
     expect(marketplaceIdEnvOverride({})).toBeUndefined();
-    expect(marketplaceIdEnvOverride({ ALLEGRO_MARKETPLACE_ID: "" })).toBeUndefined();
-    expect(marketplaceIdEnvOverride({ ALLEGRO_MARKETPLACE_ID: "   " })).toBeUndefined();
+    expect(
+      marketplaceIdEnvOverride({ ALLEGRO_MARKETPLACE_ID: "" }),
+    ).toBeUndefined();
+    expect(
+      marketplaceIdEnvOverride({ ALLEGRO_MARKETPLACE_ID: "   " }),
+    ).toBeUndefined();
   });
 });
 
@@ -220,7 +263,9 @@ describe("changeCapEnvOverride", () => {
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "0" })).toBeUndefined();
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "-5" })).toBeUndefined();
     expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "1.5" })).toBeUndefined();
-    expect(changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "not-a-number" })).toBeUndefined();
+    expect(
+      changeCapEnvOverride({ ALLEGRO_CHANGE_CAP: "not-a-number" }),
+    ).toBeUndefined();
   });
 });
 
@@ -234,28 +279,37 @@ describe("the change cap default", () => {
     // convergence, and does so loudly (the run logs when the cap bites); erring
     // high is the direction this cap exists to prevent.
     expect(DEFAULT_CHANGE_CAP).toBe(1);
-    expect(resolveAllegroOptions(validOptions()).changeCap).toBe(DEFAULT_CHANGE_CAP);
+    expect(resolveAllegroOptions(validOptions()).changeCap).toBe(
+      DEFAULT_CHANGE_CAP,
+    );
   });
 
   it("keeps a deliberately chosen cap untouched", () => {
-    expect(resolveAllegroOptions({ ...validOptions(), changeCap: 250 }).changeCap).toBe(250);
+    expect(
+      resolveAllegroOptions({ ...validOptions(), changeCap: 250 }).changeCap,
+    ).toBe(250);
   });
 
   it("still refuses a zero or negative cap, which is a kill switch's job", () => {
-    expect(() => resolveAllegroOptions({ ...validOptions(), changeCap: 0 })).toThrow(
-      /positive integer/u,
-    );
+    expect(() =>
+      resolveAllegroOptions({ ...validOptions(), changeCap: 0 }),
+    ).toThrow(/positive integer/u);
   });
 });
 
 describe("the pricing mode option", () => {
   it("defaults to the behaviour this plugin had before the mode existed", () => {
-    expect(resolveAllegroOptions(validOptions()).pricingMode).toBe("automation_rule");
+    expect(resolveAllegroOptions(validOptions()).pricingMode).toBe(
+      "automation_rule",
+    );
   });
 
   it("accepts each of the three modes", () => {
     for (const mode of ["monitor", "automation_rule", "fixed_price"] as const) {
-      expect(resolveAllegroOptions({ ...validOptions(), pricingMode: mode }).pricingMode).toBe(mode);
+      expect(
+        resolveAllegroOptions({ ...validOptions(), pricingMode: mode })
+          .pricingMode,
+      ).toBe(mode);
     }
   });
 
@@ -265,25 +319,34 @@ describe("the pricing mode option", () => {
     // different pricing strategy than the config file states is the kind of
     // surprise every other option check in this file exists to prevent.
     expect(() =>
-      resolveAllegroOptions({ ...validOptions(), pricingMode: "fixed" as never }),
+      resolveAllegroOptions({
+        ...validOptions(),
+        pricingMode: "fixed" as never,
+      }),
     ).toThrow(/must be one of monitor, automation_rule, fixed_price/);
   });
 });
 
 describe("pricingModeEnvOverride", () => {
   it("locks the mode when the variable names a real one", () => {
-    expect(pricingModeEnvOverride({ ALLEGRO_PRICING_MODE: "monitor" })).toBe("monitor");
+    expect(pricingModeEnvOverride({ ALLEGRO_PRICING_MODE: "monitor" })).toBe(
+      "monitor",
+    );
   });
 
   it("is absent when the variable is unset or blank", () => {
     expect(pricingModeEnvOverride({})).toBeUndefined();
-    expect(pricingModeEnvOverride({ ALLEGRO_PRICING_MODE: "  " })).toBeUndefined();
+    expect(
+      pricingModeEnvOverride({ ALLEGRO_PRICING_MODE: "  " }),
+    ).toBeUndefined();
   });
 
   it("reads a typo as no lock rather than throwing", () => {
     // Evaluated on every `getSyncOptions()` call. A mistyped variable must not turn
     // every price-sync run into a thrown error, and falling back to the chosen mode
     // never invents one that writes more than the operator asked for.
-    expect(pricingModeEnvOverride({ ALLEGRO_PRICING_MODE: "fixed" })).toBeUndefined();
+    expect(
+      pricingModeEnvOverride({ ALLEGRO_PRICING_MODE: "fixed" }),
+    ).toBeUndefined();
   });
 });

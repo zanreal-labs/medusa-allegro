@@ -9,8 +9,14 @@ import {
 import { AllegroClient } from "../../lib/allegro/client";
 import { AllegroOAuth } from "../../lib/allegro/oauth";
 import type { PersistedToken } from "../../lib/allegro/types";
-import { CONFIG_FIELDS, resolveEffectiveConfigValue } from "../../lib/config-fields";
-import type { ConfigFieldColumn, ConfigFieldKey } from "../../lib/config-fields";
+import {
+  CONFIG_FIELDS,
+  resolveEffectiveConfigValue,
+} from "../../lib/config-fields";
+import type {
+  ConfigFieldColumn,
+  ConfigFieldKey,
+} from "../../lib/config-fields";
 import { decryptValue, encryptValue } from "../../lib/crypto";
 import {
   automationRulePromotedEnvOverride,
@@ -49,7 +55,10 @@ import {
   resolveEffectiveEnabled,
   RUNTIME_TOGGLES,
 } from "../../lib/runtime-toggles";
-import type { RuntimeToggleColumn, RuntimeToggleKey } from "../../lib/runtime-toggles";
+import type {
+  RuntimeToggleColumn,
+  RuntimeToggleKey,
+} from "../../lib/runtime-toggles";
 import type { FailureState } from "../../lib/sync/failure-state";
 import AllegroAuth from "./models/allegro-auth";
 import AllegroCategoryRate from "./models/allegro-category-rate";
@@ -117,7 +126,8 @@ export const SYNC_HEARTBEAT_INTERVAL_MS = 60_000;
  * Substring-matching a message would start reporting collisions as hard failures
  * the day the wording changes.
  */
-export const SYNC_CLAIM_HELD = "a sync run is already in progress for this provider";
+export const SYNC_CLAIM_HELD =
+  "a sync run is already in progress for this provider";
 
 /**
  * The persisted settings singleton, as callers read it.
@@ -204,7 +214,9 @@ export interface AllegroConfigFieldState {
  * write into a "no overload matches" compile error instead of the one bad field
  * actually being rejected.
  */
-export type AllegroSettingsPatch = Partial<Record<RuntimeToggleColumn, boolean>> & {
+export type AllegroSettingsPatch = Partial<
+  Record<RuntimeToggleColumn, boolean>
+> & {
   pricing_mode?: string | null;
   automation_rule_standard?: string | null;
   automation_rule_promoted?: string | null;
@@ -252,6 +264,7 @@ export interface AllegroSyncOptions {
   regionId?: string;
   salesChannelId?: string;
   salesChannelName?: string;
+  srpFallbackMarkupPercent?: number;
   srpMetadataKey?: string;
   srpPriceListId?: string;
   stockLocationIds: string[];
@@ -341,7 +354,10 @@ class AllegroModuleService extends MedusaService({
    */
   protected client_?: AllegroClient;
 
-  constructor(container: Record<string, unknown>, options: AllegroPluginOptions) {
+  constructor(
+    container: Record<string, unknown>,
+    options: AllegroPluginOptions,
+  ) {
     super(container, options);
     this.options_ = resolveAllegroOptions(options);
     const logger = container.logger as AllegroServiceLogger | undefined;
@@ -403,13 +419,19 @@ class AllegroModuleService extends MedusaService({
       // `resolveAutomationRules` - so a mix where only one resolves to a value is
       // read the same way that plugin option always was: inert, not half-applied.
       automationRules:
-        typeof standard === "string" && standard && typeof promoted === "string" && promoted
+        typeof standard === "string" &&
+        standard &&
+        typeof promoted === "string" &&
+        promoted
           ? { promoted, standard }
           : undefined,
-      changeCap: (resolved.changeCap.effectiveValue as number | null) ?? o.changeCap,
+      changeCap:
+        (resolved.changeCap.effectiveValue as number | null) ?? o.changeCap,
       costsModuleKey: o.costsModuleKey,
       invoiceModuleKey: o.invoiceModuleKey,
-      marketplaceId: (resolved.marketplaceId.effectiveValue as string | null) ?? o.marketplaceId,
+      marketplaceId:
+        (resolved.marketplaceId.effectiveValue as string | null) ??
+        o.marketplaceId,
       // Coerced rather than cast: the column is free text, so a row written by an
       // older build, by hand, or by a future mode this build does not know about
       // must read as the default instead of steering the loop with a value it
@@ -417,13 +439,21 @@ class AllegroModuleService extends MedusaService({
       pricingMode: coercePricingMode(resolved.pricingMode.effectiveValue),
       regionId: o.regionId,
       salesChannelId:
-        typeof salesChannelId === "string" && salesChannelId ? salesChannelId : undefined,
+        typeof salesChannelId === "string" && salesChannelId
+          ? salesChannelId
+          : undefined,
       salesChannelName:
-        typeof salesChannelName === "string" && salesChannelName ? salesChannelName : undefined,
+        typeof salesChannelName === "string" && salesChannelName
+          ? salesChannelName
+          : undefined,
       srpMetadataKey:
-        typeof srpMetadataKey === "string" && srpMetadataKey ? srpMetadataKey : undefined,
+        typeof srpMetadataKey === "string" && srpMetadataKey
+          ? srpMetadataKey
+          : undefined,
       srpPriceListId:
-        typeof srpPriceListId === "string" && srpPriceListId ? srpPriceListId : undefined,
+        typeof srpPriceListId === "string" && srpPriceListId
+          ? srpPriceListId
+          : undefined,
       stockLocationIds: o.stockLocationIds,
     };
   }
@@ -474,7 +504,10 @@ class AllegroModuleService extends MedusaService({
 
   /** The stored singleton row, or undefined before its first read created it. */
   protected async readSettingsRow(): Promise<AllegroSettingsRow | undefined> {
-    const [row] = await this.listAllegroSettings({ id: ALLEGRO_SETTINGS_ID }, { take: 1 });
+    const [row] = await this.listAllegroSettings(
+      { id: ALLEGRO_SETTINGS_ID },
+      { take: 1 },
+    );
     return row as unknown as AllegroSettingsRow | undefined;
   }
 
@@ -497,7 +530,9 @@ class AllegroModuleService extends MedusaService({
    * `medusa-config.ts` (`resolveAutomationRules`, `resolveAllegroOptions`) - this is
    * the same invariant, extended to the case an admin edit newly creates.
    */
-  async updateSettings(patch: AllegroSettingsPatch): Promise<AllegroSettingsRow> {
+  async updateSettings(
+    patch: AllegroSettingsPatch,
+  ): Promise<AllegroSettingsRow> {
     // Ensure the singleton exists before the conditional update, so a first-ever write
     // through the admin has a row to land on.
     await this.getSettings();
@@ -525,7 +560,8 @@ class AllegroModuleService extends MedusaService({
   private forceDisabledByKey(): Record<RuntimeToggleKey, boolean> {
     const o = this.options_;
     return {
-      fulfillmentWriteback: o.fulfillmentWritebackDisabled || isFulfillmentWritebackDisabledByEnv(),
+      fulfillmentWriteback:
+        o.fulfillmentWritebackDisabled || isFulfillmentWritebackDisabledByEnv(),
       invoiceAttach: o.invoiceAttachDisabled || isInvoiceAttachDisabledByEnv(),
       ordersSync: o.ordersSyncDisabled || isOrdersSyncDisabledByEnv(),
       priceSync: o.priceSyncDisabled || isPriceSyncDisabledByEnv(),
@@ -539,7 +575,10 @@ class AllegroModuleService extends MedusaService({
     column: RuntimeToggleColumn,
   ): Promise<boolean> {
     const settings = await this.getSettings();
-    return resolveEffectiveEnabled(settings[column] === true, this.forceDisabledByKey()[key]);
+    return resolveEffectiveEnabled(
+      settings[column] === true,
+      this.forceDisabledByKey()[key],
+    );
   }
 
   /**
@@ -548,17 +587,26 @@ class AllegroModuleService extends MedusaService({
    * per item, so flipping the toggle stops an in-flight run without a restart.
    */
   async isPriceSyncDisabled(): Promise<boolean> {
-    return !(await this.resolveWriterEnabled("priceSync", "price_sync_enabled"));
+    return !(await this.resolveWriterEnabled(
+      "priceSync",
+      "price_sync_enabled",
+    ));
   }
 
   /** Effective quantity-write kill-switch. Same persisted-plus-override contract. */
   async isStockSyncDisabled(): Promise<boolean> {
-    return !(await this.resolveWriterEnabled("stockSync", "stock_sync_enabled"));
+    return !(await this.resolveWriterEnabled(
+      "stockSync",
+      "stock_sync_enabled",
+    ));
   }
 
   /** Effective order-drain kill-switch. Same persisted-plus-override contract. */
   async isOrdersSyncDisabled(): Promise<boolean> {
-    return !(await this.resolveWriterEnabled("ordersSync", "orders_sync_enabled"));
+    return !(await this.resolveWriterEnabled(
+      "ordersSync",
+      "orders_sync_enabled",
+    ));
   }
 
   /**
@@ -585,7 +633,10 @@ class AllegroModuleService extends MedusaService({
    * other problem. Defaults ON (enabled-but-inert until an invoicing module is wired).
    */
   async isInvoiceAttachDisabled(): Promise<boolean> {
-    return !(await this.resolveWriterEnabled("invoiceAttach", "invoice_attach_enabled"));
+    return !(await this.resolveWriterEnabled(
+      "invoiceAttach",
+      "invoice_attach_enabled",
+    ));
   }
 
   /**
@@ -605,7 +656,10 @@ class AllegroModuleService extends MedusaService({
       return {
         column: meta.column,
         description: meta.description,
-        effectiveEnabled: resolveEffectiveEnabled(persistedEnabled, forceDisabled),
+        effectiveEnabled: resolveEffectiveEnabled(
+          persistedEnabled,
+          forceDisabled,
+        ),
         envVar: meta.envVar,
         forceDisabled,
         key: meta.key,
@@ -625,7 +679,10 @@ class AllegroModuleService extends MedusaService({
    * `ALLEGRO_SALES_CHANNEL_ID` is pinning a wiring-critical value against an admin
    * mistake, and that has to take effect without a restart.
    */
-  private configFieldEnvOverrides(): Record<ConfigFieldKey, string | number | undefined> {
+  private configFieldEnvOverrides(): Record<
+    ConfigFieldKey,
+    string | number | undefined
+  > {
     return {
       automationRulePromoted: automationRulePromotedEnvOverride(),
       automationRuleStandard: automationRuleStandardEnvOverride(),
@@ -646,7 +703,10 @@ class AllegroModuleService extends MedusaService({
    * before any of them were persisted, so an unedited field behaves exactly as it
    * always did.
    */
-  private configFieldDefaults(): Record<ConfigFieldKey, string | number | null> {
+  private configFieldDefaults(): Record<
+    ConfigFieldKey,
+    string | number | null
+  > {
     const o = this.options_;
     return {
       automationRulePromoted: o.automationRules?.promoted ?? null,
@@ -701,7 +761,11 @@ class AllegroModuleService extends MedusaService({
       const configDefault = defaults[meta.key] ?? null;
       result[meta.key] = {
         configDefault,
-        effectiveValue: resolveEffectiveConfigValue(envOverride, persistedValue, configDefault),
+        effectiveValue: resolveEffectiveConfigValue(
+          envOverride,
+          persistedValue,
+          configDefault,
+        ),
         envOverride,
         locked: envOverride !== null,
         persistedValue,
@@ -736,7 +800,9 @@ class AllegroModuleService extends MedusaService({
    * the pair is touched) can never newly collide anything, so this only does work
    * when the patch actually carries a configuration column.
    */
-  private async assertConfigWriteIsSafe(patch: AllegroSettingsPatch): Promise<void> {
+  private async assertConfigWriteIsSafe(
+    patch: AllegroSettingsPatch,
+  ): Promise<void> {
     const touchesConfig = CONFIG_FIELDS.some((field) => field.column in patch);
     if (!touchesConfig) {
       return;
@@ -771,17 +837,33 @@ class AllegroModuleService extends MedusaService({
       );
     };
 
-    const standard = effectiveAfterPatch("automationRuleStandard", "automation_rule_standard");
-    const promoted = effectiveAfterPatch("automationRulePromoted", "automation_rule_promoted");
-    if (typeof standard === "string" && standard !== "" && standard === promoted) {
+    const standard = effectiveAfterPatch(
+      "automationRuleStandard",
+      "automation_rule_standard",
+    );
+    const promoted = effectiveAfterPatch(
+      "automationRulePromoted",
+      "automation_rule_promoted",
+    );
+    if (
+      typeof standard === "string" &&
+      standard !== "" &&
+      standard === promoted
+    ) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
         `This write would make the standard and promoted automation rule both resolve to "${standard}". A promotion flip would then be a no-op switch, so the promoted commission rate would never reach the price floor. Use two distinct rules.`,
       );
     }
 
-    const srpMetadataKey = effectiveAfterPatch("srpMetadataKey", "srp_metadata_key");
-    const srpPriceListId = effectiveAfterPatch("srpPriceListId", "srp_price_list_id");
+    const srpMetadataKey = effectiveAfterPatch(
+      "srpMetadataKey",
+      "srp_metadata_key",
+    );
+    const srpPriceListId = effectiveAfterPatch(
+      "srpPriceListId",
+      "srp_price_list_id",
+    );
     if (srpMetadataKey && srpPriceListId) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
@@ -793,7 +875,9 @@ class AllegroModuleService extends MedusaService({
   // ─── Sync-state: single-flight claim and health ───
 
   /** The provider's state row, or undefined before its first run. */
-  async getSyncState(provider: AllegroSyncProvider): Promise<AllegroSyncStateRow | undefined> {
+  async getSyncState(
+    provider: AllegroSyncProvider,
+  ): Promise<AllegroSyncStateRow | undefined> {
     const [row] = await this.listAllegroSyncStates({ provider }, { take: 1 });
     return row as AllegroSyncStateRow | undefined;
   }
@@ -805,12 +889,16 @@ class AllegroModuleService extends MedusaService({
    * that also had to handle "no row yet" would need an insert path whose
    * concurrency story is different from its update path.
    */
-  async ensureSyncState(provider: AllegroSyncProvider): Promise<AllegroSyncStateRow> {
+  async ensureSyncState(
+    provider: AllegroSyncProvider,
+  ): Promise<AllegroSyncStateRow> {
     const existing = await this.getSyncState(provider);
     if (existing) {
       return existing;
     }
-    const [created] = await this.createAllegroSyncStates([{ provider, status: "idle" }]);
+    const [created] = await this.createAllegroSyncStates([
+      { provider, status: "idle" },
+    ]);
     return created as unknown as AllegroSyncStateRow;
   }
 
@@ -857,9 +945,12 @@ class AllegroModuleService extends MedusaService({
     // row written before the column existed. Measuring from `updated_at` alone was the
     // bug: it is bumped when the claim is taken and then not again until the run ends, so
     // any run slower than the window was taken over mid-flight.
-    const lastAlive = new Date(state.claim_heartbeat_at ?? state.updated_at).getTime();
+    const lastAlive = new Date(
+      state.claim_heartbeat_at ?? state.updated_at,
+    ).getTime();
     const isRunning = state.status === "running";
-    const isStale = !Number.isFinite(lastAlive) || Date.now() - lastAlive > STALE_CLAIM_MS;
+    const isStale =
+      !Number.isFinite(lastAlive) || Date.now() - lastAlive > STALE_CLAIM_MS;
     if (isRunning && !isStale) {
       return { acquired: false, reason: SYNC_CLAIM_HELD, state };
     }
@@ -871,7 +962,11 @@ class AllegroModuleService extends MedusaService({
 
     const token = crypto.randomUUID();
     const claimed = await this.updateAllegroSyncStates({
-      data: { claim_heartbeat_at: new Date(), claim_token: token, status: "running" },
+      data: {
+        claim_heartbeat_at: new Date(),
+        claim_token: token,
+        status: "running",
+      },
       selector: { provider, updated_at: state.updated_at },
     });
     if ((claimed as unknown[]).length === 0) {
@@ -897,7 +992,10 @@ class AllegroModuleService extends MedusaService({
    * bump `updated_at` either, so the heartbeat would be a silent no-op reported as
    * success.
    */
-  async touchSyncClaim(provider: AllegroSyncProvider, token: string): Promise<boolean> {
+  async touchSyncClaim(
+    provider: AllegroSyncProvider,
+    token: string,
+  ): Promise<boolean> {
     const touched = await this.updateAllegroSyncStates({
       data: { claim_heartbeat_at: new Date() },
       selector: { claim_token: token, provider },
@@ -930,7 +1028,10 @@ class AllegroModuleService extends MedusaService({
     const data: Record<string, unknown> = { ...patch };
     const written = await this.updateAllegroSyncStates({
       data,
-      selector: opts.token === undefined ? { provider } : { claim_token: opts.token, provider },
+      selector:
+        opts.token === undefined
+          ? { provider }
+          : { claim_token: opts.token, provider },
     });
     return (written as unknown[]).length > 0;
   }
@@ -956,8 +1057,11 @@ class AllegroModuleService extends MedusaService({
     patch: AllegroSyncStatePatch,
   ): Promise<boolean> {
     const state = await this.ensureSyncState(provider);
-    const lastAlive = new Date(state.claim_heartbeat_at ?? state.updated_at).getTime();
-    const isStale = !Number.isFinite(lastAlive) || Date.now() - lastAlive > STALE_CLAIM_MS;
+    const lastAlive = new Date(
+      state.claim_heartbeat_at ?? state.updated_at,
+    ).getTime();
+    const isStale =
+      !Number.isFinite(lastAlive) || Date.now() - lastAlive > STALE_CLAIM_MS;
     if (state.status === "running" && !isStale) {
       return false;
     }
@@ -1007,7 +1111,9 @@ class AllegroModuleService extends MedusaService({
    * admin user.
    */
   mintOAuthState(actorId: string): Promise<string> {
-    return Promise.resolve(mintOAuthState(actorId, this.options_.encryptionKey));
+    return Promise.resolve(
+      mintOAuthState(actorId, this.options_.encryptionKey),
+    );
   }
 
   /**
@@ -1020,7 +1126,9 @@ class AllegroModuleService extends MedusaService({
     state: string | undefined,
     actorId: string | undefined,
   ): Promise<OAuthStateVerification> {
-    return Promise.resolve(verifyOAuthState(state, actorId, this.options_.encryptionKey));
+    return Promise.resolve(
+      verifyOAuthState(state, actorId, this.options_.encryptionKey),
+    );
   }
 
   /** Synchronous inner form, so the service can use it without awaiting itself. */
@@ -1081,7 +1189,10 @@ class AllegroModuleService extends MedusaService({
    * `async` for the same reason as `getRedirectUri`: it can fail on an
    * unresolvable redirect URI, and that has to arrive as a rejection.
    */
-  async buildAuthorizationUrl(state: string, requestOrigin?: string): Promise<string> {
+  async buildAuthorizationUrl(
+    state: string,
+    requestOrigin?: string,
+  ): Promise<string> {
     return await Promise.resolve(
       this.buildOAuth().buildAuthorizationUrl({
         redirectUri: this.buildRedirectUri(requestOrigin),
@@ -1107,8 +1218,13 @@ class AllegroModuleService extends MedusaService({
    *
    * `take: 2` rather than 1 so the extra row can be reported instead of hidden.
    */
-  protected async getStoredAuth(): Promise<Record<string, unknown> | undefined> {
-    const rows = await this.listAllegroAuths({}, { order: { created_at: "DESC" }, take: 2 });
+  protected async getStoredAuth(): Promise<
+    Record<string, unknown> | undefined
+  > {
+    const rows = await this.listAllegroAuths(
+      {},
+      { order: { created_at: "DESC" }, take: 2 },
+    );
 
     if (rows.length > 1) {
       this.logger_?.warn(
@@ -1139,17 +1255,24 @@ class AllegroModuleService extends MedusaService({
     // Allegro instead of at their own configuration.
     let credentialsUnreadable = false;
     try {
-      decryptValue(row.access_token_encrypted as string, this.options_.encryptionKey);
+      decryptValue(
+        row.access_token_encrypted as string,
+        this.options_.encryptionKey,
+      );
     } catch {
       credentialsUnreadable = true;
     }
 
-    const expiresAt = row.expires_at ? new Date(row.expires_at as string) : undefined;
+    const expiresAt = row.expires_at
+      ? new Date(row.expires_at as string)
+      : undefined;
     return {
       ...base,
       accountLogin: (row.account_login as string | null) ?? undefined,
       connected: true,
-      connectedAt: row.connected_at ? new Date(row.connected_at as string) : undefined,
+      connectedAt: row.connected_at
+        ? new Date(row.connected_at as string)
+        : undefined,
       credentialsUnreadable,
       expired: expiresAt ? expiresAt.getTime() <= Date.now() : undefined,
       expiresAt,
@@ -1328,7 +1451,9 @@ class AllegroModuleService extends MedusaService({
     if (rows.length === 0) {
       return;
     }
-    await this.deleteAllegroAuths(rows.map((row) => (row as { id: string }).id));
+    await this.deleteAllegroAuths(
+      rows.map((row) => (row as { id: string }).id),
+    );
   }
 
   /** Drop the memoized client, so the next `getClient` reads storage again. */

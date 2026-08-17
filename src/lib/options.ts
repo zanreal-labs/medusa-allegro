@@ -1,7 +1,11 @@
 import { decodeEncryptionKey } from "./crypto";
 import type { AllegroEnvironment } from "./allegro/types";
 import { buildAllegroUserAgent } from "./allegro/user-agent";
-import { DEFAULT_PRICING_MODE, isPricingMode, PRICING_MODE_VALUES } from "./pricing-mode";
+import {
+  DEFAULT_PRICING_MODE,
+  isPricingMode,
+  PRICING_MODE_VALUES,
+} from "./pricing-mode";
 import type { PricingMode } from "./pricing-mode";
 
 /**
@@ -145,6 +149,7 @@ export interface AllegroPluginOptions {
    * the variant's regular price: a ceiling guessed from the current selling
    * price would let an automation rule ratchet a price down indefinitely.
    */
+  srpFallbackMarkupPercent?: number;
   srpMetadataKey?: string;
   srpPriceListId?: string;
   /**
@@ -193,6 +198,7 @@ export interface ResolvedAllegroOptions {
   salesChannelId?: string;
   salesChannelName?: string;
   stockLocationIds: string[];
+  srpFallbackMarkupPercent?: number;
   srpMetadataKey?: string;
   srpPriceListId?: string;
   costsModuleKey: string;
@@ -236,13 +242,16 @@ export interface AllegroPublicOptions {
   salesChannelId?: string;
   salesChannelName?: string;
   stockLocationIds: string[];
+  srpFallbackMarkupPercent?: number;
   srpMetadataKey?: string;
   srpPriceListId?: string;
   marketplaceId: string;
 }
 
 /** Narrow the resolved options to the fields that may leave the service. */
-export const toPublicAllegroOptions = (options: ResolvedAllegroOptions): AllegroPublicOptions => ({
+export const toPublicAllegroOptions = (
+  options: ResolvedAllegroOptions,
+): AllegroPublicOptions => ({
   appName: options.appName,
   appVersion: options.appVersion,
   automationRules: options.automationRules,
@@ -257,6 +266,7 @@ export const toPublicAllegroOptions = (options: ResolvedAllegroOptions): Allegro
   salesChannelId: options.salesChannelId,
   salesChannelName: options.salesChannelName,
   scopes: options.scopes,
+  srpFallbackMarkupPercent: options.srpFallbackMarkupPercent,
   srpMetadataKey: options.srpMetadataKey,
   srpPriceListId: options.srpPriceListId,
   stockLocationIds: options.stockLocationIds,
@@ -265,8 +275,27 @@ export const toPublicAllegroOptions = (options: ResolvedAllegroOptions): Allegro
 
 export const DEFAULT_REDIRECT_PATH = "/admin/allegro/oauth/callback";
 
-export const DEFAULT_SCOPES =
-  "allegro:api:sale:offers:read allegro:api:sale:offers:write allegro:api:orders:read";
+/**
+ * Scopes requested at consent.
+ *
+ * `profile:read` earns its place despite reading nothing this plugin syncs: the
+ * connection screen names the seller account it is connected to, and that name
+ * comes from `GET /me`, which Allegro refuses without it. Without the scope the
+ * probe fails, the login is stored as null, and the admin reads "unknown" - a
+ * store with more than one Allegro account cannot then tell which one it just
+ * authorised, which is exactly when it matters.
+ *
+ * `orders:write` covers the fulfillment write-back and invoice attachment. Both
+ * stay off until an operator arms them, but the grant has to exist before they
+ * can be armed, and asking for it later means a second trip through consent.
+ */
+export const DEFAULT_SCOPES = [
+  "allegro:api:sale:offers:read",
+  "allegro:api:sale:offers:write",
+  "allegro:api:orders:read",
+  "allegro:api:orders:write",
+  "allegro:api:profile:read",
+].join(" ");
 
 /**
  * `ALLEGRO_PRICE_SYNC_DISABLED=1|true|yes` disables price writes without a
@@ -280,7 +309,8 @@ const STOCK_SYNC_DISABLED_ENV = "ALLEGRO_STOCK_SYNC_DISABLED";
 /** Same contract again, for the order event drain. */
 const ORDERS_SYNC_DISABLED_ENV = "ALLEGRO_ORDERS_SYNC_DISABLED";
 /** Same contract again, for the fulfillment write-back on a Medusa fulfillment event. */
-const FULFILLMENT_WRITEBACK_DISABLED_ENV = "ALLEGRO_FULFILLMENT_WRITEBACK_DISABLED";
+const FULFILLMENT_WRITEBACK_DISABLED_ENV =
+  "ALLEGRO_FULFILLMENT_WRITEBACK_DISABLED";
 /** Same contract again, for attaching invoice PDFs to Allegro orders. */
 const INVOICE_ATTACH_DISABLED_ENV = "ALLEGRO_INVOICE_ATTACH_DISABLED";
 /** Comma-separated stock location ids, overriding `stockLocationIds`. */
@@ -291,21 +321,25 @@ const truthyEnv = (value: string | undefined): boolean => {
   return normalized === "1" || normalized === "true" || normalized === "yes";
 };
 
-export const isPriceSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
-  truthyEnv(env[PRICE_SYNC_DISABLED_ENV]);
+export const isPriceSyncDisabledByEnv = (
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => truthyEnv(env[PRICE_SYNC_DISABLED_ENV]);
 
-export const isStockSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
-  truthyEnv(env[STOCK_SYNC_DISABLED_ENV]);
+export const isStockSyncDisabledByEnv = (
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => truthyEnv(env[STOCK_SYNC_DISABLED_ENV]);
 
-export const isOrdersSyncDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
-  truthyEnv(env[ORDERS_SYNC_DISABLED_ENV]);
+export const isOrdersSyncDisabledByEnv = (
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => truthyEnv(env[ORDERS_SYNC_DISABLED_ENV]);
 
 export const isFulfillmentWritebackDisabledByEnv = (
   env: NodeJS.ProcessEnv = process.env,
 ): boolean => truthyEnv(env[FULFILLMENT_WRITEBACK_DISABLED_ENV]);
 
-export const isInvoiceAttachDisabledByEnv = (env: NodeJS.ProcessEnv = process.env): boolean =>
-  truthyEnv(env[INVOICE_ATTACH_DISABLED_ENV]);
+export const isInvoiceAttachDisabledByEnv = (
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => truthyEnv(env[INVOICE_ATTACH_DISABLED_ENV]);
 
 /**
  * The environment lock for each editable sync-configuration field.
@@ -341,8 +375,10 @@ const SALES_CHANNEL_NAME_ENV = "ALLEGRO_SALES_CHANNEL_NAME";
 const PRICING_MODE_ENV = "ALLEGRO_PRICING_MODE";
 
 /** A trimmed, non-empty environment value, or undefined when the variable is unset. */
-const optionalEnvString = (env: NodeJS.ProcessEnv, name: string): string | undefined =>
-  optionalString(env[name]);
+const optionalEnvString = (
+  env: NodeJS.ProcessEnv,
+  name: string,
+): string | undefined => optionalString(env[name]);
 
 export const automationRuleStandardEnvOverride = (
   env: NodeJS.ProcessEnv = process.env,
@@ -398,7 +434,9 @@ export const pricingModeEnvOverride = (
  * thrown error. `resolveChangeCap` still enforces the same rule, loudly, on the
  * `medusa-config.ts` default at boot.
  */
-export const changeCapEnvOverride = (env: NodeJS.ProcessEnv = process.env): number | undefined => {
+export const changeCapEnvOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined => {
   const raw = optionalEnvString(env, CHANGE_CAP_ENV);
   if (raw === undefined) {
     return undefined;
@@ -553,7 +591,9 @@ const resolveChangeCap = (value: AllegroPluginOptions["changeCap"]): number => {
  * different pricing strategy than the config file states is exactly the kind of
  * surprise this plugin's other option checks exist to prevent.
  */
-const resolvePricingMode = (value: AllegroPluginOptions["pricingMode"]): PricingMode => {
+const resolvePricingMode = (
+  value: AllegroPluginOptions["pricingMode"],
+): PricingMode => {
   if (value === undefined) {
     return DEFAULT_PRICING_MODE;
   }
@@ -565,7 +605,10 @@ const resolvePricingMode = (value: AllegroPluginOptions["pricingMode"]): Pricing
   return value;
 };
 
-const requireString = (value: unknown, field: keyof AllegroPluginOptions): string => {
+const requireString = (
+  value: unknown,
+  field: keyof AllegroPluginOptions,
+): string => {
   const trimmed = typeof value === "string" ? value.trim() : "";
   if (!trimmed) {
     throw new Error(
@@ -612,15 +655,30 @@ export const resolveAllegroOptions = (
 
   // Same validator the SDK runs at construction time. Running it during option
   // resolution turns "Allegro rejects our User-Agent" into a startup error.
-  buildAllegroUserAgent({ appName, appVersion, docsUrl }, "medusa-allegro plugin options");
+  buildAllegroUserAgent(
+    { appName, appVersion, docsUrl },
+    "medusa-allegro plugin options",
+  );
 
   // A boolean-looking string is the mistake this catches: `priceSyncDisabled:
   // process.env.SOMETHING` yields "true", which a truthiness test would honour
   // but a `=== true` test silently ignores - the kill-switch would read as
   // enabled while the operator believed it was off. Fail loudly instead.
-  requireBooleanSwitch(options.priceSyncDisabled, "priceSyncDisabled", PRICE_SYNC_DISABLED_ENV);
-  requireBooleanSwitch(options.stockSyncDisabled, "stockSyncDisabled", STOCK_SYNC_DISABLED_ENV);
-  requireBooleanSwitch(options.ordersSyncDisabled, "ordersSyncDisabled", ORDERS_SYNC_DISABLED_ENV);
+  requireBooleanSwitch(
+    options.priceSyncDisabled,
+    "priceSyncDisabled",
+    PRICE_SYNC_DISABLED_ENV,
+  );
+  requireBooleanSwitch(
+    options.stockSyncDisabled,
+    "stockSyncDisabled",
+    STOCK_SYNC_DISABLED_ENV,
+  );
+  requireBooleanSwitch(
+    options.ordersSyncDisabled,
+    "ordersSyncDisabled",
+    ORDERS_SYNC_DISABLED_ENV,
+  );
   requireBooleanSwitch(
     options.fulfillmentWritebackDisabled,
     "fulfillmentWritebackDisabled",
@@ -661,6 +719,21 @@ export const resolveAllegroOptions = (
 
   const srpMetadataKey = optionalString(options.srpMetadataKey);
   const srpPriceListId = optionalString(options.srpPriceListId);
+
+  // Percent markup on the gross purchase cost, used only for variants the
+  // configured SRP source did not price. Absent means the fallback is off, which
+  // is every store that has not asked for it. Rejected rather than clamped when
+  // it is not a usable number: a ceiling is a limit on what we charge, and one
+  // derived from a nonsense multiplier is worse than none.
+  const srpFallbackMarkupPercent = options.srpFallbackMarkupPercent;
+  if (
+    srpFallbackMarkupPercent !== undefined &&
+    (!Number.isFinite(srpFallbackMarkupPercent) || srpFallbackMarkupPercent < 0)
+  ) {
+    throw new Error(
+      `medusa-allegro: plugin option \`srpFallbackMarkupPercent\` must be a non-negative number (got ${String(srpFallbackMarkupPercent)}).`,
+    );
+  }
   // Not an error, but the one misconfiguration that silently produces a
   // catalogue-wide `missing-srp` skip: both sources absent means no offer can
   // ever resolve a ceiling, so price sync would report itself healthy while
@@ -680,26 +753,40 @@ export const resolveAllegroOptions = (
     changeCap: resolveChangeCap(options.changeCap),
     clientId,
     clientSecret,
-    costsModuleKey: optionalString(options.costsModuleKey) ?? DEFAULT_COSTS_MODULE_KEY,
+    costsModuleKey:
+      optionalString(options.costsModuleKey) ?? DEFAULT_COSTS_MODULE_KEY,
     docsUrl,
     encryptionKey,
     environment,
     fulfillmentWritebackDisabled:
-      options.fulfillmentWritebackDisabled === true || isFulfillmentWritebackDisabledByEnv(),
-    invoiceAttachDisabled: options.invoiceAttachDisabled === true || isInvoiceAttachDisabledByEnv(),
-    invoiceModuleKey: optionalString(options.invoiceModuleKey) ?? DEFAULT_INVOICE_MODULE_KEY,
-    marketplaceId: optionalString(options.marketplaceId) ?? DEFAULT_MARKETPLACE_ID,
-    ordersSyncDisabled: options.ordersSyncDisabled === true || isOrdersSyncDisabledByEnv(),
-    priceSyncDisabled: options.priceSyncDisabled === true || isPriceSyncDisabledByEnv(),
+      options.fulfillmentWritebackDisabled === true ||
+      isFulfillmentWritebackDisabledByEnv(),
+    invoiceAttachDisabled:
+      options.invoiceAttachDisabled === true || isInvoiceAttachDisabledByEnv(),
+    invoiceModuleKey:
+      optionalString(options.invoiceModuleKey) ?? DEFAULT_INVOICE_MODULE_KEY,
+    marketplaceId:
+      optionalString(options.marketplaceId) ?? DEFAULT_MARKETPLACE_ID,
+    ordersSyncDisabled:
+      options.ordersSyncDisabled === true || isOrdersSyncDisabledByEnv(),
+    priceSyncDisabled:
+      options.priceSyncDisabled === true || isPriceSyncDisabledByEnv(),
     pricingMode: resolvePricingMode(options.pricingMode),
     redirectPath,
     regionId: optionalString(options.regionId),
     salesChannelId: optionalString(options.salesChannelId),
     salesChannelName: optionalString(options.salesChannelName),
     scopes: (options.scopes ?? DEFAULT_SCOPES).trim() || DEFAULT_SCOPES,
+    ...(srpFallbackMarkupPercent === undefined
+      ? {}
+      : { srpFallbackMarkupPercent }),
     srpMetadataKey,
     srpPriceListId,
-    stockLocationIds: resolveStockLocationIds(options.stockLocationIds, process.env),
-    stockSyncDisabled: options.stockSyncDisabled === true || isStockSyncDisabledByEnv(),
+    stockLocationIds: resolveStockLocationIds(
+      options.stockLocationIds,
+      process.env,
+    ),
+    stockSyncDisabled:
+      options.stockSyncDisabled === true || isStockSyncDisabledByEnv(),
   };
 };

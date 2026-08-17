@@ -36,7 +36,8 @@ const CALLBACK_ERRORS: Record<string, string> = {
   denied: "The authorization was declined on Allegro's consent screen.",
   exchange_failed:
     "Allegro rejected the authorization code. Check the client id, secret, and that the redirect URI registered for the app matches this one exactly. The server log has the reason.",
-  missing_code: "Allegro returned no authorization code. Start the connection again.",
+  missing_code:
+    "Allegro returned no authorization code. Start the connection again.",
   persist_failed:
     "The connection succeeded but the tokens could not be stored. Check `encryptionKey` and the server log.",
   state_mismatch:
@@ -59,7 +60,9 @@ const connectionLabel = (connection: Connection): string => {
   if (!connection.connected) {
     return "Not connected";
   }
-  return connection.credentialsUnreadable ? "Unreadable credentials" : "Connected";
+  return connection.credentialsUnreadable
+    ? "Unreadable credentials"
+    : "Connected";
 };
 
 /**
@@ -72,14 +75,18 @@ const connectionLabel = (connection: Connection): string => {
 const findConfigField = (
   data: OverviewResponse | undefined,
   key: ConfigField["key"],
-): ConfigField | undefined => data?.configFields.find((field) => field.key === key);
+): ConfigField | undefined =>
+  data?.configFields.find((field) => field.key === key);
 
 /** What each provider row is, in one line, so the table needs no legend. */
 const PROVIDER_DESCRIPTION: Record<string, string> = {
-  offers: "Maps SKUs to offers, sweeps promotion state, discovers categories. Read-only.",
+  offers:
+    "Maps SKUs to offers, sweeps promotion state, discovers categories. Read-only.",
   orders: "Drains the order event journal into Medusa orders.",
-  "price-automation": "Observes each offer's pricing rule and its drift. Read-only.",
-  prices: "Applies this store's pricing mode to every linked offer, inside the break-even and SRP bounds.",
+  "price-automation":
+    "Observes each offer's pricing rule and its drift. Read-only.",
+  prices:
+    "Applies this store's pricing mode to every linked offer, inside the break-even and SRP bounds.",
   stock: "Pushes Medusa available quantity to Allegro.",
 };
 
@@ -98,7 +105,10 @@ const PROVIDER_COUNTERS: Record<string, string[]> = {
   stock: ["eligible", "synced", "alreadyInSync", "failed"],
 };
 
-const formatCounters = (provider: string, counts?: Record<string, unknown> | null): string => {
+const formatCounters = (
+  provider: string,
+  counts?: Record<string, unknown> | null,
+): string => {
   if (!counts) {
     return "no run recorded";
   }
@@ -139,7 +149,9 @@ const AllegroSettingsPage = () => {
   const [data, setData] = useState<OverviewResponse | undefined>();
   const [summary, setSummary] = useState<AllegroSummary | undefined>();
   const [loadError, setLoadError] = useState<string | undefined>();
-  const [disconnectWarning, setDisconnectWarning] = useState<string | undefined>();
+  const [disconnectWarning, setDisconnectWarning] = useState<
+    string | undefined
+  >();
   const [busy, setBusy] = useState(false);
   const [busyToggle, setBusyToggle] = useState<string | undefined>();
   const [busyField, setBusyField] = useState<string | undefined>();
@@ -162,7 +174,11 @@ const AllegroSettingsPage = () => {
       setData(await sdk.client.fetch<OverviewResponse>("/admin/allegro"));
       setLoadError(undefined);
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Failed to load Allegro status.");
+      setLoadError(
+        error instanceof Error
+          ? error.message
+          : "Failed to load Allegro status.",
+      );
     }
   }, []);
 
@@ -214,20 +230,31 @@ const AllegroSettingsPage = () => {
     // locked - so this only ever fires for a live toggle.
     setBusyToggle(toggle.column);
     try {
-      const response = await sdk.client.fetch<SettingsResponse>("/admin/allegro/settings", {
-        body: { [toggle.column]: !toggle.persistedEnabled },
-        method: "POST",
-      });
+      const response = await sdk.client.fetch<SettingsResponse>(
+        "/admin/allegro/settings",
+        {
+          body: { [toggle.column]: !toggle.persistedEnabled },
+          method: "POST",
+        },
+      );
       setData((current) =>
         current
-          ? { ...current, configFields: response.configFields, toggles: response.toggles }
+          ? {
+              ...current,
+              configFields: response.configFields,
+              toggles: response.toggles,
+            }
           : current,
       );
       toast.success(
         `${toggle.label} ${toggle.persistedEnabled ? "disarmed" : "armed"}. It takes effect on the next run.`,
       );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : `Could not change ${toggle.label}.`);
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : `Could not change ${toggle.label}.`,
+      );
     } finally {
       setBusyToggle(undefined);
     }
@@ -261,13 +288,20 @@ const AllegroSettingsPage = () => {
 
     setBusyField(field.column);
     try {
-      const response = await sdk.client.fetch<SettingsResponse>("/admin/allegro/settings", {
-        body: { [field.column]: value },
-        method: "POST",
-      });
+      const response = await sdk.client.fetch<SettingsResponse>(
+        "/admin/allegro/settings",
+        {
+          body: { [field.column]: value },
+          method: "POST",
+        },
+      );
       setData((current) =>
         current
-          ? { ...current, configFields: response.configFields, toggles: response.toggles }
+          ? {
+              ...current,
+              configFields: response.configFields,
+              toggles: response.toggles,
+            }
           : current,
       );
       toast.success(
@@ -276,7 +310,11 @@ const AllegroSettingsPage = () => {
           : `Saved ${field.label}.`,
       );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : `Could not save ${field.label}.`);
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : `Could not save ${field.label}.`,
+      );
     } finally {
       setBusyField(undefined);
     }
@@ -294,7 +332,11 @@ const AllegroSettingsPage = () => {
       window.location.href = authorization_url;
     } catch (error) {
       setBusy(false);
-      setLoadError(error instanceof Error ? error.message : "Could not start the connection.");
+      setLoadError(
+        error instanceof Error
+          ? error.message
+          : "Could not start the connection.",
+      );
     }
   };
 
@@ -305,13 +347,18 @@ const AllegroSettingsPage = () => {
       // The route answers with a `warning` when it deleted the local rows but
       // could not revoke at Allegro. Nothing can retry that afterwards - the
       // tokens are gone - so the hint has to reach the operator here.
-      const result = await sdk.client.fetch<{ warning?: string }>("/admin/allegro/disconnect", {
-        method: "POST",
-      });
+      const result = await sdk.client.fetch<{ warning?: string }>(
+        "/admin/allegro/disconnect",
+        {
+          method: "POST",
+        },
+      );
       setDisconnectWarning(result?.warning);
       await load();
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Could not disconnect.");
+      setLoadError(
+        error instanceof Error ? error.message : "Could not disconnect.",
+      );
     } finally {
       setBusy(false);
     }
@@ -333,7 +380,9 @@ const AllegroSettingsPage = () => {
    * token rather than a fact about a particular loop: whichever loop hit it first, the
    * remedy is the same reconnect, and the others will hit it too.
    */
-  const writeScopeMissing = (data?.sync_state ?? []).some((row) => row.write_scope_missing);
+  const writeScopeMissing = (data?.sync_state ?? []).some(
+    (row) => row.write_scope_missing,
+  );
 
   return (
     <Container className="divide-y p-0">
@@ -345,7 +394,10 @@ const AllegroSettingsPage = () => {
           </Text>
         </div>
         {connection?.environment ? (
-          <Badge color={connection.environment === "sandbox" ? "orange" : "grey"} size="small">
+          <Badge
+            color={connection.environment === "sandbox" ? "orange" : "grey"}
+            size="small"
+          >
             {connection.environment}
           </Badge>
         ) : null}
@@ -360,7 +412,8 @@ const AllegroSettingsPage = () => {
       {callbackError ? (
         <div className="px-6 py-4">
           <Alert variant="error">
-            {CALLBACK_ERRORS[callbackError] ?? `The connection failed (${callbackError}).`}
+            {CALLBACK_ERRORS[callbackError] ??
+              `The connection failed (${callbackError}).`}
           </Alert>
         </div>
       ) : null}
@@ -395,11 +448,28 @@ const AllegroSettingsPage = () => {
           <div className="flex flex-col gap-y-3">
             {connection.connected ? (
               <dl className="grid grid-cols-1 gap-x-6 gap-y-2 md:grid-cols-2">
-                <Field label="Account">{connection.accountLogin ?? "unknown"}</Field>
-                <Field label="Connected at">{formatDate(connection.connectedAt)}</Field>
+                <Field label="Account">
+                  {connection.accountLogin ?? (
+                    // "unknown" read as "something went wrong". The name is
+                    // missing for one specific, fixable reason: the login comes
+                    // from GET /me, which Allegro refuses without
+                    // `allegro:api:profile:read`, and a connection made before
+                    // that scope was requested has no name stored. Everything
+                    // else about the connection is fine, so say which it is.
+                    <span className="text-ui-fg-subtle">
+                      not stored - the grant predates the
+                      `allegro:api:profile:read` scope. Reconnect to record it.
+                    </span>
+                  )}
+                </Field>
+                <Field label="Connected at">
+                  {formatDate(connection.connectedAt)}
+                </Field>
                 <Field label="Token expires">
                   {formatDate(connection.expiresAt)}
-                  {connection.expired ? " (expired, refreshed on next call)" : ""}
+                  {connection.expired
+                    ? " (expired, refreshed on next call)"
+                    : ""}
                 </Field>
                 <Field label="Granted scopes">
                   {connection.scope ?? "not reported by Allegro"}
@@ -407,33 +477,36 @@ const AllegroSettingsPage = () => {
               </dl>
             ) : (
               <Text className="text-ui-fg-subtle" size="small">
-                No Allegro account is connected. Connecting opens Allegro's consent screen and
-                requests: <code>{connection.scopesRequested}</code>
+                No Allegro account is connected. Connecting opens Allegro's
+                consent screen and requests:{" "}
+                <code>{connection.scopesRequested}</code>
               </Text>
             )}
 
             {connection.connected && connection.credentialsUnreadable ? (
               <Alert variant="error">
-                The stored tokens cannot be decrypted with the current `encryptionKey`, so every
-                Allegro call will fail. This happens when the key is rotated or mistyped after the
-                account was connected. Restore the original key, or reconnect to store the tokens
-                under the current one.
+                The stored tokens cannot be decrypted with the current
+                `encryptionKey`, so every Allegro call will fail. This happens
+                when the key is rotated or mistyped after the account was
+                connected. Restore the original key, or reconnect to store the
+                tokens under the current one.
               </Alert>
             ) : null}
 
             {connection.connected && connection.refreshTokenMissing ? (
               <Alert variant="warning">
-                The stored connection has no refresh token, so it stops working once the access
-                token expires. Reconnect.
+                The stored connection has no refresh token, so it stops working
+                once the access token expires. Reconnect.
               </Alert>
             ) : null}
 
             {writeScopeMissing ? (
               <Alert variant="error">
-                The stored token cannot write offers: Allegro answered 403 on a price or quantity
-                command. No retry fixes this - reconnect Allegro so the grant includes
-                <code> allegro:api:sale:offers:write</code>. Until then the write loops no-op safely
-                and this banner stays up.
+                The stored token cannot write offers: Allegro answered 403 on a
+                price or quantity command. No retry fixes this - reconnect
+                Allegro so the grant includes
+                <code> allegro:api:sale:offers:write</code>. Until then the
+                write loops no-op safely and this banner stays up.
               </Alert>
             ) : null}
 
@@ -460,11 +533,12 @@ const AllegroSettingsPage = () => {
           Writers
         </Heading>
         <Text className="text-ui-fg-subtle mb-4" size="small">
-          Each of these is one thing this plugin sends to Allegro, and each has its own switch. They
-          are separate because "prices are off" does not mean nothing is written. A flip takes
-          effect on the next run; nothing needs restarting. A fresh install starts with every writer
-          off, so connect your account and check your offer mapping first, then turn on one writer
-          at a time.
+          Each of these is one thing this plugin sends to Allegro, and each has
+          its own switch. They are separate because "prices are off" does not
+          mean nothing is written. A flip takes effect on the next run; nothing
+          needs restarting. A fresh install starts with every writer off, so
+          connect your account and check your offer mapping first, then turn on
+          one writer at a time.
         </Text>
         <div className="flex flex-col gap-y-3">
           {(data?.toggles ?? []).map((toggle) => (
@@ -488,52 +562,60 @@ const AllegroSettingsPage = () => {
           Pricing and sync configuration
         </Heading>
         <Text className="text-ui-fg-subtle mb-4" size="small">
-          Start with the pricing mode: it decides what this plugin does with prices at all, and
-          which of the settings under it matter. Everything here is saved in this store and takes
-          effect on the next sync run, with nothing to restart. A field left blank uses the default
-          the plugin was installed with, which for most of them is "not set" - and a setting that is
-          not set is named in the warnings above whenever that stops a run from doing anything. A
-          setting can also be fixed for the whole deployment, in which case it is shown locked here
-          with the reason, and an edit would not take effect.
+          Start with the pricing mode: it decides what this plugin does with
+          prices at all, and which of the settings under it matter. Everything
+          here is saved in this store and takes effect on the next sync run,
+          with nothing to restart. A field left blank uses the default the
+          plugin was installed with, which for most of them is "not set" - and a
+          setting that is not set is named in the warnings above whenever that
+          stops a run from doing anything. A setting can also be fixed for the
+          whole deployment, in which case it is shown locked here with the
+          reason, and an edit would not take effect.
         </Text>
 
-        {data && pricingMode === "automation_rule" &&
+        {data &&
+        pricingMode === "automation_rule" &&
         !(
           findConfigField(data, "automationRuleStandard")?.effectiveValue &&
           findConfigField(data, "automationRulePromoted")?.effectiveValue
         ) ? (
           <Alert className="mb-4" variant="warning">
-            This store prices with Allegro automation rules, but two distinct rule names are not set
-            yet, so nothing can be written: there is no rule to attach and this plugin never invents
-            one. Fill both in below. Each must already exist on your Allegro account, under exactly
-            that name.
+            This store prices with Allegro automation rules, but two distinct
+            rule names are not set yet, so nothing can be written: there is no
+            rule to attach and this plugin never invents one. Fill both in
+            below. Each must already exist on your Allegro account, under
+            exactly that name.
           </Alert>
         ) : null}
         {data && pricingMode === "fixed_price" ? (
           <Alert className="mb-4" variant="info">
-            This store pushes each variant's own Medusa price to its Allegro offer. A price below
-            the break-even floor or above the SRP ceiling is refused rather than pushed, and an
-            offer that still carries an Allegro automation rule has that rule removed first,
-            because otherwise Allegro would recalculate straight over the price.
+            This store pushes each variant's own Medusa price to its Allegro
+            offer. A price below the break-even floor or above the SRP ceiling
+            is refused rather than pushed, and an offer that still carries an
+            Allegro automation rule has that rule removed first, because
+            otherwise Allegro would recalculate straight over the price.
           </Alert>
         ) : null}
         {data && pricingMode === "monitor" ? (
           <Alert className="mb-4" variant="info">
-            This store writes no prices to Allegro at all. Each run still works out every offer's
-            break-even floor and SRP ceiling and records how many offers sit outside them, which is
-            the report to read before choosing a mode that writes.
+            This store writes no prices to Allegro at all. Each run still works
+            out every offer's break-even floor and SRP ceiling and records how
+            many offers sit outside them, which is the report to read before
+            choosing a mode that writes.
           </Alert>
         ) : null}
-        {data && pricingMode !== "monitor" &&
+        {data &&
+        pricingMode !== "monitor" &&
         !(
           findConfigField(data, "srpMetadataKey")?.effectiveValue ||
           findConfigField(data, "srpPriceListId")?.effectiveValue
         ) ? (
           <Alert className="mb-4" variant="warning">
-            No source for the SRP is set, so every offer is skipped with the reason `missing-srp`.
-            The SRP is the ceiling no offer may be priced above, and there is deliberately no
-            fallback to the price an offer currently has - that would let each run's price become
-            the next run's ceiling and walk the price down for ever.
+            No source for the SRP is set, so every offer is skipped with the
+            reason `missing-srp`. The SRP is the ceiling no offer may be priced
+            above, and there is deliberately no fallback to the price an offer
+            currently has - that would let each run's price become the next
+            run's ceiling and walk the price down for ever.
           </Alert>
         ) : null}
 
@@ -545,7 +627,10 @@ const AllegroSettingsPage = () => {
               field={field}
               key={field.key}
               onChange={(value) =>
-                setFieldDrafts((current) => ({ ...current, [field.column]: value }))
+                setFieldDrafts((current) => ({
+                  ...current,
+                  [field.column]: value,
+                }))
               }
               onSave={() => void saveConfigField(field)}
             />
@@ -564,9 +649,10 @@ const AllegroSettingsPage = () => {
             Catalogue
           </Heading>
           <Text className="text-ui-fg-subtle mb-3" size="small">
-            A roll-up of the offer mapping. The authoritative per-product view is on each product's
-            own detail page; the counts here just answer "is anything wrong right now?" and link
-            into the offers view filtered to the rows that need attention.
+            A roll-up of the offer mapping. The authoritative per-product view
+            is on each product's own detail page; the counts here just answer
+            "is anything wrong right now?" and link into the offers view
+            filtered to the rows that need attention.
           </Text>
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
             <a
@@ -575,7 +661,9 @@ const AllegroSettingsPage = () => {
             >
               {summary.linked} linked
             </a>
-            <Text className="text-ui-fg-subtle txt-compact-small">{summary.unlinked} unlinked</Text>
+            <Text className="text-ui-fg-subtle txt-compact-small">
+              {summary.unlinked} unlinked
+            </Text>
             <a
               className="flex items-center gap-x-1"
               href="/app/settings/allegro/offers?filter=drift"
@@ -601,9 +689,10 @@ const AllegroSettingsPage = () => {
           Offers and orders
         </Heading>
         <Text className="text-ui-fg-subtle mb-3" size="small">
-          The cross-catalogue offer table (conflict/drift filters, bulk rediscovery, manual push)
-          and the orders quarantine/repair and import window are their own Settings pages, since
-          they are operator task-flows rather than a single setting.
+          The cross-catalogue offer table (conflict/drift filters, bulk
+          rediscovery, manual push) and the orders quarantine/repair and import
+          window are their own Settings pages, since they are operator
+          task-flows rather than a single setting.
         </Text>
         <div className="flex flex-wrap gap-x-6">
           <a
@@ -626,8 +715,8 @@ const AllegroSettingsPage = () => {
           Category rates
         </Heading>
         <Text className="text-ui-fg-subtle mb-3" size="small">
-          The per-category sale commissions that set every price floor are configuration and live on
-          their own Settings page.
+          The per-category sale commissions that set every price floor are
+          configuration and live on their own Settings page.
         </Text>
         <a
           className="text-ui-fg-interactive txt-compact-small"
@@ -642,9 +731,9 @@ const AllegroSettingsPage = () => {
           Sync health
         </Heading>
         <Text className="text-ui-fg-subtle mb-4" size="small">
-          One row per loop. A row that has never run has no state yet; a loop that ran and did
-          nothing still records its counters, which is how "nothing to do" stays distinguishable
-          from "quietly broken".
+          One row per loop. A row that has never run has no state yet; a loop
+          that ran and did nothing still records its counters, which is how
+          "nothing to do" stays distinguishable from "quietly broken".
         </Text>
 
         {data?.sync_state?.length ? (
@@ -663,14 +752,18 @@ const AllegroSettingsPage = () => {
                 <Table.Row key={row.id}>
                   <Table.Cell>
                     <div className="flex flex-col">
-                      <span className="txt-compact-small-plus">{row.provider}</span>
+                      <span className="txt-compact-small-plus">
+                        {row.provider}
+                      </span>
                       <span className="text-ui-fg-muted txt-compact-xsmall">
                         {PROVIDER_DESCRIPTION[row.provider] ?? ""}
                       </span>
                     </div>
                   </Table.Cell>
                   <Table.Cell>
-                    <StatusBadge color={SYNC_STATUS_COLOR[row.status]}>{row.status}</StatusBadge>
+                    <StatusBadge color={SYNC_STATUS_COLOR[row.status]}>
+                      {row.status}
+                    </StatusBadge>
                   </Table.Cell>
                   <Table.Cell className="txt-compact-xsmall">
                     {formatDate(row.last_synced_at)}
@@ -708,12 +801,19 @@ const AllegroSettingsPage = () => {
  * So the name appears here - in the locked state, next to the sentence that
  * explains what the lock is doing - and nowhere else.
  */
-const OverrideLock = ({ children, envVar }: { children: React.ReactNode; envVar: string }) => (
+const OverrideLock = ({
+  children,
+  envVar,
+}: {
+  children: React.ReactNode;
+  envVar: string;
+}) => (
   <div className="text-ui-fg-muted txt-compact-xsmall flex items-start gap-x-1.5">
     <LockClosedSolidMini className="text-ui-fg-muted mt-0.5 shrink-0" />
     <span>
-      {children} It is being held by the <code>{envVar}</code> environment variable on this
-      deployment; clearing that variable hands control back to this screen.
+      {children} It is being held by the <code>{envVar}</code> environment
+      variable on this deployment; clearing that variable hands control back to
+      this screen.
     </span>
   </div>
 );
@@ -747,11 +847,13 @@ const WriterToggle = ({
           </StatusBadge>
         )}
       </div>
-      <span className="text-ui-fg-subtle txt-compact-xsmall">{toggle.description}</span>
+      <span className="text-ui-fg-subtle txt-compact-xsmall">
+        {toggle.description}
+      </span>
       {toggle.forceDisabled ? (
         <OverrideLock envVar={toggle.envVar}>
-          This writer is switched off for the whole deployment, so it stays off however this
-          switch is set.
+          This writer is switched off for the whole deployment, so it stays off
+          however this switch is set.
         </OverrideLock>
       ) : null}
     </div>
@@ -799,16 +901,23 @@ const ConfigFieldRow = ({
         <span className="txt-compact-small-plus">{field.label}</span>
         {field.locked ? <StatusBadge color="red">locked</StatusBadge> : null}
       </div>
-      <span className="text-ui-fg-subtle txt-compact-xsmall">{field.description}</span>
+      <span className="text-ui-fg-subtle txt-compact-xsmall">
+        {field.description}
+      </span>
       {field.wiringCritical ? (
         <Alert variant="warning">
-          Changing this re-scopes which Medusa products this plugin matches against Allegro offers.
-          A wrong value here breaks the mapping silently rather than merely mis-tuning a run.
+          Changing this re-scopes which Medusa products this plugin matches
+          against Allegro offers. A wrong value here breaks the mapping silently
+          rather than merely mis-tuning a run.
         </Alert>
       ) : null}
       <div className="flex items-end gap-x-2">
         {field.kind === "choice" ? (
-          <Select disabled={busy || field.locked} onValueChange={onChange} value={draft}>
+          <Select
+            disabled={busy || field.locked}
+            onValueChange={onChange}
+            value={draft}
+          >
             <Select.Trigger className="max-w-sm">
               <Select.Value placeholder="Choose one" />
             </Select.Trigger>
@@ -830,24 +939,37 @@ const ConfigFieldRow = ({
             value={draft}
           />
         )}
-        <Button disabled={busy || field.locked} onClick={onSave} size="small" variant="secondary">
+        <Button
+          disabled={busy || field.locked}
+          onClick={onSave}
+          size="small"
+          variant="secondary"
+        >
           Save
         </Button>
       </div>
       {chosen ? (
-        <span className="text-ui-fg-subtle txt-compact-xsmall">{chosen.description}</span>
+        <span className="text-ui-fg-subtle txt-compact-xsmall">
+          {chosen.description}
+        </span>
       ) : null}
       {field.locked ? (
         <OverrideLock envVar={field.envVar}>
-          This is fixed at <code>{field.effectiveValue}</code> for the whole deployment, so an edit
-          here would not take effect.
+          This is fixed at <code>{field.effectiveValue}</code> for the whole
+          deployment, so an edit here would not take effect.
         </OverrideLock>
       ) : null}
     </div>
   );
 };
 
-const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
+const Field = ({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) => (
   <div>
     <dt className="text-ui-fg-muted txt-compact-small">{label}</dt>
     <dd className="txt-compact-small">{children}</dd>

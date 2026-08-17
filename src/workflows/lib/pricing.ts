@@ -1,6 +1,6 @@
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
-import { parseAmount } from "../../lib/sync/money";
+import { parseAmount, round2 } from "../../lib/sync/money";
 import type { AllegroSyncOptions } from "../../modules/allegro/service";
 import type { CatalogVariant } from "./catalog";
 
@@ -26,11 +26,13 @@ import type { CatalogVariant } from "./catalog";
 
 /** What the costs plugin exposes, duck-typed. */
 interface ProductCostsService {
-  getCostsBySkus: (skus: string[]) => Promise<{ sku: string; unit_cost_net: number }[]>;
+  getCostsBySkus: (
+    skus: string[],
+  ) => Promise<{ sku: string; unit_cost_net: number }[]>;
   computeEconomics: (input: {
     netCost?: number;
     commissionRate?: number;
-  }) => Promise<{ breakEvenPrice?: number }>;
+  }) => Promise<{ breakEvenPrice?: number; grossCost?: number }>;
 }
 
 /**
@@ -83,8 +85,12 @@ export const buildCategoryRates = (
       // `parseAmount` rather than `Number`: a big-number column arrives as a
       // string, and a null one must stay undefined rather than becoming 0. A 0%
       // commission and an unknown commission produce very different floors.
-      commissionRate: parseAmount(row.commission_rate as string | number | null),
-      promotedCommissionRate: parseAmount(row.promoted_commission_rate as string | number | null),
+      commissionRate: parseAmount(
+        row.commission_rate as string | number | null,
+      ),
+      promotedCommissionRate: parseAmount(
+        row.promoted_commission_rate as string | number | null,
+      ),
     });
   }
   return rates;
@@ -120,7 +126,9 @@ export const resolveCommissionFraction = (
     return undefined;
   }
   const entry = rates.get(categoryId);
-  const percent = promoted ? entry?.promotedCommissionRate : entry?.commissionRate;
+  const percent = promoted
+    ? entry?.promotedCommissionRate
+    : entry?.commissionRate;
   if (percent === undefined) {
     return undefined;
   }
@@ -142,7 +150,10 @@ export const buildBreakEvenResolver = async (
   costs: ProductCostsService | undefined,
   skus: readonly string[],
 ): Promise<
-  (sku: string, commissionFraction: number | undefined) => Promise<number | undefined>
+  (
+    sku: string,
+    commissionFraction: number | undefined,
+  ) => Promise<number | undefined>
 > => {
   if (!costs || skus.length === 0) {
     // No costs plugin installed, or nothing to look up: every offer resolves to
@@ -212,10 +223,103 @@ export interface SrpSource {
  * a store can run discovery and the monitor with no SRP source at all, and only
  * price sync needs one.
  */
+/**
+ * SRP derived from what the item cost, for variants no source priced.
+ *
+ * A supplier that publishes no RRP leaves the ceiling undefined, and an offer
+ * with no ceiling is skipped by price sync entirely - so a gap in someone else's
+ * price list silently takes our own offers out of the automation. Deriving one
+ * from the purchase price keeps them in it.
+ *
+ * The basis is the GROSS cost, because the ceiling is compared against gross
+ * marketplace prices; `computeEconomics` grosses the net cost up at the VAT rate
+ * the costs plugin is configured with, so the two never disagree about what an
+ * item cost.
+ *
+ * Only ever a fallback. An explicit SRP is a fact about the market; this is an
+ * inference from our own margin policy, and the moment a real one exists it
+ * wins.
+ */
+const deriveSrpFromCost = async (
+  costs: ProductCostsService | undefined,
+  skus: readonly string[],
+  markupPercent: number,
+): Promise<Map<string, number>> => {
+  const derived = new Map<string, number>();
+  if (!costs || skus.length === 0) {
+    return derived;
+  }
+
+  const rows = await costs.getCostsBySkus([...skus]);
+  const multiplier = 1 + markupPercent / 100;
+
+  for (const row of rows) {
+    const netCost = parseAmount(row.unit_cost_net);
+    if (netCost === undefined || netCost <= 0) {
+      continue;
+    }
+    const { grossCost } = await costs.computeEconomics({ netCost });
+    if (grossCost === undefined || grossCost <= 0) {
+      // No VAT rate configured, so there is no gross cost to mark up. Left out
+      // rather than defaulted: a ceiling guessed from a rate nobody set is how
+      // an offer gets capped at a number that means nothing.
+      continue;
+    }
+    derived.set(row.sku, round2(grossCost * multiplier));
+  }
+
+  return derived;
+};
+
+/**
+ * Fill the gaps left by the configured SRP source, in place.
+ *
+ * Deliberately not a merge of two maps: only SKUs the source did not price are
+ * considered, so an explicit SRP can never be overwritten by a derived one.
+ * Absent `srpFallbackMarkupPercent` leaves everything exactly as it was, which
+ * is the behaviour every store gets until it opts in.
+ */
+const applyCostFallback = async (
+  container: MedusaContainer,
+  variants: readonly CatalogVariant[],
+  options: Pick<
+    AllegroSyncOptions,
+    "srpFallbackMarkupPercent" | "costsModuleKey"
+  >,
+  srpBySku: Map<string, number>,
+): Promise<void> => {
+  const markupPercent = options.srpFallbackMarkupPercent;
+  if (markupPercent === undefined || markupPercent === null) {
+    return;
+  }
+
+  const unpriced = variants
+    .map((variant) => variant.sku)
+    .filter((sku) => !srpBySku.has(sku));
+  if (unpriced.length === 0) {
+    return;
+  }
+
+  const derived = await deriveSrpFromCost(
+    resolveCostsService(container, options.costsModuleKey),
+    unpriced,
+    markupPercent,
+  );
+  for (const [sku, srp] of derived) {
+    srpBySku.set(sku, srp);
+  }
+};
+
 export const buildSrpBySku = async (
   container: MedusaContainer,
   variants: readonly CatalogVariant[],
-  options: Pick<AllegroSyncOptions, "srpMetadataKey" | "srpPriceListId">,
+  options: Pick<
+    AllegroSyncOptions,
+    | "srpMetadataKey"
+    | "srpPriceListId"
+    | "srpFallbackMarkupPercent"
+    | "costsModuleKey"
+  >,
 ): Promise<SrpSource> => {
   const srpBySku = new Map<string, number>();
   const srpByCurrency = new Map<string, Map<string, number>>();
@@ -223,25 +327,38 @@ export const buildSrpBySku = async (
   if (options.srpMetadataKey) {
     const key = options.srpMetadataKey;
     for (const variant of variants) {
-      const fromVariant = parseAmount(variant.metadata?.[key] as string | number | null);
-      const fromProduct = parseAmount(variant.productMetadata?.[key] as string | number | null);
+      const fromVariant = parseAmount(
+        variant.metadata?.[key] as string | number | null,
+      );
+      const fromProduct = parseAmount(
+        variant.productMetadata?.[key] as string | number | null,
+      );
       const srp = fromVariant ?? fromProduct;
       if (srp !== undefined && srp > 0) {
         srpBySku.set(variant.sku, srp);
       }
     }
+    await applyCostFallback(container, variants, options, srpBySku);
     return { byCurrency: srpByCurrency, bySku: srpBySku };
   }
 
   if (!options.srpPriceListId) {
+    await applyCostFallback(container, variants, options, srpBySku);
     return { byCurrency: srpByCurrency, bySku: srpBySku };
   }
 
   const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
-  const skuByVariantId = new Map(variants.map((variant) => [variant.id, variant.sku]));
+  const skuByVariantId = new Map(
+    variants.map((variant) => [variant.id, variant.sku]),
+  );
   const { data } = await query.graph({
     entity: "price_list",
-    fields: ["id", "prices.amount", "prices.currency_code", "prices.price_set.variant.id"],
+    fields: [
+      "id",
+      "prices.amount",
+      "prices.currency_code",
+      "prices.price_set.variant.id",
+    ],
     filters: { id: options.srpPriceListId },
   });
 
@@ -280,8 +397,13 @@ export const buildSrpBySku = async (
  * The metadata path carries no currency, so it applies whatever the offer's currency is -
  * that is the operator's stated intent when they put a bare number in `metadata.srp`.
  */
-export const resolveSrp = (source: SrpSource, sku: string, currency: string): number | undefined =>
-  source.byCurrency.get(sku)?.get(currency.trim().toLowerCase()) ?? source.bySku.get(sku);
+export const resolveSrp = (
+  source: SrpSource,
+  sku: string,
+  currency: string,
+): number | undefined =>
+  source.byCurrency.get(sku)?.get(currency.trim().toLowerCase()) ??
+  source.bySku.get(sku);
 
 /**
  * The Medusa price per variant SKU, per currency - the number fixed-price mode
