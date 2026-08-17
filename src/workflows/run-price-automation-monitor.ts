@@ -14,7 +14,11 @@ import {
   promotionStateLabel,
   resolvePriceMode,
 } from "../lib/sync/price-automation";
-import type { AutomationRuleNames, OfferStatus, PriceMode } from "../lib/sync/price-automation";
+import type {
+  AutomationRuleNames,
+  OfferStatus,
+  PriceMode,
+} from "../lib/sync/price-automation";
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
 import type AllegroModuleService from "../modules/allegro/service";
 import { isFeatureUnavailable, listAllOffers } from "./lib/offers";
@@ -90,18 +94,19 @@ export interface PriceAutomationMonitorResult {
   error?: string;
 }
 
-export const emptyPriceAutomationMonitorResult = (): PriceAutomationMonitorResult => ({
-  drift: 0,
-  failed: 0,
-  featureUnavailable: false,
-  notObserved: 0,
-  promotionUnresolved: 0,
-  rulesNotConfigured: false,
-  scanned: 0,
-  systemic: false,
-  transitions: 0,
-  updated: 0,
-});
+export const emptyPriceAutomationMonitorResult =
+  (): PriceAutomationMonitorResult => ({
+    drift: 0,
+    failed: 0,
+    featureUnavailable: false,
+    notObserved: 0,
+    promotionUnresolved: 0,
+    rulesNotConfigured: false,
+    scanned: 0,
+    systemic: false,
+    transitions: 0,
+    updated: 0,
+  });
 
 /** A mapping row, as the monitor reads and writes it. */
 interface OfferRow {
@@ -120,7 +125,12 @@ interface OfferRow {
 
 type RuleNamesResolution =
   | { ok: true; byId: Map<string, string> }
-  | { ok: false; systemic: boolean; featureUnavailable: boolean; error?: string };
+  | {
+      ok: false;
+      systemic: boolean;
+      featureUnavailable: boolean;
+      error?: string;
+    };
 
 /**
  * The account's rule id -> name map.
@@ -130,7 +140,9 @@ type RuleNamesResolution =
  * only authoritative source of a rule's name - and the name is what drift is
  * judged on.
  */
-export const fetchRuleNames = async (client: AllegroClient): Promise<RuleNamesResolution> => {
+export const fetchRuleNames = async (
+  client: AllegroClient,
+): Promise<RuleNamesResolution> => {
   try {
     const { rules } = await client.listPriceAutomationRules();
     const byId = new Map<string, string>();
@@ -229,7 +241,10 @@ const isUnchanged = (row: OfferRow, next: ObservedState): boolean =>
   row.automation_synced_at !== undefined;
 
 /** The append-only audit row for an observed rule transition. */
-const transitionRow = (row: OfferRow, next: ObservedState): Record<string, unknown> => ({
+const transitionRow = (
+  row: OfferRow,
+  next: ObservedState,
+): Record<string, unknown> => ({
   offer_id: row.offer_id ?? null,
   price_mode_new: next.priceMode,
   price_mode_old: row.price_mode ?? "unknown",
@@ -289,8 +304,12 @@ export const runPriceAutomationMonitor = async (
       result.rulesNotConfigured = !options.automationRules;
 
       const offers = listing ?? (await listAllOffers(client));
-      const offersById = new Map(offers.offers.map((offer) => [offer.id, offer]));
-      const rows = (await allegro.listAllegroOffers({})) as unknown as OfferRow[];
+      const offersById = new Map(
+        offers.offers.map((offer) => [offer.id, offer]),
+      );
+      const rows = (await allegro.listAllegroOffers(
+        {},
+      )) as unknown as OfferRow[];
 
       const auditRows: Record<string, unknown>[] = [];
       const updates: Record<string, unknown>[] = [];
@@ -308,7 +327,12 @@ export const runPriceAutomationMonitor = async (
           continue;
         }
         result.scanned += 1;
-        const next = observe(offer, row, ruleNames.byId, options.automationRules);
+        const next = observe(
+          offer,
+          row,
+          ruleNames.byId,
+          options.automationRules,
+        );
         if (next.drift) {
           result.drift += 1;
         }
@@ -318,7 +342,10 @@ export const runPriceAutomationMonitor = async (
 
         if (
           isTransition(
-            { priceMode: row.price_mode ?? "unknown", ruleId: row.automation_rule_id ?? undefined },
+            {
+              priceMode: row.price_mode ?? "unknown",
+              ruleId: row.automation_rule_id ?? undefined,
+            },
             { priceMode: next.priceMode, ruleId: next.ruleId },
           )
         ) {
@@ -358,13 +385,19 @@ export const runPriceAutomationMonitor = async (
         }
       }
 
-      const errorLine = buildMonitorError(result, firstError);
-      result.error = errorLine ?? undefined;
+      const report = buildMonitorError(result, firstError);
+      // Both halves in the result's own field: the admin's run-now response and
+      // the job log want everything the sweep noticed, in one line.
+      const combined = [report.error, report.finding]
+        .filter(Boolean)
+        .join("; ");
+      result.error = combined.length > 0 ? combined : undefined;
       return {
         outcome: {
           counts: { ...result },
-          lastError: errorLine,
-          status: errorLine ? ("error" as const) : ("ok" as const),
+          finding: report.finding,
+          lastError: report.error,
+          status: report.error ? ("error" as const) : ("ok" as const),
         },
         value: undefined,
       };
@@ -382,30 +415,43 @@ export const runPriceAutomationMonitor = async (
 const buildMonitorError = (
   result: PriceAutomationMonitorResult,
   firstError?: string,
-): string | null => {
-  const parts: string[] = [];
+): { error: string | null; finding: string | null } => {
+  const errors: string[] = [];
+  const findings: string[] = [];
+
+  // The only genuine failure: a call this run had to make did not come back.
   if (firstError) {
-    parts.push(firstError);
+    errors.push(firstError);
   }
+
   if (result.rulesNotConfigured) {
-    parts.push(
+    // A configuration gap, not a broken run - and one an operator fixes in
+    // settings rather than by looking at logs.
+    findings.push(
       "the `automationRules` option is not configured, so drift cannot be judged and price sync stays inert. Set the two rule names that exist on the Allegro account",
     );
   }
   if (result.drift > 0) {
-    // Drift is an error state even on a clean run: an offer priced by the wrong
-    // rule is being sold on the wrong commission, and nothing else says so.
-    parts.push(`${result.drift} offer(s) drift from the expected price-automation rule`);
+    // Drift is a finding about the catalogue rather than about this run: an
+    // offer priced by the wrong rule is being sold on the wrong commission, and
+    // the monitor's job was to notice exactly that. It noticed.
+    findings.push(
+      `${result.drift} offer(s) drift from the expected price-automation rule`,
+    );
   }
   if (result.promotionUnresolved > 0) {
     // Reported for the same reason drift is: these offers were NOT checked, so a
     // `drift: 0` sweep that silently skipped them would read as a clean catalogue.
     // Price sync skips them too, with `promotion-unresolved`, so the remedy is the same.
-    parts.push(
+    findings.push(
       `${result.promotionUnresolved} offer(s) have an unresolved promotion state, so drift could not be judged and price sync skips them; a successful promo-options sweep fills it in`,
     );
   }
-  return parts.length > 0 ? parts.join("; ") : null;
+
+  return {
+    error: errors.length > 0 ? errors.join("; ") : null,
+    finding: findings.length > 0 ? findings.join("; ") : null,
+  };
 };
 
 const runPriceAutomationMonitorStep = createStep(

@@ -8,7 +8,10 @@ import type {
   AllegroSyncStateRow,
   AllegroSyncStatePatch,
 } from "../../modules/allegro/service";
-import { SYNC_CLAIM_HELD, SYNC_HEARTBEAT_INTERVAL_MS } from "../../modules/allegro/service";
+import {
+  SYNC_CLAIM_HELD,
+  SYNC_HEARTBEAT_INTERVAL_MS,
+} from "../../modules/allegro/service";
 
 /**
  * The claim lifecycle every sync loop shares.
@@ -36,6 +39,14 @@ import { SYNC_CLAIM_HELD, SYNC_HEARTBEAT_INTERVAL_MS } from "../../modules/alleg
 export interface SyncRunOutcome {
   status: "ok" | "error";
   lastError?: string | null;
+  /**
+   * A condition worth showing an operator on a run that otherwise did its job:
+   * offers with no sygnatura, conflicts held out of sync, a promotion state that
+   * could not be resolved. Deliberately not `lastError` - a loop that reports
+   * every finding as a failure teaches its operator to ignore red rows, which is
+   * the opposite of what a health table is for.
+   */
+  finding?: string | null;
   cursor?: string | null;
   counts?: Record<string, unknown> | null;
   failures?: AllegroSyncStatePatch["failures"];
@@ -106,7 +117,9 @@ export type SyncRunResult<T> =
 export const runUnderSyncClaim = async <T>(
   container: MedusaContainer,
   provider: AllegroSyncProvider,
-  body: (context: SyncRunContext) => Promise<{ outcome: SyncRunOutcome; value: T }>,
+  body: (
+    context: SyncRunContext,
+  ) => Promise<{ outcome: SyncRunOutcome; value: T }>,
   killSwitch?: {
     disabled: (allegro: AllegroModuleService) => Promise<boolean>;
     reason: string;
@@ -123,7 +136,10 @@ export const runUnderSyncClaim = async <T>(
   // exists to prevent, reached by the code meant to report a skip. A skipped write is logged
   // rather than swallowed, because "nothing happened and nothing was recorded" is the state
   // this repo has been bitten by before.
-  const recordPreClaim = async (patch: AllegroSyncStatePatch, what: string): Promise<void> => {
+  const recordPreClaim = async (
+    patch: AllegroSyncStatePatch,
+    what: string,
+  ): Promise<void> => {
     const written = await allegro.writeSyncStateIfUnclaimed(provider, patch);
     if (!written) {
       logger.warn(
@@ -136,23 +152,36 @@ export const runUnderSyncClaim = async <T>(
     // Recorded, not silent. "Disabled" and "broken" are both "nothing happened"
     // from the outside, and an operator needs to tell them apart at a glance.
     await recordPreClaim(
-      { last_error: killSwitch.reason, status: "idle" },
+      // `disabled`, not `idle` with the reason in `last_error`. Off on purpose is
+      // neither a failure nor "never ran", and writing it as either is what made
+      // three of five providers read as broken while they were behaving exactly
+      // as configured.
+      { last_error: null, last_finding: killSwitch.reason, status: "disabled" },
       "the kill switch is on",
     );
-    return { ran: false, skip: { kind: "disabled", reason: killSwitch.reason } };
+    return {
+      ran: false,
+      skip: { kind: "disabled", reason: killSwitch.reason },
+    };
   }
 
   const client = await allegro.getClient();
   if (!client) {
     const reason =
       "Allegro is not connected: no usable stored token. Reconnect Allegro from the admin settings.";
-    await recordPreClaim({ last_error: reason, status: "error" }, "Allegro is not connected");
+    await recordPreClaim(
+      { last_error: reason, status: "error" },
+      "Allegro is not connected",
+    );
     return { ran: false, skip: { kind: "not-connected", reason } };
   }
 
   const claim = await allegro.claimSyncRun(provider);
   if (!(claim.acquired && claim.state && claim.token)) {
-    return { ran: false, skip: { kind: "claim-held", reason: claim.reason ?? SYNC_CLAIM_HELD } };
+    return {
+      ran: false,
+      skip: { kind: "claim-held", reason: claim.reason ?? SYNC_CLAIM_HELD },
+    };
   }
   const { token } = claim;
 
@@ -247,7 +276,9 @@ export const runUnderSyncClaim = async <T>(
         {
           ...(outcome.counts === undefined ? {} : { counts: outcome.counts }),
           ...(outcome.cursor === undefined ? {} : { cursor: outcome.cursor }),
-          ...(outcome.failures === undefined ? {} : { failures: outcome.failures }),
+          ...(outcome.failures === undefined
+            ? {}
+            : { failures: outcome.failures }),
           ...(outcome.writeScopeMissing === undefined
             ? {}
             : { write_scope_missing: outcome.writeScopeMissing }),
@@ -255,6 +286,7 @@ export const runUnderSyncClaim = async <T>(
           // the status stops reading `running`.
           claim_token: null,
           last_error: outcome.lastError ?? null,
+          last_finding: outcome.finding ?? null,
           last_synced_at: new Date(),
           status: outcome.status,
         },

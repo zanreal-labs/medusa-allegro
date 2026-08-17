@@ -15,7 +15,10 @@ interface FakeAllegro {
   getClient: jest.Mock;
 }
 
-const fakeContainer = (allegro: FakeAllegro, logs: string[] = []): MedusaContainer => {
+const fakeContainer = (
+  allegro: FakeAllegro,
+  logs: string[] = [],
+): MedusaContainer => {
   const record = (level: string) => (message: string) => {
     logs.push(`${level}: ${message}`);
   };
@@ -25,7 +28,11 @@ const fakeContainer = (allegro: FakeAllegro, logs: string[] = []): MedusaContain
         return allegro;
       }
       if (key === "logger") {
-        return { error: record("error"), info: record("info"), warn: record("warn") };
+        return {
+          error: record("error"),
+          info: record("info"),
+          warn: record("warn"),
+        };
       }
       throw new Error(`unexpected container key ${key}`);
     },
@@ -56,7 +63,9 @@ describe("pushAllegroFulfillment", () => {
   it("pushes the mapped status once armed and connected", async () => {
     const updateCheckoutFormFulfillment = jest.fn(() => Promise.resolve());
     const allegro: FakeAllegro = {
-      getClient: jest.fn(() => Promise.resolve({ updateCheckoutFormFulfillment })),
+      getClient: jest.fn(() =>
+        Promise.resolve({ updateCheckoutFormFulfillment }),
+      ),
       isFulfillmentWritebackDisabled: () => Promise.resolve(false),
       listAllegroOrders: jest.fn(() =>
         Promise.resolve([{ checkout_form_id: "cf_1", id: "algorder_1" }]),

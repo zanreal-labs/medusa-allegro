@@ -9,7 +9,11 @@ import {
 import { AllegroApiError } from "../lib/allegro/errors";
 import type { AllegroOffer } from "../lib/allegro/types";
 import { planOfferDiscovery } from "../lib/sync/offer-discovery";
-import type { DiscoveryPlan, OfferConflict, StoredOffer } from "../lib/sync/offer-discovery";
+import type {
+  DiscoveryPlan,
+  OfferConflict,
+  StoredOffer,
+} from "../lib/sync/offer-discovery";
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
 import type AllegroModuleService from "../modules/allegro/service";
 import { listEligibleVariants } from "./lib/catalog";
@@ -123,7 +127,9 @@ const applyPlan = async (
 
   for (const upsert of plan.upserts) {
     const offer = offersById.get(upsert.offer_id);
-    const promotion = offer ? resolveOfferPromoted(offer, sweep) : { unresolved: false };
+    const promotion = offer
+      ? resolveOfferPromoted(offer, sweep)
+      : { unresolved: false };
     if (promotion.unresolved) {
       promoUnresolved += 1;
     }
@@ -134,7 +140,9 @@ const applyPlan = async (
       last_error: null,
       // Only written when known. An unresolved sweep must not overwrite the value
       // an operator or an earlier run established.
-      ...(promotion.promoted === undefined ? {} : { promoted: promotion.promoted }),
+      ...(promotion.promoted === undefined
+        ? {}
+        : { promoted: promotion.promoted }),
     };
     const existing = existingBySku.get(upsert.sku);
     if (existing) {
@@ -222,7 +230,11 @@ const applyPlan = async (
   if (toUpdate.length > 0) {
     await allegro.updateAllegroOffers(toUpdate as never);
   }
-  return { created: toCreate.length, promoUnresolved, updated: toUpdate.length };
+  return {
+    created: toCreate.length,
+    promoUnresolved,
+    updated: toUpdate.length,
+  };
 };
 
 /**
@@ -244,8 +256,12 @@ const discoverCategories = async (
   if (categoryIds.length === 0) {
     return { created: 0 };
   }
-  const existing = await allegro.listAllegroCategoryRates({ category_id: [...categoryIds] });
-  const known = new Set((existing as { category_id: string }[]).map((row) => row.category_id));
+  const existing = await allegro.listAllegroCategoryRates({
+    category_id: [...categoryIds],
+  });
+  const known = new Set(
+    (existing as { category_id: string }[]).map((row) => row.category_id),
+  );
   const missing = categoryIds.filter((id) => !known.has(id));
   if (missing.length === 0) {
     return { created: 0 };
@@ -326,10 +342,23 @@ export const runOfferDiscovery = async (
         variants,
       });
 
-      const offersById = new Map(listing.offers.map((offer) => [offer.id, offer]));
+      const offersById = new Map(
+        listing.offers.map((offer) => [offer.id, offer]),
+      );
       const existingBySku = new Map(stored.map((row) => [row.sku, row]));
-      const applied = await applyPlan(allegro, plan, sweep, offersById, existingBySku);
-      const categories = await discoverCategories(allegro, client, plan.categoryIds, heartbeat);
+      const applied = await applyPlan(
+        allegro,
+        plan,
+        sweep,
+        offersById,
+        existingBySku,
+      );
+      const categories = await discoverCategories(
+        allegro,
+        client,
+        plan.categoryIds,
+        heartbeat,
+      );
 
       result.categoriesCreated = categories.created;
       result.categoriesSeen = plan.categoryIds.length;
@@ -344,13 +373,20 @@ export const runOfferDiscovery = async (
         result.conflicts[conflict.conflict] += 1;
       }
 
-      const errorLine = buildDiscoveryError(result, sweep, categories.error);
-      result.error = errorLine ?? undefined;
+      const report = buildDiscoveryReport(result, sweep, categories.error);
+      // The result's own `error` field keeps carrying both, because it is what the
+      // admin's run-now response and the job log read, and an operator pressing
+      // the button wants everything the run noticed in one line.
+      const combined = [report.error, report.finding]
+        .filter(Boolean)
+        .join("; ");
+      result.error = combined.length > 0 ? combined : undefined;
       return {
         outcome: {
           counts: { ...result, conflicts: { ...result.conflicts } },
-          lastError: errorLine,
-          status: errorLine ? ("error" as const) : ("ok" as const),
+          finding: report.finding,
+          lastError: report.error,
+          status: report.error ? ("error" as const) : ("ok" as const),
         },
         value: { listing, promo: sweep },
       };
@@ -374,15 +410,33 @@ export const runOfferDiscovery = async (
  * conflicted mapping means some part of the catalogue is not being synced at all
  * and nothing else will say so.
  */
-const buildDiscoveryError = (
+/**
+ * Split what discovery saw into a failure and a finding.
+ *
+ * Discovery writes nothing to Allegro, so almost nothing it reports is a
+ * failure of the run: a conflict, an offer with no sygnatura and an unmatched
+ * variant are all statements about the catalogue that the run correctly
+ * recorded. The run failing means it could not do its job - and the only such
+ * case here is a sweep or a category read that errored.
+ *
+ * Keeping the two apart is why this returns a pair rather than one string. They
+ * used to be joined, every part turned the row red, and after a while a red
+ * discovery row meant nothing at all.
+ */
+const buildDiscoveryReport = (
   result: DiscoverOffersResult,
   sweep: PromoSweepResult,
   categoryError?: string,
-): string | null => {
-  const parts: string[] = [];
-  const conflictTotal = Object.values(result.conflicts).reduce((sum, count) => sum + count, 0);
+): { error: string | null; finding: string | null } => {
+  const findings: string[] = [];
+  const errors: string[] = [];
+
+  const conflictTotal = Object.values(result.conflicts).reduce(
+    (sum, count) => sum + count,
+    0,
+  );
   if (conflictTotal > 0) {
-    parts.push(
+    findings.push(
       `${conflictTotal} mapping conflict(s) are held out of every sync path until resolved: ${Object.entries(
         result.conflicts,
       )
@@ -392,22 +446,29 @@ const buildDiscoveryError = (
     );
   }
   if (result.skippedNoSku > 0) {
-    parts.push(
+    findings.push(
       `${result.skippedNoSku} live offer(s) carry no sygnatura and no EAN, so they cannot be mapped at all`,
     );
   }
-  if (sweep.error) {
-    parts.push(sweep.error);
-  }
   if (sweep.featureUnavailable) {
-    parts.push(
+    findings.push(
       'the promo-options resource answered "Feature unavailable"; promotion state was not refreshed, so price sync will skip offers whose promotion state is unresolved',
     );
   }
-  if (categoryError) {
-    parts.push(categoryError);
+
+  // A sweep that errored and a category read that errored are the run failing to
+  // gather what it came for, unlike the conditions above.
+  if (sweep.error) {
+    errors.push(sweep.error);
   }
-  return parts.length > 0 ? parts.join("; ") : null;
+  if (categoryError) {
+    errors.push(categoryError);
+  }
+
+  return {
+    error: errors.length > 0 ? errors.join("; ") : null,
+    finding: findings.length > 0 ? findings.join("; ") : null,
+  };
 };
 
 const discoverAllegroOffersStep = createStep(

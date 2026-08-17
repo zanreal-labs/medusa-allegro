@@ -61,11 +61,16 @@ const fakeAllegro = (
     categories,
     claimSyncRun: (provider: string) => {
       claims.push(provider);
-      const row = state.get(provider) ?? { provider, status: "idle", updated_at: new Date() };
+      const row = state.get(provider) ?? {
+        provider,
+        status: "idle",
+        updated_at: new Date(),
+      };
       state.set(provider, { ...row, claim_token: "token-1" });
       return Promise.resolve({ acquired: true, state: row, token: "token-1" });
     },
-    touchSyncClaim: (_provider: string, token: string) => Promise.resolve(token === "token-1"),
+    touchSyncClaim: (_provider: string, token: string) =>
+      Promise.resolve(token === "token-1"),
     claims,
     createAllegroCategoryRates: (rows: Omit<CategoryRow, "id">[]) => {
       for (const row of rows) {
@@ -77,16 +82,23 @@ const fakeAllegro = (
     createAllegroOffers: (rows: Partial<OfferRow>[]) => {
       for (const row of rows) {
         sequence += 1;
-        offers.push({ id: `algoffer_${sequence}`, sku: "", ...row } as OfferRow);
+        offers.push({
+          id: `algoffer_${sequence}`,
+          sku: "",
+          ...row,
+        } as OfferRow);
       }
       return Promise.resolve(rows);
     },
     getClient: () => Promise.resolve(client),
-    getSyncOptions: () => Promise.resolve({ changeCap: 100, stockLocationIds: [], ...options }),
+    getSyncOptions: () =>
+      Promise.resolve({ changeCap: 100, stockLocationIds: [], ...options }),
     listAllegroCategoryRates: (filters: { category_id?: string[] }) =>
       Promise.resolve(
         filters.category_id
-          ? categories.filter((row) => filters.category_id?.includes(row.category_id))
+          ? categories.filter((row) =>
+              filters.category_id?.includes(row.category_id),
+            )
           : categories,
       ),
     listAllegroOffers: () => Promise.resolve(offers.map((row) => ({ ...row }))),
@@ -113,8 +125,14 @@ const fakeAllegro = (
       state.set(provider, { ...(row ?? { provider }), ...patch });
       return Promise.resolve(true);
     },
-    writeSyncStateIfUnclaimed: (provider: string, patch: Record<string, unknown>) => {
-      state.set(provider, { ...(state.get(provider) ?? { provider }), ...patch });
+    writeSyncStateIfUnclaimed: (
+      provider: string,
+      patch: Record<string, unknown>,
+    ) => {
+      state.set(provider, {
+        ...(state.get(provider) ?? { provider }),
+        ...patch,
+      });
       return Promise.resolve(true);
     },
   };
@@ -167,7 +185,13 @@ const fakeContainer = (
     }
     if (key === "query") {
       return {
-        graph: ({ entity, pagination }: { entity: string; pagination?: { skip: number } }) => {
+        graph: ({
+          entity,
+          pagination,
+        }: {
+          entity: string;
+          pagination?: { skip: number };
+        }) => {
           if (entity === "product_variant" && (pagination?.skip ?? 0) === 0) {
             return Promise.resolve({
               data: variants.map((variant) => ({
@@ -214,7 +238,12 @@ describe("runOfferDiscovery", () => {
       variants: [{ id: "v1", sku: "SKU-1" }],
     });
 
-    expect(output.result).toMatchObject({ created: 1, matched: 1, offersListed: 1, updated: 0 });
+    expect(output.result).toMatchObject({
+      created: 1,
+      matched: 1,
+      offersListed: 1,
+      updated: 0,
+    });
     expect(allegro.offers[0]).toMatchObject({
       conflict: null,
       last_error: null,
@@ -262,7 +291,10 @@ describe("runOfferDiscovery", () => {
     // selects the commission rate, which sets the price floor.
     const { allegro, output } = await run({
       offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],
-      promoError: new AllegroApiError({ httpStatus: 400, message: "Feature unavailable" }),
+      promoError: new AllegroApiError({
+        httpStatus: 400,
+        message: "Feature unavailable",
+      }),
       stored: [{ id: "row-1", offer_id: "o1", promoted: true, sku: "SKU-1" }],
       variants: [{ id: "v1", sku: "SKU-1" }],
     });
@@ -280,7 +312,10 @@ describe("runOfferDiscovery", () => {
     // break-even and the attached rule is licensed to sell at a loss.
     const { allegro } = await run({
       offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],
-      promoError: new AllegroApiError({ httpStatus: 400, message: "Feature unavailable" }),
+      promoError: new AllegroApiError({
+        httpStatus: 400,
+        message: "Feature unavailable",
+      }),
       // No stored row: this run creates it.
       variants: [{ id: "v1", sku: "SKU-1" }],
     });
@@ -321,7 +356,13 @@ describe("runOfferDiscovery", () => {
     // - below its true break-even - and the monitor reads it as drift and switches it onto the
     // standard rule, actively making it worse.
     const { allegro } = await run({
-      offers: [offer({ external: { id: "SKU-1" }, id: "o1", publication: { status: "INACTIVE" } })],
+      offers: [
+        offer({
+          external: { id: "SKU-1" },
+          id: "o1",
+          publication: { status: "INACTIVE" },
+        }),
+      ],
       promo: [],
       stored: [{ id: "row-1", offer_id: "o1", promoted: true, sku: "SKU-1" }],
       variants: [{ id: "v1", sku: "SKU-1" }],
@@ -335,7 +376,10 @@ describe("runOfferDiscovery", () => {
   it("counts an unresolved promotion state that is not a feature gap", async () => {
     const { output } = await run({
       offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],
-      promoError: new AllegroApiError({ httpStatus: 400, message: "Bad request" }),
+      promoError: new AllegroApiError({
+        httpStatus: 400,
+        message: "Bad request",
+      }),
       variants: [{ id: "v1", sku: "SKU-1" }],
     });
     expect(output.result.promoUnresolved).toBe(1);
@@ -355,7 +399,10 @@ describe("runOfferDiscovery", () => {
       variants: [{ id: "v1", sku: "SKU-1" }],
     });
 
-    expect(allegro.offers[0]).toMatchObject({ conflict: "duplicate-sku", offer_id: null });
+    expect(allegro.offers[0]).toMatchObject({
+      conflict: "duplicate-sku",
+      offer_id: null,
+    });
     expect(output.result.conflicts["duplicate-sku"]).toBe(1);
     expect(output.result.error).toContain("mapping conflict(s)");
   });
@@ -366,7 +413,10 @@ describe("runOfferDiscovery", () => {
       variants: [],
     });
     expect(output.result.conflicts["no-variant"]).toBe(1);
-    expect(allegro.offers[0]).toMatchObject({ conflict: "no-variant", sku: "SKU-GHOST" });
+    expect(allegro.offers[0]).toMatchObject({
+      conflict: "no-variant",
+      sku: "SKU-GHOST",
+    });
   });
 
   it("clears a stale link and its promoted flag together", async () => {
@@ -408,14 +458,27 @@ describe("runOfferDiscovery", () => {
       offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],
       variants: [{ id: "v1", sku: "SKU-1" }],
     });
-    expect(output.result).toMatchObject({ categoriesCreated: 1, categoriesSeen: 1 });
-    expect(allegro.categories[0]).toMatchObject({ category_id: "cat-1", name: "Category cat-1" });
+    expect(output.result).toMatchObject({
+      categoriesCreated: 1,
+      categoriesSeen: 1,
+    });
+    expect(allegro.categories[0]).toMatchObject({
+      category_id: "cat-1",
+      name: "Category cat-1",
+    });
     expect(allegro.categories[0]?.commission_rate).toBeUndefined();
   });
 
   it("does not recreate a category that already has a rate row", async () => {
     const { output } = await run({
-      categories: [{ category_id: "cat-1", commission_rate: 9.5, id: "r1", name: "Existing" }],
+      categories: [
+        {
+          category_id: "cat-1",
+          commission_rate: 9.5,
+          id: "r1",
+          name: "Existing",
+        },
+      ],
       offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],
       variants: [{ id: "v1", sku: "SKU-1" }],
     });
@@ -426,11 +489,17 @@ describe("runOfferDiscovery", () => {
     // The operator needs the row far more than the pretty name; without it, price
     // sync skips every offer in the category with no visible reason.
     const { allegro, output } = await run({
-      categoryError: new AllegroApiError({ httpStatus: 404, message: "Not found" }),
+      categoryError: new AllegroApiError({
+        httpStatus: 404,
+        message: "Not found",
+      }),
       offers: [offer({ external: { id: "SKU-1" }, id: "o1" })],
       variants: [{ id: "v1", sku: "SKU-1" }],
     });
-    expect(allegro.categories[0]).toMatchObject({ category_id: "cat-1", name: "cat-1" });
+    expect(allegro.categories[0]).toMatchObject({
+      category_id: "cat-1",
+      name: "cat-1",
+    });
     expect(output.result.error).toContain("/sale/categories/cat-1");
   });
 
@@ -445,12 +514,17 @@ describe("runOfferDiscovery", () => {
     expect(state?.last_synced_at).toBeInstanceOf(Date);
   });
 
-  it("records an error status when the run had findings", async () => {
+  it("records a finding, not a failure, when the run did its job on imperfect data", async () => {
+    // A sygnatura matching no variant is a statement about the catalogue, and
+    // recording it IS the job. Reporting it as `error` is what taught an operator
+    // that a red discovery row means nothing.
     const { allegro } = await run({
       offers: [offer({ external: { id: "SKU-GHOST" }, id: "o1" })],
       variants: [],
     });
-    expect(allegro.state.get("offers")).toMatchObject({ status: "error" });
+    const state = allegro.state.get("offers");
+    expect(state).toMatchObject({ last_error: null, status: "ok" });
+    expect(state?.last_finding).toContain("no-variant");
   });
 
   it("takes the claim for the offers provider only", async () => {
@@ -509,7 +583,10 @@ describe("runOfferDiscovery when the claim is held", () => {
   it("reports the collision as retryable and writes nothing", async () => {
     const allegro = fakeAllegro();
     allegro.claimSyncRun = () =>
-      Promise.resolve({ acquired: false, reason: "a sync run is already in progress" } as never);
+      Promise.resolve({
+        acquired: false,
+        reason: "a sync run is already in progress",
+      } as never);
     client = fakeClient({});
     const container = fakeContainer(allegro, []);
 

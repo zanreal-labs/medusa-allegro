@@ -68,11 +68,41 @@ const AllegroSyncState = model.define("allegro_sync_state", {
    */
   failures: model.json().nullable(),
   id: model.id({ prefix: "algsync" }).primaryKey(),
+  /**
+   * Why the last run failed. Only ever set when the run did NOT do its job.
+   *
+   * Kept strictly apart from `last_finding`, because the two used to share this
+   * column and the sharing is what made the health table unreadable: a disabled
+   * writer, a catalogue whose data an operator should look at, and a loop that
+   * genuinely broke all arrived here and all showed as `error`. An operator who
+   * has learned that "error" usually means "nothing is wrong" has lost the
+   * signal, which is exactly the state to be in before arming live writers.
+   */
   last_error: model.text().nullable(),
+  /**
+   * What the last run wants an operator to know, having otherwise succeeded.
+   *
+   * Offers that carry no sygnatura, mapping conflicts held out of sync, an
+   * unresolved promotion state: real conditions worth surfacing, none of which
+   * mean the run failed. They belong beside the counters, not in the failure
+   * column.
+   */
+  last_finding: model.text().nullable(),
   last_synced_at: model.dateTime().nullable(),
   /** Sync loop label: "offers", "price-automation", "prices", "stock", "orders". */
   provider: model.text().unique(),
-  status: model.enum(["idle", "running", "ok", "error"]).default("idle"),
+  /**
+   * - `idle` - never run, or reset. No claim held.
+   * - `running` - a claim is held right now.
+   * - `ok` - the last run did its job. May still carry a `last_finding`.
+   * - `error` - the last run failed; `last_error` says how.
+   * - `disabled` - a kill switch stopped it before it started. Not a failure,
+   *   and deliberately not `idle` either: "off on purpose" and "never ran" are
+   *   different answers to "why is this loop doing nothing".
+   */
+  status: model
+    .enum(["idle", "running", "ok", "error", "disabled"])
+    .default("idle"),
   /**
    * True when Allegro answered 403 on a write the stored token should have been
    * allowed to make - the signature of a connection granted without

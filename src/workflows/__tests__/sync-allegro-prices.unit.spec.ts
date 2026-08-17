@@ -1,6 +1,9 @@
 import { AllegroAuthError } from "../../lib/allegro/auth-error";
 import { AllegroApiError } from "../../lib/allegro/errors";
-import type { AllegroOffer, PriceAutomationRule } from "../../lib/allegro/types";
+import type {
+  AllegroOffer,
+  PriceAutomationRule,
+} from "../../lib/allegro/types";
 import { QUARANTINE_AFTER_FAILURES } from "../../lib/sync/failure-state";
 import {
   MANUAL_PUSH_WINDOW_MS,
@@ -46,9 +49,15 @@ interface CommandScript {
   /** Offers whose command reports `completedAt` but carries no task tally at all. */
   noTallyFor?: string[];
   /** Offers whose price-change command fails, by offer id. */
-  priceTallyFor?: Record<string, { failed: number; success: number; total: number }>;
+  priceTallyFor?: Record<
+    string,
+    { failed: number; success: number; total: number }
+  >;
   /** Offers whose rule-REMOVAL command fails, by offer id. */
-  removalTallyFor?: Record<string, { failed: number; success: number; total: number }>;
+  removalTallyFor?: Record<
+    string,
+    { failed: number; success: number; total: number }
+  >;
 }
 
 const fakeClient = (input: {
@@ -57,7 +66,12 @@ const fakeClient = (input: {
   rulesError?: Error;
   script?: CommandScript;
 }) => {
-  const commands: { offerId: string; ruleId: string; min?: string; max?: string }[] = [];
+  const commands: {
+    offerId: string;
+    ruleId: string;
+    min?: string;
+    max?: string;
+  }[] = [];
   /** Every fixed-price write, in order, exactly as the SDK would send it. */
   const priceCommands: {
     commandId: string;
@@ -117,12 +131,17 @@ const fakeClient = (input: {
     commands,
     getOffer: (offerId: string) =>
       Promise.resolve(
-        (input.offers ?? []).find((offer) => offer.id === offerId) ?? offerFixture({ id: offerId }),
+        (input.offers ?? []).find((offer) => offer.id === offerId) ??
+          offerFixture({ id: offerId }),
       ),
     getOfferPriceAutomationCommandTasks: () =>
-      Promise.resolve({ tasks: [{ message: "rejected by Allegro", status: "FAIL" as const }] }),
+      Promise.resolve({
+        tasks: [{ message: "rejected by Allegro", status: "FAIL" as const }],
+      }),
     getOfferPriceChangeCommandTasks: () =>
-      Promise.resolve({ tasks: [{ message: "rejected by Allegro", status: "FAIL" as const }] }),
+      Promise.resolve({
+        tasks: [{ message: "rejected by Allegro", status: "FAIL" as const }],
+      }),
     listOffers: () =>
       Promise.resolve({
         count: (input.offers ?? []).length,
@@ -140,16 +159,26 @@ const fakeClient = (input: {
       return Promise.resolve({
         completedAt: "2026-06-01T00:00:00.000Z",
         id: commandId,
-        taskCount: script.priceTallyFor?.[offerId] ?? { failed: 0, success: 1, total: 1 },
+        taskCount: script.priceTallyFor?.[offerId] ?? {
+          failed: 0,
+          success: 1,
+          total: 1,
+        },
       });
     },
     priceCommands,
     removals,
-    removeOfferPriceAutomation: (params: { offerId: string; marketplaceId?: string }) => {
+    removeOfferPriceAutomation: (params: {
+      offerId: string;
+      marketplaceId?: string;
+    }) => {
       sequence += 1;
       const commandId = `rm-${sequence}`;
       offerIdByRemoval.set(commandId, params.offerId);
-      removals.push({ marketplaceId: params.marketplaceId, offerId: params.offerId });
+      removals.push({
+        marketplaceId: params.marketplaceId,
+        offerId: params.offerId,
+      });
       return Promise.resolve({ id: commandId });
     },
     pollOfferPriceAutomationCommand: (commandId: string) => {
@@ -158,7 +187,11 @@ const fakeClient = (input: {
         return Promise.resolve({
           completedAt: "2026-06-01T00:00:00.000Z",
           id: commandId,
-          taskCount: script.removalTallyFor?.[removedOffer] ?? { failed: 0, success: 1, total: 1 },
+          taskCount: script.removalTallyFor?.[removedOffer] ?? {
+            failed: 0,
+            success: 1,
+            total: 1,
+          },
         });
       }
       const offerId = offerIdByCommand.get(commandId) ?? "";
@@ -174,19 +207,31 @@ const fakeClient = (input: {
         });
       }
       if (script.noTallyFor?.includes(offerId)) {
-        return Promise.resolve({ completedAt: "2026-06-01T00:00:00.000Z", id: commandId });
+        return Promise.resolve({
+          completedAt: "2026-06-01T00:00:00.000Z",
+          id: commandId,
+        });
       }
       return Promise.resolve({
         completedAt: "2026-06-01T00:00:00.000Z",
         id: commandId,
-        taskCount: script.tallyFor?.[offerId] ?? { failed: 0, success: 1, total: 1 },
+        taskCount: script.tallyFor?.[offerId] ?? {
+          failed: 0,
+          success: 1,
+          total: 1,
+        },
       });
     },
   };
 };
 
 const CAT_RATES: CategoryRateFixture[] = [
-  { category_id: "cat-1", commission_rate: 10, id: "r1", promoted_commission_rate: 15 },
+  {
+    category_id: "cat-1",
+    commission_rate: 10,
+    id: "r1",
+    promoted_commission_rate: 15,
+  },
 ];
 
 const setup = (input: {
@@ -232,9 +277,13 @@ const setup = (input: {
   const logs: string[] = [];
   const container = fakeContainer({
     allegro,
-    ...(input.noCosts ? {} : { costs: fakeCostsService(input.costs ?? { "SKU-1": 100 }) }),
+    ...(input.noCosts
+      ? {}
+      : { costs: fakeCostsService(input.costs ?? { "SKU-1": 100 }) }),
     logs,
-    variants: input.variants ?? [{ id: "v1", metadata: { srp: 500 }, sku: "SKU-1" }],
+    variants: input.variants ?? [
+      { id: "v1", metadata: { srp: 500 }, sku: "SKU-1" },
+    ],
   });
   return { allegro, client, container, logs };
 };
@@ -243,7 +292,15 @@ const setup = (input: {
 const healthy = (over: Partial<Parameters<typeof setup>[0]> = {}) =>
   setup({
     live: [offerFixture({ id: "o1" })],
-    rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
+    rows: [
+      {
+        category_id: "cat-1",
+        id: "row-1",
+        offer_id: "o1",
+        promoted: false,
+        sku: "SKU-1",
+      },
+    ],
     ...over,
   });
 
@@ -252,10 +309,19 @@ describe("pushSingleAllegroOffer: a failed push never settles the provider as he
   const standing = (over: Parameters<typeof setup>[0] = {}) =>
     setup({
       live: [offerFixture({ id: "o1" })],
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
+      rows: [
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
+      ],
       states: [
         {
-          last_error: "WRITE_SCOPE_MISSING: reconnect Allegro with the offer write scope.",
+          last_error:
+            "WRITE_SCOPE_MISSING: reconnect Allegro with the offer write scope.",
           provider: "prices",
           status: "error",
           write_scope_missing: true,
@@ -273,7 +339,11 @@ describe("pushSingleAllegroOffer: a failed push never settles the provider as he
       script: { tallyFor: { o1: { failed: 1, success: 0, total: 1 } } },
     });
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "operator",
+    );
 
     expect(result.ok).toBe(false);
     const state = allegro.states.get("prices");
@@ -286,7 +356,11 @@ describe("pushSingleAllegroOffer: a failed push never settles the provider as he
     // explaining it has to stay with it, or the admin renders a banner with no text.
     const { allegro, container } = standing();
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-UNKNOWN", "operator");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-UNKNOWN",
+      "operator",
+    );
 
     expect(result.ok).toBe(false);
     const state = allegro.states.get("prices");
@@ -299,10 +373,17 @@ describe("pushSingleAllegroOffer: a failed push never settles the provider as he
     // The contrast, so the guard above cannot be satisfied by simply never reporting ok.
     const { allegro, container } = healthy();
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "operator",
+    );
 
     expect(result.status).toBe("synced");
-    expect(allegro.states.get("prices")).toMatchObject({ last_error: null, status: "ok" });
+    expect(allegro.states.get("prices")).toMatchObject({
+      last_error: null,
+      status: "ok",
+    });
   });
 });
 
@@ -317,8 +398,20 @@ describe("syncAllegroPrices: the claim is re-asserted between commands", () => {
       costs: { "SKU-1": 100, "SKU-2": 100 },
       live: [offerFixture({ id: "o1" }), offerFixture({ id: "o2" })],
       rows: [
-        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
-        { category_id: "cat-1", id: "row-2", offer_id: "o2", promoted: false, sku: "SKU-2" },
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
+        {
+          category_id: "cat-1",
+          id: "row-2",
+          offer_id: "o2",
+          promoted: false,
+          sku: "SKU-2",
+        },
       ],
       variants: [
         { id: "v1", metadata: { srp: 500 }, sku: "SKU-1" },
@@ -359,13 +452,17 @@ describe("syncAllegroPrices: command terminality", () => {
     // `fetchLastSuccessfulBounds` that those bounds had LANDED. `decideSyncAction` then
     // answered `act: false` on every subsequent run and the offer was never corrected
     // again - silently, forever.
-    const { allegro, container } = healthy({ script: { inProgressFor: ["o1"] } });
+    const { allegro, container } = healthy({
+      script: { inProgressFor: ["o1"] },
+    });
 
     const summary = await syncAllegroPrices(container as never);
 
     expect(summary).toMatchObject({ failed: 0, pending: 1, synced: 0 });
     // No success row: the bounds memory must not learn these bounds.
-    expect(allegro.pushes.filter((row) => row.result === "success")).toHaveLength(0);
+    expect(
+      allegro.pushes.filter((row) => row.result === "success"),
+    ).toHaveLength(0);
     expect(allegro.pushes[0]).toMatchObject({
       allegro_command_id: "cmd-1",
       error: "not terminal within the poll budget",
@@ -379,13 +476,17 @@ describe("syncAllegroPrices: command terminality", () => {
     // The consequence of the above, and the reason `skipped` is safe: an unconfirmed
     // push leaves no success bounds, so the next tick plans the same command again.
     // Re-asserting a rule and a range is idempotent.
-    const { allegro, client, container } = healthy({ script: { inProgressFor: ["o1"] } });
+    const { allegro, client, container } = healthy({
+      script: { inProgressFor: ["o1"] },
+    });
 
     await syncAllegroPrices(container as never);
     await syncAllegroPrices(container as never);
 
     expect(client.commands).toHaveLength(2);
-    expect(allegro.pushes.filter((row) => row.result === "success")).toHaveLength(0);
+    expect(
+      allegro.pushes.filter((row) => row.result === "success"),
+    ).toHaveLength(0);
   });
 
   it("treats a terminal command carrying no task tally as pending, not a success", async () => {
@@ -428,7 +529,12 @@ describe("syncAllegroPrices: the write decision", () => {
 
     const summary = await syncAllegroPrices(container as never);
 
-    expect(summary).toMatchObject({ alreadyInSync: 0, failed: 0, scanned: 1, synced: 1 });
+    expect(summary).toMatchObject({
+      alreadyInSync: 0,
+      failed: 0,
+      scanned: 1,
+      synced: 1,
+    });
     expect(client.commands).toEqual([
       { max: "500.00", min: "137.00", offerId: "o1", ruleId: "rule-standard" },
     ]);
@@ -448,9 +554,20 @@ describe("syncAllegroPrices: the write decision", () => {
     // 123 / (1 - 0.15) = 144.71, ceiling to 145. A promoted offer floored on the
     // standard rate would be floored too low, which is the unsafe direction.
     const { client } = await runWith({
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: true, sku: "SKU-1" }],
+      rows: [
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: true,
+          sku: "SKU-1",
+        },
+      ],
     });
-    expect(client.commands[0]).toMatchObject({ min: "145.00", ruleId: "rule-promoted" });
+    expect(client.commands[0]).toMatchObject({
+      min: "145.00",
+      ruleId: "rule-promoted",
+    });
   });
 
   it("does nothing when the rule and the recorded bounds already match", async () => {
@@ -571,7 +688,15 @@ describe("syncAllegroPrices: the write decision", () => {
           },
         }),
       ],
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: true, sku: "SKU-1" }],
+      rows: [
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: true,
+          sku: "SKU-1",
+        },
+      ],
     });
     expect(client.commands[0]?.ruleId).toBe("rule-promoted");
     expect(allegro.pushes[0]).toMatchObject({
@@ -585,7 +710,15 @@ describe("syncAllegroPrices: the write decision", () => {
 describe("syncAllegroPrices: skip reasons", () => {
   it("skips an unlinked mapping row", async () => {
     const { summary } = await runWith({
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: null, promoted: false, sku: "SKU-1" }],
+      rows: [
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: null,
+          promoted: false,
+          sku: "SKU-1",
+        },
+      ],
     });
     expect(summary.skippedCounts["not-linked"]).toBe(1);
     expect(summary.scanned).toBe(0);
@@ -616,7 +749,9 @@ describe("syncAllegroPrices: skip reasons", () => {
   });
 
   it("skips an offer whose status could not be read", async () => {
-    const { summary } = await runWith({ live: [offerFixture({ id: "o1", publication: {} })] });
+    const { summary } = await runWith({
+      live: [offerFixture({ id: "o1", publication: {} })],
+    });
     expect(summary.skippedCounts["status-unknown"]).toBe(1);
   });
 
@@ -628,7 +763,15 @@ describe("syncAllegroPrices: skip reasons", () => {
     // production, and every row with an unresolved promo sweep priced at the STANDARD
     // commission instead, giving promoted offers a floor below their true break-even.
     const { client, summary } = await runWith({
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: null, sku: "SKU-1" }],
+      rows: [
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: null,
+          sku: "SKU-1",
+        },
+      ],
     });
 
     expect(summary.skippedCounts["promotion-unresolved"]).toBe(1);
@@ -642,7 +785,9 @@ describe("syncAllegroPrices: skip reasons", () => {
     // Belt and braces on the same gate: an absent key and a NULL must behave alike, so a
     // row written by an older version cannot slip through as "standard".
     const { summary } = await runWith({
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+      rows: [
+        { category_id: "cat-1", id: "row-1", offer_id: "o1", sku: "SKU-1" },
+      ],
     });
     expect(summary.skippedCounts["promotion-unresolved"]).toBe(1);
   });
@@ -671,23 +816,42 @@ describe("syncAllegroPrices: skip reasons", () => {
     // under-floor every promoted offer in the category.
     const { summary } = await runWith({
       categories: [
-        { category_id: "cat-1", commission_rate: 10, id: "r1", promoted_commission_rate: null },
+        {
+          category_id: "cat-1",
+          commission_rate: 10,
+          id: "r1",
+          promoted_commission_rate: null,
+        },
       ],
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: true, sku: "SKU-1" }],
+      rows: [
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: true,
+          sku: "SKU-1",
+        },
+      ],
     });
     expect(summary.skippedCounts["missing-break-even"]).toBe(1);
   });
 
   it("skips with missing-srp when no SRP source is configured", async () => {
-    const { logs, summary } = await runWith({ syncOptions: { srpMetadataKey: undefined } });
+    const { logs, summary } = await runWith({
+      syncOptions: { srpMetadataKey: undefined },
+    });
     expect(summary.skippedCounts["missing-srp"]).toBe(1);
     // Worth a dedicated warning: the symptom is a whole catalogue skipped, which
     // reads like a data problem rather than a configuration one.
-    expect(logs.some((line) => line.includes("no SRP source is configured"))).toBe(true);
+    expect(
+      logs.some((line) => line.includes("no SRP source is configured")),
+    ).toBe(true);
   });
 
   it("skips with missing-srp when the variant carries no value under the key", async () => {
-    const { summary } = await runWith({ variants: [{ id: "v1", sku: "SKU-1" }] });
+    const { summary } = await runWith({
+      variants: [{ id: "v1", sku: "SKU-1" }],
+    });
     expect(summary.skippedCounts["missing-srp"]).toBe(1);
   });
 
@@ -696,12 +860,18 @@ describe("syncAllegroPrices: skip reasons", () => {
     // per-offer counter can express that: the run reports a clean success and the
     // only symptom is on Allegro. So it has to be said out loud.
     const { logs } = await runWith({});
-    expect(logs.some((line) => line.includes("no sales channel is configured"))).toBe(true);
+    expect(
+      logs.some((line) => line.includes("no sales channel is configured")),
+    ).toBe(true);
   });
 
   it("does not warn about scope when a sales channel is configured", async () => {
-    const { logs } = await runWith({ syncOptions: { salesChannelId: "sc_allegro" } });
-    expect(logs.some((line) => line.includes("no sales channel is configured"))).toBe(false);
+    const { logs } = await runWith({
+      syncOptions: { salesChannelId: "sc_allegro" },
+    });
+    expect(
+      logs.some((line) => line.includes("no sales channel is configured")),
+    ).toBe(false);
   });
 
   it("reads the SRP from a price list when one is configured", async () => {
@@ -709,7 +879,13 @@ describe("syncAllegroPrices: skip reasons", () => {
       categories: CAT_RATES,
       client: fakeClient({ offers: [offerFixture({ id: "o1" })] }),
       offers: [
-        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
       ],
       syncOptions: { automationRules: { ...RULES }, srpPriceListId: "plist_1" },
     });
@@ -736,7 +912,13 @@ describe("syncAllegroPrices: skip reasons", () => {
       categories: CAT_RATES,
       client: fakeClient({ offers: [offerFixture({ id: "o1" })] }),
       offers: [
-        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
       ],
       syncOptions: { automationRules: { ...RULES }, srpPriceListId: "plist_1" },
     });
@@ -766,7 +948,13 @@ describe("syncAllegroPrices: skip reasons", () => {
       categories: CAT_RATES,
       client: fakeClient({ offers: [offerFixture({ id: "o1" })] }),
       offers: [
-        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
       ],
       syncOptions: { automationRules: { ...RULES }, srpPriceListId: "plist_1" },
     });
@@ -833,9 +1021,13 @@ describe("syncAllegroPrices: fail-loud rule resolution", () => {
   });
 
   it("stays inert with no automationRules option, and says so", async () => {
-    const { client, summary } = await runWith({ syncOptions: { automationRules: undefined } });
+    const { client, summary } = await runWith({
+      syncOptions: { automationRules: undefined },
+    });
     expect(client.commands).toEqual([]);
-    expect(summary.error).toContain("no two distinct rule names are configured");
+    expect(summary.error).toContain(
+      "no two distinct rule names are configured",
+    );
   });
 });
 
@@ -898,7 +1090,9 @@ describe("syncAllegroPrices: the circuit breaker", () => {
     expect(summary.systemic).toBe(true);
     expect(summary.quarantined).toEqual([]);
     expect(summary.error).toContain("WRITE_SCOPE_MISSING");
-    expect(allegro.states.get("prices")).toMatchObject({ write_scope_missing: true });
+    expect(allegro.states.get("prices")).toMatchObject({
+      write_scope_missing: true,
+    });
   });
 
   it("clears a stale write-scope flag once a command gets a non-403 response", async () => {
@@ -906,20 +1100,32 @@ describe("syncAllegroPrices: the circuit breaker", () => {
       states: [{ provider: "prices", status: "ok", write_scope_missing: true }],
     });
     expect(summary.writeScopeMissing).toBe(false);
-    expect(allegro.states.get("prices")).toMatchObject({ write_scope_missing: false });
+    expect(allegro.states.get("prices")).toMatchObject({
+      write_scope_missing: false,
+    });
   });
 
   it("leaves the write-scope flag untouched on a run that issued no command", async () => {
     const { allegro } = await runWith({
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: null, sku: "SKU-1" }],
-      states: [{ provider: "prices", status: "error", write_scope_missing: true }],
+      rows: [
+        { category_id: "cat-1", id: "row-1", offer_id: null, sku: "SKU-1" },
+      ],
+      states: [
+        { provider: "prices", status: "error", write_scope_missing: true },
+      ],
     });
-    expect(allegro.states.get("prices")).toMatchObject({ write_scope_missing: true });
+    expect(allegro.states.get("prices")).toMatchObject({
+      write_scope_missing: true,
+    });
   });
 
   it("treats a 429 as systemic and holds the run", async () => {
     const { summary } = await runWith({
-      script: { throwFor: { o1: new AllegroApiError({ httpStatus: 429, message: "Slow down" }) } },
+      script: {
+        throwFor: {
+          o1: new AllegroApiError({ httpStatus: 429, message: "Slow down" }),
+        },
+      },
     });
     expect(summary.systemic).toBe(true);
     expect(summary.writeScopeMissing).toBe(false);
@@ -928,7 +1134,11 @@ describe("syncAllegroPrices: the circuit breaker", () => {
 
   it("treats an auth error as systemic", async () => {
     const { summary } = await runWith({
-      script: { throwFor: { o1: new AllegroAuthError("token dead", "invalid_grant", 400) } },
+      script: {
+        throwFor: {
+          o1: new AllegroAuthError("token dead", "invalid_grant", 400),
+        },
+      },
     });
     expect(summary.systemic).toBe(true);
     expect(summary.error).toContain("SYSTEMIC");
@@ -954,8 +1164,20 @@ describe("syncAllegroPrices: the circuit breaker", () => {
 
   it("grows a streak when one offer fails while another succeeds", async () => {
     const rows = [
-      { category_id: "cat-1", id: "row-0", offer_id: "o0", promoted: false, sku: "SKU-0" },
-      { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+      {
+        category_id: "cat-1",
+        id: "row-0",
+        offer_id: "o0",
+        promoted: false,
+        sku: "SKU-0",
+      },
+      {
+        category_id: "cat-1",
+        id: "row-1",
+        offer_id: "o1",
+        promoted: false,
+        sku: "SKU-1",
+      },
     ];
     const { allegro, summary } = await runWith({
       costs: { "SKU-0": 100, "SKU-1": 100 },
@@ -979,8 +1201,20 @@ describe("syncAllegroPrices: the circuit breaker", () => {
 
   it("quarantines an offer at the threshold and holds it out of the next run", async () => {
     const rows = [
-      { category_id: "cat-1", id: "row-0", offer_id: "o0", promoted: false, sku: "SKU-0" },
-      { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+      {
+        category_id: "cat-1",
+        id: "row-0",
+        offer_id: "o0",
+        promoted: false,
+        sku: "SKU-0",
+      },
+      {
+        category_id: "cat-1",
+        id: "row-1",
+        offer_id: "o1",
+        promoted: false,
+        sku: "SKU-1",
+      },
     ];
     const { allegro, client, summary } = await runWith({
       costs: { "SKU-0": 100, "SKU-1": 100 },
@@ -991,7 +1225,13 @@ describe("syncAllegroPrices: the circuit breaker", () => {
         {
           failures: {
             quarantined: {},
-            streaks: { o0: { count: QUARANTINE_AFTER_FAILURES - 1, error: "old", since: RECENT } },
+            streaks: {
+              o0: {
+                count: QUARANTINE_AFTER_FAILURES - 1,
+                error: "old",
+                since: RECENT,
+              },
+            },
           },
           provider: "prices",
           status: "error",
@@ -1008,7 +1248,9 @@ describe("syncAllegroPrices: the circuit breaker", () => {
     // Both offers were still attempted this run. The quarantine is the CONSEQUENCE
     // of o0's fifth failure, not something applied retroactively - it takes effect
     // from the NEXT run, which is what the sibling test covers.
-    expect(client.commands.map((command) => command.offerId).toSorted()).toEqual(["o0", "o1"]);
+    expect(
+      client.commands.map((command) => command.offerId).toSorted(),
+    ).toEqual(["o0", "o1"]);
     expect(allegro.states.get("prices")).toMatchObject({ status: "error" });
   });
 
@@ -1016,7 +1258,10 @@ describe("syncAllegroPrices: the circuit breaker", () => {
     const { client, summary } = await runWith({
       states: [
         {
-          failures: { quarantined: { o1: { error: "broken", since: RECENT } }, streaks: {} },
+          failures: {
+            quarantined: { o1: { error: "broken", since: RECENT } },
+            streaks: {},
+          },
           provider: "prices",
           status: "error",
         },
@@ -1031,12 +1276,21 @@ describe("syncAllegroPrices: the circuit breaker", () => {
 
 describe("syncAllegroPrices: the kill switch", () => {
   it("writes nothing and records the reason", async () => {
-    const { allegro, client, summary } = await runWith({ priceSyncDisabled: true });
+    const { allegro, client, summary } = await runWith({
+      priceSyncDisabled: true,
+    });
     expect(client.commands).toEqual([]);
     expect(summary.skipped).toContain("price sync is disabled");
-    // Recorded, not silent: "disabled" and "broken" both look like "nothing
-    // happened" from outside.
-    expect(allegro.states.get("prices")).toMatchObject({ status: "idle" });
+    // Recorded, not silent, and not as a failure either: "disabled", "broken"
+    // and "never ran" all look like "nothing happened" from outside, and the row
+    // has to distinguish all three.
+    expect(allegro.states.get("prices")).toMatchObject({
+      last_error: null,
+      status: "disabled",
+    });
+    expect(allegro.states.get("prices")?.last_finding).toContain(
+      "price sync is disabled",
+    );
     expect(allegro.claims).toEqual([]);
   });
 });
@@ -1045,12 +1299,19 @@ describe("pushSingleAllegroOffer", () => {
   it("pushes one offer and reports the bounds it applied", async () => {
     const { allegro, client, container } = healthy();
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "user_1");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "user_1",
+    );
 
     expect(result).toMatchObject({ ok: true, status: "synced" });
     expect(result.message).toContain("137.00-500.00 PLN");
     expect(client.commands).toHaveLength(1);
-    expect(allegro.pushes[0]).toMatchObject({ pushed_by: "user_1", result: "success" });
+    expect(allegro.pushes[0]).toMatchObject({
+      pushed_by: "user_1",
+      result: "success",
+    });
   });
 
   it("overrides the per-offer opt-out, because the operator asked for this offer", async () => {
@@ -1067,7 +1328,11 @@ describe("pushSingleAllegroOffer", () => {
       ],
     });
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "user_1");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "user_1",
+    );
 
     expect(result.status).toBe("synced");
     expect(client.commands).toHaveLength(1);
@@ -1075,14 +1340,22 @@ describe("pushSingleAllegroOffer", () => {
 
   it("still respects the global kill switch", async () => {
     const { client, container } = healthy({ priceSyncDisabled: true });
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "user_1");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "user_1",
+    );
     expect(result.ok).toBe(false);
     expect(client.commands).toEqual([]);
   });
 
   it("still respects the eligibility data checks", async () => {
     const { container } = healthy({ noCosts: true });
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "user_1");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "user_1",
+    );
     expect(result).toMatchObject({ ok: true, status: "skipped" });
     expect(result.message).toContain("missing break-even");
   });
@@ -1100,13 +1373,21 @@ describe("pushSingleAllegroOffer", () => {
         },
       ],
     });
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "user_1");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "user_1",
+    );
     expect(result).toMatchObject({ ok: false, status: "skipped" });
   });
 
   it("reports an unknown SKU rather than throwing", async () => {
     const { container } = healthy();
-    const result = await pushSingleAllegroOffer(container as never, "SKU-NOPE", "user_1");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-NOPE",
+      "user_1",
+    );
     expect(result).toMatchObject({ ok: false, status: "error" });
     expect(result.message).toContain("No Allegro mapping");
   });
@@ -1127,10 +1408,17 @@ describe("pushSingleAllegroOffer", () => {
       ],
     });
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "user_1");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "user_1",
+    );
 
     expect(result.status).toBe("synced");
-    expect(allegro.states.get("prices")).toMatchObject({ failures: null, status: "ok" });
+    expect(allegro.states.get("prices")).toMatchObject({
+      failures: null,
+      status: "ok",
+    });
   });
 
   it("keeps every OTHER offer's quarantine on the health line", async () => {
@@ -1140,7 +1428,9 @@ describe("pushSingleAllegroOffer", () => {
       states: [
         {
           failures: {
-            quarantined: { "o-other": { error: "still broken", since: RECENT } },
+            quarantined: {
+              "o-other": { error: "still broken", since: RECENT },
+            },
             streaks: {},
           },
           provider: "prices",
@@ -1180,21 +1470,35 @@ describe("pushSingleAllegroOffer", () => {
       ],
     });
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "user_1");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "user_1",
+    );
 
     expect(result).toMatchObject({ ok: true, status: "noop" });
   });
 
   it("reports the write-scope gap and raises the banner", async () => {
     const { allegro, container } = healthy({
-      script: { throwFor: { o1: new AllegroApiError({ httpStatus: 403, message: "Forbidden" }) } },
+      script: {
+        throwFor: {
+          o1: new AllegroApiError({ httpStatus: 403, message: "Forbidden" }),
+        },
+      },
     });
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "user_1");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "user_1",
+    );
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain("Reconnect Allegro");
-    expect(allegro.states.get("prices")).toMatchObject({ write_scope_missing: true });
+    expect(allegro.states.get("prices")).toMatchObject({
+      write_scope_missing: true,
+    });
   });
 });
 
@@ -1218,8 +1522,20 @@ describe("pushSingleAllegroOffer: the manual blast-radius cap", () => {
         result: "success",
         sku: `SKU-OTHER-${index}`,
       })),
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
-      syncOptions: { automationRules: { ...RULES }, changeCap: 3, srpMetadataKey: "srp" },
+      rows: [
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
+      ],
+      syncOptions: {
+        automationRules: { ...RULES },
+        changeCap: 3,
+        srpMetadataKey: "srp",
+      },
       ...over,
     });
 
@@ -1230,7 +1546,11 @@ describe("pushSingleAllegroOffer: the manual blast-radius cap", () => {
     // exactly that before a human sees it.
     const { client, container } = spentBudget(3);
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "operator",
+    );
 
     expect(result.status).toBe("rate-limited");
     expect(result.ok).toBe(false);
@@ -1242,7 +1562,11 @@ describe("pushSingleAllegroOffer: the manual blast-radius cap", () => {
   it("allows the push while the budget still has room", async () => {
     const { client, container } = spentBudget(2);
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "operator",
+    );
 
     expect(result.status).toBe("synced");
     expect(client.commands).toHaveLength(1);
@@ -1262,7 +1586,11 @@ describe("pushSingleAllegroOffer: the manual blast-radius cap", () => {
       })),
     });
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "operator",
+    );
 
     expect(result.status).toBe("synced");
     expect(client.commands).toHaveLength(1);
@@ -1280,9 +1608,10 @@ describe("pushSingleAllegroOffer: the manual blast-radius cap", () => {
       })),
     });
 
-    expect((await pushSingleAllegroOffer(container as never, "SKU-1", "operator")).status).toBe(
-      "synced",
-    );
+    expect(
+      (await pushSingleAllegroOffer(container as never, "SKU-1", "operator"))
+        .status,
+    ).toBe("synced");
   });
 
   it("leaves the provider row's standing report untouched when it refuses", async () => {
@@ -1291,7 +1620,8 @@ describe("pushSingleAllegroOffer: the manual blast-radius cap", () => {
     const { allegro, container } = spentBudget(3, {
       states: [
         {
-          last_error: "WRITE_SCOPE_MISSING: reconnect Allegro with the offer write scope.",
+          last_error:
+            "WRITE_SCOPE_MISSING: reconnect Allegro with the offer write scope.",
           provider: "prices",
           status: "error",
           write_scope_missing: true,
@@ -1301,7 +1631,9 @@ describe("pushSingleAllegroOffer: the manual blast-radius cap", () => {
 
     await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
 
-    expect(allegro.states.get("prices")?.last_error).toContain("WRITE_SCOPE_MISSING");
+    expect(allegro.states.get("prices")?.last_error).toContain(
+      "WRITE_SCOPE_MISSING",
+    );
   });
 });
 
@@ -1322,9 +1654,27 @@ describe("syncAllegroPrices: the kill switch is re-read mid-run", () => {
         offerFixture({ id: "o3" }),
       ],
       rows: [
-        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
-        { category_id: "cat-1", id: "row-2", offer_id: "o2", promoted: false, sku: "SKU-2" },
-        { category_id: "cat-1", id: "row-3", offer_id: "o3", promoted: false, sku: "SKU-3" },
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
+        {
+          category_id: "cat-1",
+          id: "row-2",
+          offer_id: "o2",
+          promoted: false,
+          sku: "SKU-2",
+        },
+        {
+          category_id: "cat-1",
+          id: "row-3",
+          offer_id: "o3",
+          promoted: false,
+          sku: "SKU-3",
+        },
       ],
       variants: [
         { id: "v1", metadata: { srp: 500 }, sku: "SKU-1" },
@@ -1358,7 +1708,15 @@ describe("syncAllegroPrices: monitor mode", () => {
   const monitoring = (over: Parameters<typeof setup>[0] = {}) =>
     setup({
       live: [offerFixture({ id: "o1" })],
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
+      rows: [
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
+      ],
       ...over,
       syncOptions: {
         automationRules: undefined,
@@ -1451,7 +1809,11 @@ describe("syncAllegroPrices: monitor mode", () => {
   it("refuses an operator's manual push, rather than writing one offer anyway", async () => {
     const { client, container } = monitoring();
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "operator",
+    );
 
     expect(result.ok).toBe(false);
     expect(result.status).toBe("skipped");
@@ -1469,9 +1831,22 @@ describe("syncAllegroPrices: fixed-price mode", () => {
   const fixedPrice = (over: Parameters<typeof setup>[0] = {}) =>
     setup({
       live: [offerFixture({ id: "o1" })],
-      rows: [{ category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
+      rows: [
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
+      ],
       variants: [
-        { id: "v1", metadata: { srp: 500 }, prices: [{ amount: 300 }], sku: "SKU-1" },
+        {
+          id: "v1",
+          metadata: { srp: 500 },
+          prices: [{ amount: 300 }],
+          sku: "SKU-1",
+        },
       ],
       ...over,
       syncOptions: {
@@ -1524,7 +1899,9 @@ describe("syncAllegroPrices: fixed-price mode", () => {
 
     const summary = await syncAllegroPrices(container as never);
 
-    expect(client.removals).toEqual([{ marketplaceId: "allegro-pl", offerId: "o1" }]);
+    expect(client.removals).toEqual([
+      { marketplaceId: "allegro-pl", offerId: "o1" },
+    ]);
     expect(client.priceCommands).toHaveLength(1);
     expect(summary.synced).toBe(1);
   });
@@ -1554,7 +1931,14 @@ describe("syncAllegroPrices: fixed-price mode", () => {
 
   it("refuses a Medusa price below the break-even floor rather than clamping it", async () => {
     const { client, container } = fixedPrice({
-      variants: [{ id: "v1", metadata: { srp: 500 }, prices: [{ amount: 50 }], sku: "SKU-1" }],
+      variants: [
+        {
+          id: "v1",
+          metadata: { srp: 500 },
+          prices: [{ amount: 50 }],
+          sku: "SKU-1",
+        },
+      ],
     });
 
     const summary = await syncAllegroPrices(container as never);
@@ -1565,7 +1949,14 @@ describe("syncAllegroPrices: fixed-price mode", () => {
 
   it("refuses a Medusa price above the SRP ceiling", async () => {
     const { client, container } = fixedPrice({
-      variants: [{ id: "v1", metadata: { srp: 500 }, prices: [{ amount: 900 }], sku: "SKU-1" }],
+      variants: [
+        {
+          id: "v1",
+          metadata: { srp: 500 },
+          prices: [{ amount: 900 }],
+          sku: "SKU-1",
+        },
+      ],
     });
 
     const summary = await syncAllegroPrices(container as never);
@@ -1577,7 +1968,12 @@ describe("syncAllegroPrices: fixed-price mode", () => {
   it("skips a variant with no Medusa price in the offer's currency", async () => {
     const { client, container } = fixedPrice({
       variants: [
-        { id: "v1", metadata: { srp: 500 }, prices: [{ amount: 300, currency: "eur" }], sku: "SKU-1" },
+        {
+          id: "v1",
+          metadata: { srp: 500 },
+          prices: [{ amount: 300, currency: "eur" }],
+          sku: "SKU-1",
+        },
       ],
     });
 
@@ -1608,7 +2004,10 @@ describe("syncAllegroPrices: fixed-price mode", () => {
   it("leaves an offer alone when it is already at the Medusa price with no rule", async () => {
     const { client, container } = fixedPrice({
       live: [
-        offerFixture({ id: "o1", sellingMode: { price: { amount: "300.00", currency: "PLN" } } }),
+        offerFixture({
+          id: "o1",
+          sellingMode: { price: { amount: "300.00", currency: "PLN" } },
+        }),
       ],
     });
 
@@ -1650,7 +2049,11 @@ describe("syncAllegroPrices: fixed-price mode", () => {
   it("pushes one offer on an explicit operator action, and says what it set", async () => {
     const { client, container } = fixedPrice();
 
-    const result = await pushSingleAllegroOffer(container as never, "SKU-1", "operator");
+    const result = await pushSingleAllegroOffer(
+      container as never,
+      "SKU-1",
+      "operator",
+    );
 
     expect(result.ok).toBe(true);
     expect(result.status).toBe("synced");
@@ -1669,11 +2072,21 @@ describe("syncAllegroPrices: a mode change between guard and claim", () => {
       categories: CAT_RATES,
       client,
       offers: [
-        { category_id: "cat-1", id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" },
+        {
+          category_id: "cat-1",
+          id: "row-1",
+          offer_id: "o1",
+          promoted: false,
+          sku: "SKU-1",
+        },
       ],
       pushes: [],
       states: [],
-      syncOptions: { automationRules: { ...RULES }, pricingMode: "automation_rule", srpMetadataKey: "srp" },
+      syncOptions: {
+        automationRules: { ...RULES },
+        pricingMode: "automation_rule",
+        srpMetadataKey: "srp",
+      },
     });
     allegro.getPricingMode = () => Promise.resolve("monitor");
     const container = fakeContainer({

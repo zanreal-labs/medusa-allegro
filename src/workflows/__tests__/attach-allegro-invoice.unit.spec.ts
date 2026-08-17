@@ -49,17 +49,24 @@ const orderTable = (seed: OrderRow[]) => {
   const rows = seed.map((row) => ({ ...row }));
   const writes: Record<string, unknown>[] = [];
   return {
-    list: (filters: Record<string, unknown> = {}, config: { take?: number } = {}) => {
+    list: (
+      filters: Record<string, unknown> = {},
+      config: { take?: number } = {},
+    ) => {
       let out = rows.map((row) => ({ ...row }));
       const wantedOrderIds = filters.medusa_order_id;
       if (wantedOrderIds !== undefined) {
-        const wanted = Array.isArray(wantedOrderIds) ? wantedOrderIds : [wantedOrderIds];
+        const wanted = Array.isArray(wantedOrderIds)
+          ? wantedOrderIds
+          : [wantedOrderIds];
         out = out.filter((row) => wanted.includes(row.medusa_order_id));
       }
       if (filters.invoice_attached_at === null) {
         out = out.filter((row) => !row.invoice_attached_at);
       }
-      return Promise.resolve(config.take === undefined ? out : out.slice(0, config.take));
+      return Promise.resolve(
+        config.take === undefined ? out : out.slice(0, config.take),
+      );
     },
     rows,
     update: (patches: (Record<string, unknown> & { id: string })[]) => {
@@ -85,7 +92,8 @@ const fakeClient = (
     listError?: Error;
   } = {},
 ) => {
-  const creates: { formId: string; name: string; invoiceNumber?: string }[] = [];
+  const creates: { formId: string; name: string; invoiceNumber?: string }[] =
+    [];
   const uploads: { formId: string; invoiceId: string; bytes: number }[] = [];
   const lists: string[] = [];
   let sequence = 0;
@@ -97,7 +105,11 @@ const fakeClient = (
       if (input.createError) {
         return Promise.reject(input.createError);
       }
-      creates.push({ formId, invoiceNumber: invoice.invoiceNumber, name: invoice.file.name });
+      creates.push({
+        formId,
+        invoiceNumber: invoice.invoiceNumber,
+        name: invoice.file.name,
+      });
       sequence += 1;
       return Promise.resolve({ id: `inv-created-${sequence}` });
     },
@@ -110,7 +122,11 @@ const fakeClient = (
       return Promise.resolve({ invoices: input.registered ?? [] });
     },
     lists,
-    uploadCheckoutFormInvoiceFile: (formId: string, invoiceId: string, pdf: Uint8Array) => {
+    uploadCheckoutFormInvoiceFile: (
+      formId: string,
+      invoiceId: string,
+      pdf: Uint8Array,
+    ) => {
       if (input.uploadError) {
         return Promise.reject(input.uploadError);
       }
@@ -131,7 +147,11 @@ const setup = (
     noPdfSurface?: boolean;
     /** Leave the module unregistered, as a store that does not invoice through one does. */
     noInvoiceModule?: boolean;
-    issued?: { order_id?: unknown; invoice_uuid?: unknown; invoice_number?: unknown }[];
+    issued?: {
+      order_id?: unknown;
+      invoice_uuid?: unknown;
+      invoice_number?: unknown;
+    }[];
     /** Omit the listing surface, so only the event path works. */
     noListing?: boolean;
     createError?: Error;
@@ -165,7 +185,8 @@ const setup = (
     };
   }
   if (!input.noListing) {
-    invoiceModule.listInfaktInvoices = () => Promise.resolve(input.issued ?? []);
+    invoiceModule.listInfaktInvoices = () =>
+      Promise.resolve(input.issued ?? []);
   }
 
   const container = {
@@ -200,7 +221,11 @@ const allegroOrder = (over: Partial<OrderRow> = {}): OrderRow => ({
   ...over,
 });
 
-const event = { invoiceNumber: "FV/2026/08/001", invoiceUuid: "uuid-1", orderId: "order_1" };
+const event = {
+  invoiceNumber: "FV/2026/08/001",
+  invoiceUuid: "uuid-1",
+  orderId: "order_1",
+};
 
 describe("attachAllegroInvoice: not an Allegro order", () => {
   it("ignores an order this plugin never imported, silently", async () => {
@@ -208,7 +233,10 @@ describe("attachAllegroInvoice: not an Allegro order", () => {
     // reporting it would put a line in the log for every invoice the store ever issues.
     const context = setup({ orders: [] });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result).toEqual({ attempted: false });
     expect(context.client.creates).toEqual([]);
@@ -219,7 +247,9 @@ describe("attachAllegroInvoice: not an Allegro order", () => {
   it("does not fetch the PDF for it", async () => {
     // Fetching flips the invoice to "printed" upstream. Doing that for an order this
     // plugin has nothing to do with is a side effect on somebody else's document.
-    const context = setup({ orders: [allegroOrder({ medusa_order_id: "order_OTHER" })] });
+    const context = setup({
+      orders: [allegroOrder({ medusa_order_id: "order_OTHER" })],
+    });
 
     await attachAllegroInvoice(context.container as never, event);
 
@@ -231,13 +261,24 @@ describe("attachAllegroInvoice: the happy path", () => {
   it("registers the document, uploads the PDF, then stamps the watermark", async () => {
     const context = setup({ orders: [allegroOrder()] });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
-    expect(result).toMatchObject({ attached: true, attempted: true, reusedDocument: false });
+    expect(result).toMatchObject({
+      attached: true,
+      attempted: true,
+      reusedDocument: false,
+    });
     // Dedupe read BEFORE the create, always.
     expect(context.client.lists).toEqual(["form-1"]);
     expect(context.client.creates).toEqual([
-      { formId: "form-1", invoiceNumber: "FV/2026/08/001", name: "FV_2026_08_001.pdf" },
+      {
+        formId: "form-1",
+        invoiceNumber: "FV/2026/08/001",
+        name: "FV_2026_08_001.pdf",
+      },
     ]);
     expect(context.client.uploads).toEqual([
       { bytes: PDF.byteLength, formId: "form-1", invoiceId: "inv-created-1" },
@@ -252,15 +293,24 @@ describe("attachAllegroInvoice: the happy path", () => {
   it("persists the document id BEFORE the upload, not after it", async () => {
     // The whole reason `allegro_invoice_id` exists. A crash between the create and the
     // upload must leave the id behind, or the retry registers a second document.
-    const context = setup({ orders: [allegroOrder()], uploadError: new Error("connection reset") });
+    const context = setup({
+      orders: [allegroOrder()],
+      uploadError: new Error("connection reset"),
+    });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result.attached).toBeUndefined();
     expect(context.table.rows[0]?.allegro_invoice_id).toBe("inv-created-1");
     expect(context.table.rows[0]?.invoice_attached_at).toBeUndefined();
     const [firstWrite] = context.table.writes;
-    expect(firstWrite).toEqual({ allegro_invoice_id: "inv-created-1", id: "algorder_1" });
+    expect(firstWrite).toEqual({
+      allegro_invoice_id: "inv-created-1",
+      id: "algorder_1",
+    });
   });
 
   it("falls back to the uuid when the emitter had no invoice number", async () => {
@@ -287,7 +337,10 @@ describe("attachAllegroInvoice: dedupe", () => {
       registered: [{ id: "inv-existing", invoiceNumber: "FV/2026/08/001" }],
     });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result).toMatchObject({ attached: true, reusedDocument: true });
     expect(context.client.creates).toEqual([]);
@@ -307,29 +360,47 @@ describe("attachAllegroInvoice: dedupe", () => {
       registered: [{ id: "inv-other", invoiceNumber: "FV/2026/07/500" }],
     });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result).toMatchObject({ attached: true, reusedDocument: false });
     expect(context.client.creates).toHaveLength(1);
   });
 
   it("skips the dedupe read entirely when the id is already stored", async () => {
-    const context = setup({ orders: [allegroOrder({ allegro_invoice_id: "inv-stored" })] });
+    const context = setup({
+      orders: [allegroOrder({ allegro_invoice_id: "inv-stored" })],
+    });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result).toMatchObject({ attached: true, reusedDocument: true });
     expect(context.client.lists).toEqual([]);
     expect(context.client.creates).toEqual([]);
-    expect(context.client.uploads[0]).toMatchObject({ invoiceId: "inv-stored" });
+    expect(context.client.uploads[0]).toMatchObject({
+      invoiceId: "inv-stored",
+    });
   });
 
   it("does nothing at all for an order already attached", async () => {
     const context = setup({
-      orders: [allegroOrder({ allegro_invoice_id: "inv-1", invoice_attached_at: new Date() })],
+      orders: [
+        allegroOrder({
+          allegro_invoice_id: "inv-1",
+          invoice_attached_at: new Date(),
+        }),
+      ],
     });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result).toEqual({ alreadyAttached: true, attempted: false });
     expect(context.pdfCalls).toEqual([]);
@@ -348,7 +419,10 @@ describe("attachAllegroInvoice: the size guard", () => {
       pdf: new Uint8Array(ALLEGRO_INVOICE_MAX_BYTES + 1),
     });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result.attached).toBeUndefined();
     expect(result.error).toMatch(/over Allegro's/);
@@ -363,7 +437,10 @@ describe("attachAllegroInvoice: the size guard", () => {
   it("refuses an empty PDF too", async () => {
     const context = setup({ orders: [allegroOrder()], pdf: new Uint8Array(0) });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result.error).toMatch(/empty/);
     expect(context.client.uploads).toEqual([]);
@@ -375,7 +452,10 @@ describe("attachAllegroInvoice: the size guard", () => {
       pdf: new Uint8Array(ALLEGRO_INVOICE_MAX_BYTES),
     });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result.attached).toBe(true);
   });
@@ -391,7 +471,10 @@ describe("attachAllegroInvoice: failures are recorded, never thrown", () => {
       orders: [allegroOrder()],
     });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result).toMatchObject({ attempted: true });
     expect(result.error).toContain("Maksymalna liczba faktur to 10.");
@@ -400,13 +483,21 @@ describe("attachAllegroInvoice: failures are recorded, never thrown", () => {
   });
 
   it("records a failed PDF fetch without touching Allegro", async () => {
-    const context = setup({ orders: [allegroOrder()], pdfError: new Error("inFakt timed out") });
+    const context = setup({
+      orders: [allegroOrder()],
+      pdfError: new Error("inFakt timed out"),
+    });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result.error).toBe("inFakt timed out");
     expect(context.client.creates).toEqual([]);
-    expect(context.table.rows[0]?.last_error).toBe(`${ATTACH_ERROR_PREFIX}: inFakt timed out`);
+    expect(context.table.rows[0]?.last_error).toBe(
+      `${ATTACH_ERROR_PREFIX}: inFakt timed out`,
+    );
   });
 
   it("records a disconnected Allegro before spending the PDF fetch", async () => {
@@ -414,7 +505,10 @@ describe("attachAllegroInvoice: failures are recorded, never thrown", () => {
     // there is no point paying that side effect for an upload that cannot happen.
     const context = setup({ connected: false, orders: [allegroOrder()] });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result).toMatchObject({ attempted: false });
     expect(result.error).toMatch(/not connected/);
@@ -424,7 +518,10 @@ describe("attachAllegroInvoice: failures are recorded, never thrown", () => {
   it("names the option when the invoicing module is missing", async () => {
     const context = setup({ noInvoiceModule: true, orders: [allegroOrder()] });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result.error).toMatch(/invoiceModuleKey/);
     expect(context.table.rows[0]?.last_error).toContain("infakt");
@@ -435,7 +532,10 @@ describe("attachAllegroInvoice: failures are recorded, never thrown", () => {
     // the message covers both readings.
     const context = setup({ noPdfSurface: true, orders: [allegroOrder()] });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result.error).toMatch(/no invoice-PDF method/);
   });
@@ -443,19 +543,30 @@ describe("attachAllegroInvoice: failures are recorded, never thrown", () => {
   it("records the kill switch on the row, not just in the log", async () => {
     // "The invoice is not on the order" looks identical to a broken integration from the
     // outside, and a disabled switch is the one explanation nobody guesses.
-    const context = setup({ invoiceAttachDisabled: true, orders: [allegroOrder()] });
+    const context = setup({
+      invoiceAttachDisabled: true,
+      orders: [allegroOrder()],
+    });
 
-    const result = await attachAllegroInvoice(context.container as never, event);
+    const result = await attachAllegroInvoice(
+      context.container as never,
+      event,
+    );
 
     expect(result.attempted).toBe(false);
     expect(result.skipped).toMatch(/ALLEGRO_INVOICE_ATTACH_DISABLED/);
-    expect(context.table.rows[0]?.last_error).toMatch(/invoice attach is disabled/);
+    expect(context.table.rows[0]?.last_error).toMatch(
+      /invoice attach is disabled/,
+    );
     expect(context.pdfCalls).toEqual([]);
   });
 });
 
 describe("sweepUnattachedInvoices", () => {
-  const sweep = (context: ReturnType<typeof setup>, mayContinue = () => Promise.resolve(true)) =>
+  const sweep = (
+    context: ReturnType<typeof setup>,
+    mayContinue = () => Promise.resolve(true),
+  ) =>
     sweepUnattachedInvoices(
       context.container as never,
       context.allegro as never,
@@ -466,8 +577,18 @@ describe("sweepUnattachedInvoices", () => {
 
   it("retries an order whose attach failed earlier", async () => {
     const context = setup({
-      issued: [{ invoice_number: "FV/2026/08/001", invoice_uuid: "uuid-1", order_id: "order_1" }],
-      orders: [allegroOrder({ last_error: `${ATTACH_ERROR_PREFIX}: inFakt timed out` })],
+      issued: [
+        {
+          invoice_number: "FV/2026/08/001",
+          invoice_uuid: "uuid-1",
+          order_id: "order_1",
+        },
+      ],
+      orders: [
+        allegroOrder({
+          last_error: `${ATTACH_ERROR_PREFIX}: inFakt timed out`,
+        }),
+      ],
     });
 
     const result = await sweep(context);
@@ -481,7 +602,13 @@ describe("sweepUnattachedInvoices", () => {
 
   it("finishes the half-done attach that registered but never uploaded", async () => {
     const context = setup({
-      issued: [{ invoice_number: "FV/2026/08/001", invoice_uuid: "uuid-1", order_id: "order_1" }],
+      issued: [
+        {
+          invoice_number: "FV/2026/08/001",
+          invoice_uuid: "uuid-1",
+          order_id: "order_1",
+        },
+      ],
       orders: [allegroOrder({ allegro_invoice_id: "inv-stored" })],
     });
 
@@ -490,12 +617,16 @@ describe("sweepUnattachedInvoices", () => {
     expect(result.attached).toBe(1);
     // No second document: the stored id is reused.
     expect(context.client.creates).toEqual([]);
-    expect(context.client.uploads[0]).toMatchObject({ invoiceId: "inv-stored" });
+    expect(context.client.uploads[0]).toMatchObject({
+      invoiceId: "inv-stored",
+    });
   });
 
   it("leaves an already-attached order alone", async () => {
     const context = setup({
-      issued: [{ invoice_number: "FV/1", invoice_uuid: "uuid-1", order_id: "order_1" }],
+      issued: [
+        { invoice_number: "FV/1", invoice_uuid: "uuid-1", order_id: "order_1" },
+      ],
       orders: [allegroOrder({ invoice_attached_at: new Date() })],
     });
 
@@ -507,7 +638,13 @@ describe("sweepUnattachedInvoices", () => {
 
   it("ignores an issued invoice for an order that did not come from Allegro", async () => {
     const context = setup({
-      issued: [{ invoice_number: "FV/1", invoice_uuid: "uuid-1", order_id: "order_WEBSHOP" }],
+      issued: [
+        {
+          invoice_number: "FV/1",
+          invoice_uuid: "uuid-1",
+          order_id: "order_WEBSHOP",
+        },
+      ],
       orders: [allegroOrder()],
     });
 
@@ -525,7 +662,11 @@ describe("sweepUnattachedInvoices", () => {
       ],
       orders: [
         allegroOrder(),
-        allegroOrder({ checkout_form_id: "form-2", id: "algorder_2", medusa_order_id: "order_2" }),
+        allegroOrder({
+          checkout_form_id: "form-2",
+          id: "algorder_2",
+          medusa_order_id: "order_2",
+        }),
       ],
       uploadError: new Error("Allegro is unreachable"),
     });
@@ -533,9 +674,11 @@ describe("sweepUnattachedInvoices", () => {
     const result = await sweep(context);
 
     expect(result).toMatchObject({ attached: 0, attempted: 2, failed: 2 });
-    expect(context.table.rows.every((row) => row.last_error?.startsWith(ATTACH_ERROR_PREFIX))).toBe(
-      true,
-    );
+    expect(
+      context.table.rows.every((row) =>
+        row.last_error?.startsWith(ATTACH_ERROR_PREFIX),
+      ),
+    ).toBe(true);
   });
 
   it("stops at the claim fence rather than finishing the batch", async () => {
@@ -548,7 +691,11 @@ describe("sweepUnattachedInvoices", () => {
       ],
       orders: [
         allegroOrder(),
-        allegroOrder({ checkout_form_id: "form-2", id: "algorder_2", medusa_order_id: "order_2" }),
+        allegroOrder({
+          checkout_form_id: "form-2",
+          id: "algorder_2",
+          medusa_order_id: "order_2",
+        }),
       ],
     });
 
@@ -565,7 +712,9 @@ describe("sweepUnattachedInvoices", () => {
   it("does nothing when the invoice-attach switch is on", async () => {
     const context = setup({
       invoiceAttachDisabled: true,
-      issued: [{ invoice_number: "FV/1", invoice_uuid: "uuid-1", order_id: "order_1" }],
+      issued: [
+        { invoice_number: "FV/1", invoice_uuid: "uuid-1", order_id: "order_1" },
+      ],
       orders: [allegroOrder()],
     });
 
@@ -582,19 +731,30 @@ describe("sweepUnattachedInvoices", () => {
     // fault, so this is the common case rather than something to report.
     const context = setup({ noInvoiceModule: true, orders: [allegroOrder()] });
 
-    expect(await sweep(context)).toEqual({ attached: 0, attempted: 0, failed: 0 });
+    expect(await sweep(context)).toEqual({
+      attached: 0,
+      attempted: 0,
+      failed: 0,
+    });
     expect(context.logs).toEqual([]);
   });
 
   it("stays silent when the module has no listing surface", async () => {
     const context = setup({ noListing: true, orders: [allegroOrder()] });
 
-    expect(await sweep(context)).toEqual({ attached: 0, attempted: 0, failed: 0 });
+    expect(await sweep(context)).toEqual({
+      attached: 0,
+      attempted: 0,
+      failed: 0,
+    });
   });
 
   it("skips rows the invoicing module reported without usable ids", async () => {
     const context = setup({
-      issued: [{ invoice_uuid: null, order_id: "order_1" }, { invoice_uuid: "uuid-2" }],
+      issued: [
+        { invoice_uuid: null, order_id: "order_1" },
+        { invoice_uuid: "uuid-2" },
+      ],
       orders: [allegroOrder()],
     });
 
@@ -651,22 +811,32 @@ describe("the infakt.invoice.issued subscriber", () => {
     // runs out, and the reason never reaches anybody.
     const context = setup({ orders: [allegroOrder()] });
 
-    await expect(deliver(context, { invoice_number: "FV/1" })).resolves.toBeUndefined();
-    expect(context.logs.some((line) => line.includes("missing order_id and invoice_uuid"))).toBe(
-      true,
-    );
+    await expect(
+      deliver(context, { invoice_number: "FV/1" }),
+    ).resolves.toBeUndefined();
+    expect(
+      context.logs.some((line) =>
+        line.includes("missing order_id and invoice_uuid"),
+      ),
+    ).toBe(true);
     expect(context.client.uploads).toEqual([]);
   });
 
-  it.each([[undefined], [null], ["not an object"], [[]]])("survives a %p payload", async (data) => {
-    const context = setup({ orders: [allegroOrder()] });
+  it.each([[undefined], [null], ["not an object"], [[]]])(
+    "survives a %p payload",
+    async (data) => {
+      const context = setup({ orders: [allegroOrder()] });
 
-    await expect(deliver(context, data)).resolves.toBeUndefined();
-    expect(context.client.uploads).toEqual([]);
-  });
+      await expect(deliver(context, data)).resolves.toBeUndefined();
+      expect(context.client.uploads).toEqual([]);
+    },
+  );
 
   it("does not throw when the attach itself fails", async () => {
-    const context = setup({ orders: [allegroOrder()], uploadError: new Error("Allegro 500") });
+    const context = setup({
+      orders: [allegroOrder()],
+      uploadError: new Error("Allegro 500"),
+    });
 
     await expect(
       deliver(context, { invoice_uuid: "uuid-1", order_id: "order_1" }),

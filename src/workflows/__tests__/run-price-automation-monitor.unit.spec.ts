@@ -1,7 +1,13 @@
 import { AllegroApiError } from "../../lib/allegro/errors";
 import type { PriceAutomationRule } from "../../lib/allegro/types";
 import { runPriceAutomationMonitor } from "../run-price-automation-monitor";
-import { ACCOUNT_RULES, fakeAllegroService, fakeContainer, offerFixture, RULES } from "./fixtures";
+import {
+  ACCOUNT_RULES,
+  fakeAllegroService,
+  fakeContainer,
+  offerFixture,
+  RULES,
+} from "./fixtures";
 import type { OfferRowFixture } from "./fixtures";
 
 const client = (
@@ -33,9 +39,14 @@ const run = async (input: {
   rulesConfigured?: boolean;
 }) => {
   const allegro = fakeAllegroService({
-    client: client({ offers: input.live, rules: input.rules, rulesError: input.rulesError }),
+    client: client({
+      offers: input.live,
+      rules: input.rules,
+      rulesError: input.rulesError,
+    }),
     offers: input.offers ?? [],
-    syncOptions: input.rulesConfigured === false ? {} : { automationRules: { ...RULES } },
+    syncOptions:
+      input.rulesConfigured === false ? {} : { automationRules: { ...RULES } },
   });
   const container = fakeContainer({ allegro });
   const result = await runPriceAutomationMonitor(container as never);
@@ -59,7 +70,11 @@ describe("runPriceAutomationMonitor: unresolved promotion state", () => {
       offers: [{ id: "row-1", offer_id: "o1", promoted: null, sku: "SKU-1" }],
     });
 
-    expect(result).toMatchObject({ drift: 0, promotionUnresolved: 1, scanned: 1 });
+    expect(result).toMatchObject({
+      drift: 0,
+      promotionUnresolved: 1,
+      scanned: 1,
+    });
     expect(allegro.offers[0]).toMatchObject({ price_automation_drift: false });
     // Counted AND surfaced: a `drift: 0` sweep that silently skipped the offer would
     // read as a clean catalogue, which is the reassurance to avoid giving.
@@ -134,8 +149,13 @@ describe("runPriceAutomationMonitor", () => {
       offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
     });
     expect(result.drift).toBe(1);
-    expect(allegro.offers[0]).toMatchObject({ price_automation_drift: true, price_mode: "fixed" });
-    expect(result.error).toContain("drift from the expected price-automation rule");
+    expect(allegro.offers[0]).toMatchObject({
+      price_automation_drift: true,
+      price_mode: "fixed",
+    });
+    expect(result.error).toContain(
+      "drift from the expected price-automation rule",
+    );
   });
 
   it("surfaces a promotion flip as drift", async () => {
@@ -263,7 +283,14 @@ describe("runPriceAutomationMonitor", () => {
     // empty-response guard that makes that safe. The monitor must not guess.
     const { allegro, result } = await run({
       live: [],
-      offers: [{ id: "row-1", offer_id: "o-gone", price_mode: "automated", sku: "SKU-1" }],
+      offers: [
+        {
+          id: "row-1",
+          offer_id: "o-gone",
+          price_mode: "automated",
+          sku: "SKU-1",
+        },
+      ],
     });
     expect(result).toMatchObject({ notObserved: 1, scanned: 0, updated: 0 });
     expect(allegro.offers[0]?.price_mode).toBe("automated");
@@ -283,21 +310,31 @@ describe("runPriceAutomationMonitor", () => {
     // false signal the write loop would then act on.
     const { allegro, result } = await run({
       live: [offerFixture({ id: "o1" })],
-      offers: [{ id: "row-1", offer_id: "o1", price_mode: "automated", sku: "SKU-1" }],
-      rulesError: new AllegroApiError({ httpStatus: 429, message: "Too many requests" }),
+      offers: [
+        { id: "row-1", offer_id: "o1", price_mode: "automated", sku: "SKU-1" },
+      ],
+      rulesError: new AllegroApiError({
+        httpStatus: 429,
+        message: "Too many requests",
+      }),
     });
 
     expect(result.systemic).toBe(true);
     expect(result.scanned).toBe(0);
     expect(allegro.offers[0]?.price_mode).toBe("automated");
-    expect(allegro.states.get("price-automation")).toMatchObject({ status: "error" });
+    expect(allegro.states.get("price-automation")).toMatchObject({
+      status: "error",
+    });
   });
 
   it("skips the sweep when the rules resource is not provisioned", async () => {
     const { result } = await run({
       live: [offerFixture({ id: "o1" })],
       offers: [{ id: "row-1", offer_id: "o1", promoted: false, sku: "SKU-1" }],
-      rulesError: new AllegroApiError({ httpStatus: 400, message: "Feature unavailable" }),
+      rulesError: new AllegroApiError({
+        httpStatus: 400,
+        message: "Feature unavailable",
+      }),
     });
     expect(result.featureUnavailable).toBe(true);
     expect(result.systemic).toBe(false);
@@ -325,7 +362,9 @@ describe("runPriceAutomationMonitor", () => {
       price_automation_drift: false,
       price_mode: "automated",
     });
-    expect(result.error).toContain("`automationRules` option is not configured");
+    expect(result.error).toContain(
+      "`automationRules` option is not configured",
+    );
   });
 
   it("leaves the rule name undefined when the attached id is not on the account", async () => {

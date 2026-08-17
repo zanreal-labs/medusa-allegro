@@ -232,11 +232,12 @@ export type AllegroSettingsPatch = Partial<
 export interface AllegroSyncStateRow {
   id: string;
   provider: string;
-  status: "idle" | "running" | "ok" | "error";
+  status: "idle" | "running" | "ok" | "error" | "disabled";
   cursor: string | null;
   counts: unknown;
   failures: unknown;
   last_error: string | null;
+  last_finding: string | null;
   last_synced_at: Date | null;
   write_scope_missing: boolean;
   updated_at: Date;
@@ -279,11 +280,12 @@ export interface AllegroSyncOptions {
  * contract for no gain. The admin reads them structurally.
  */
 export interface AllegroSyncStatePatch {
-  status?: "idle" | "running" | "ok" | "error";
+  status?: "idle" | "running" | "ok" | "error" | "disabled";
   cursor?: string | null;
   counts?: Record<string, unknown> | null;
   failures?: FailureState | null;
   last_error?: string | null;
+  last_finding?: string | null;
   last_synced_at?: Date | null;
   write_scope_missing?: boolean;
   claim_token?: string | null;
@@ -1082,12 +1084,17 @@ class AllegroModuleService extends MedusaService({
    */
   async releaseSyncRun(
     provider: AllegroSyncProvider,
-    opts: { token?: string; lastError?: string | null } = {},
+    opts: {
+      token?: string;
+      lastError?: string | null;
+      finding?: string | null;
+    } = {},
   ): Promise<boolean> {
     return await this.writeSyncState(
       provider,
       {
         ...(opts.lastError === undefined ? {} : { last_error: opts.lastError }),
+        ...(opts.finding === undefined ? {} : { last_finding: opts.finding }),
         // Cleared together with the status: a released row holds no claim, and leaving a
         // stale token behind would let a dead run's heartbeat resurrect it.
         claim_token: null,
