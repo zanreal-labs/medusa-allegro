@@ -103,7 +103,9 @@ const mapWithConcurrency = async <T, R>(
       results[index] = await fn(values[index] as T);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, values.length) }, worker),
+  );
   return results;
 };
 
@@ -123,7 +125,11 @@ const submitCommands = async (
   client: AllegroClient,
   chunks: readonly StockChange[][],
   mayContinue: () => Promise<boolean>,
-): Promise<{ submitted: SubmittedCommand[]; error?: string; stopped?: boolean }> => {
+): Promise<{
+  submitted: SubmittedCommand[];
+  error?: string;
+  stopped?: boolean;
+}> => {
   const submitted: SubmittedCommand[] = [];
   for (const changes of chunks) {
     // Between chunks, checking BOTH the claim and the kill switch. A catalogue-wide
@@ -146,12 +152,17 @@ const submitCommands = async (
     // write the first offer's quantity onto up to 1,000 others, and an empty chunk
     // would DELIST them all via the `?? 0`. Both are asserted instead of assumed.
     const value = changes[0]?.desired;
-    if (value === undefined || changes.some((change) => change.desired !== value)) {
+    if (
+      value === undefined ||
+      changes.some((change) => change.desired !== value)
+    ) {
       throw new MedusaError(
         MedusaError.Types.UNEXPECTED_STATE,
         `medusa-allegro: refusing to submit a quantity command whose chunk is empty or mixes target quantities (${[
           ...new Set(changes.map((change) => change.desired)),
-        ].join(", ")}). One command sets one fixed value across every offer it names.`,
+        ].join(
+          ", ",
+        )}). One command sets one fixed value across every offer it names.`,
       );
     }
     try {
@@ -172,9 +183,9 @@ const submitCommands = async (
       const message =
         error instanceof AllegroAuthError
           ? `auth error: ${error.message}`
-          : (error instanceof Error
+          : error instanceof Error
             ? error.message
-            : String(error));
+            : String(error);
       return { error: message, submitted };
     }
   }
@@ -249,9 +260,12 @@ const collectOutcomes = async (
     STOCK_POLL_CONCURRENCY,
     async (submission) => {
       try {
-        const report = await client.pollOfferQuantityCommand(submission.commandId, {
-          timeoutMs: 120_000,
-        });
+        const report = await client.pollOfferQuantityCommand(
+          submission.commandId,
+          {
+            timeoutMs: 120_000,
+          },
+        );
         // The SHARED terminality test, not a local copy. This inline duplicate was
         // the correct one of the two and the price loop's was weaker; collapsing both
         // onto `AllegroClient.isCommandTerminal` is what stops them drifting again.
@@ -259,20 +273,32 @@ const collectOutcomes = async (
           // Submitted but unconfirmed. `pending`, not `failed`: the quantities may
           // well have landed, and reporting them as failures would make the next run
           // treat a working push as a broken one.
-          return { confirmed: [], failed: 0, pending: submission.changes.length, synced: 0 };
+          return {
+            confirmed: [],
+            failed: 0,
+            pending: submission.changes.length,
+            synced: 0,
+          };
         }
 
         // After the poll, which is where the time goes: each command is polled for up to
         // 120 seconds, so a run with several chunks can otherwise outlive its claim.
         await heartbeat();
-        const { tasks, truncated } = await readAllQuantityTasks(client, submission.commandId);
+        const { tasks, truncated } = await readAllQuantityTasks(
+          client,
+          submission.commandId,
+        );
         const confirmedOfferIds = new Set<string>();
         for (const task of tasks) {
           const offerId = task.offer?.id;
           // `field === "quantity"` matters: a command report can carry tasks for
           // other fields, and counting one of those as a quantity confirmation would
           // report a quantity that was never set.
-          if (task.status === "SUCCESS" && task.field === "quantity" && offerId) {
+          if (
+            task.status === "SUCCESS" &&
+            task.field === "quantity" &&
+            offerId
+          ) {
             confirmedOfferIds.add(offerId);
           }
         }
@@ -306,7 +332,12 @@ const collectOutcomes = async (
         };
       } catch (error) {
         firstError ??= error instanceof Error ? error.message : String(error);
-        return { confirmed: [], failed: 0, pending: submission.changes.length, synced: 0 };
+        return {
+          confirmed: [],
+          failed: 0,
+          pending: submission.changes.length,
+          synced: 0,
+        };
       }
     },
   );
@@ -325,26 +356,34 @@ const collectOutcomes = async (
 };
 
 /** The `last_error` line for the admin, or null when the run was clean. */
-const buildStockError = (result: StockSyncResult, firstError?: string): string | null => {
-  const parts: string[] = [];
+const buildStockError = (
+  result: StockSyncResult,
+  firstError?: string,
+): { error: string | null; finding: string | null } => {
+  const errors: string[] = [];
+  const findings: string[] = [];
   if (firstError) {
-    parts.push(firstError);
+    errors.push(firstError);
   }
+  // A plan refused outright IS the run failing: nothing was published, and the
+  // reason is a data contradiction someone has to resolve.
   if (result.ambiguous > 0) {
-    parts.push(
+    errors.push(
       `${result.ambiguous} offer(s) match more than one variant, so the whole plan was refused rather than partially applied`,
     );
   }
   if (result.unresolved > 0) {
-    parts.push(
+    errors.push(
       `${result.unresolved} offer(s) have an unreadable quantity on one side, so the whole plan was refused rather than partially applied`,
     );
   }
   if (result.failed > 0) {
-    parts.push(`${result.failed} offer quantity write(s) were not confirmed by Allegro`);
+    errors.push(
+      `${result.failed} offer quantity write(s) were not confirmed by Allegro`,
+    );
   }
   if (result.pending > 0) {
-    parts.push(
+    findings.push(
       `${result.pending} offer quantity write(s) were submitted but not confirmed within the poll budget; the next run re-checks them`,
     );
   }
@@ -353,31 +392,48 @@ const buildStockError = (result: StockSyncResult, firstError?: string): string |
   // and a run that reported only `synced` would look clean while part of the catalogue sat
   // permanently stale on Allegro.
   if (result.conflicted > 0) {
-    parts.push(
+    findings.push(
       `${result.conflicted} offer(s) contradict their mapping row (the live sygnatura or EAN no longer matches the mapped SKU) and were skipped with a recorded conflict; resolve them in the Allegro admin`,
     );
   }
   if (result.skippedUnmatched > 0) {
-    parts.push(
+    findings.push(
       `${result.skippedUnmatched} mapped offer(s) could not be paired with an eligible variant (absent from the Allegro listing, or their SKU is not in the sales channel), so their quantity was not written`,
     );
   }
   if (result.skippedNoInventory > 0) {
-    parts.push(
+    findings.push(
       `${result.skippedNoInventory} offer(s) map to a variant that does not manage inventory, so Medusa has no quantity to publish for them`,
     );
   }
   if (result.skippedNoListingStock > 0) {
-    parts.push(
+    findings.push(
       `${result.skippedNoListingStock} offer(s) were skipped because their Allegro listing carried no usable available quantity, so the difference could not be computed`,
     );
   }
   if (result.skippedUnlinked > 0) {
-    parts.push(
+    findings.push(
       `${result.skippedUnlinked} eligible variant(s) are claimed by no mapped Allegro offer, so their quantity is published nowhere`,
     );
   }
-  return parts.length > 0 ? parts.join("; ") : null;
+  return {
+    error: errors.length > 0 ? errors.join("; ") : null,
+    finding: findings.length > 0 ? findings.join("; ") : null,
+  };
+};
+
+/**
+ * Both halves as one line, for the result object.
+ *
+ * The state row keeps them apart - that split is the point - but the run-now
+ * response and the job log want everything the run noticed in one sentence.
+ */
+const combineReport = (report: {
+  error: string | null;
+  finding: string | null;
+}): string | undefined => {
+  const combined = [report.error, report.finding].filter(Boolean).join("; ");
+  return combined.length > 0 ? combined : undefined;
 };
 
 /** Stamp `stock_synced_at` on the offers whose quantity Allegro confirmed. */
@@ -388,7 +444,9 @@ const stampSyncedOffers = async (
   if (offerIds.length === 0) {
     return;
   }
-  const rows = (await allegro.listAllegroOffers({ offer_id: [...offerIds] })) as unknown as {
+  const rows = (await allegro.listAllegroOffers({
+    offer_id: [...offerIds],
+  })) as unknown as {
     id: string;
   }[];
   if (rows.length === 0) {
@@ -433,7 +491,9 @@ const recordStockConflicts = async (
   }
   const skus = conflicts.map((conflict) => conflict.sku);
   try {
-    const rows = (await allegro.listAllegroOffers({ sku: skus })) as unknown as {
+    const rows = (await allegro.listAllegroOffers({
+      sku: skus,
+    })) as unknown as {
       id: string;
       sku: string;
     }[];
@@ -452,7 +512,9 @@ const recordStockConflicts = async (
             }
           : undefined;
       })
-      .filter((update): update is NonNullable<typeof update> => update !== undefined);
+      .filter(
+        (update): update is NonNullable<typeof update> => update !== undefined,
+      );
     if (updates.length > 0) {
       await allegro.updateAllegroOffers(updates as never);
     }
@@ -536,26 +598,32 @@ export const pushAllegroStock = async (
         // offers fresh and others stale with no record of which.
         result.complete = false;
         result.failed = changes.length;
-        const errorLine = buildStockError(result);
-        result.error = errorLine ?? undefined;
+        const report = buildStockError(result);
+        result.error = combineReport(report);
         logger.warn(
           `[allegro-stock] plan refused: ambiguous=${plan.ambiguous} unresolved=${plan.unresolved}. No quantity was written.`,
         );
         return {
-          outcome: { counts: { ...result }, lastError: errorLine, status: "error" as const },
+          outcome: {
+            counts: { ...result },
+            finding: report.finding,
+            lastError: report.error,
+            status: "error" as const,
+          },
           value: undefined,
         };
       }
 
       if (changes.length === 0) {
         result.complete = isStockCoverageComplete(plan);
-        const errorLine = buildStockError(result);
-        result.error = errorLine ?? undefined;
+        const report = buildStockError(result);
+        result.error = combineReport(report);
         return {
           outcome: {
             counts: { ...result },
-            lastError: errorLine,
-            status: errorLine ? ("error" as const) : ("ok" as const),
+            finding: report.finding,
+            lastError: report.error,
+            status: report.error ? ("error" as const) : ("ok" as const),
           },
           value: undefined,
         };
@@ -569,7 +637,10 @@ export const pushAllegroStock = async (
       } = await submitCommands(client, chunks, mayContinue);
       result.commands = submitted.length;
 
-      const submittedCount = submitted.reduce((sum, item) => sum + item.changes.length, 0);
+      const submittedCount = submitted.reduce(
+        (sum, item) => sum + item.changes.length,
+        0,
+      );
       // Everything in a chunk that was never submitted counts as failed: those
       // offers keep a stale quantity and nothing else records that.
       const notSubmitted = changes.length - submittedCount;
@@ -601,16 +672,19 @@ export const pushAllegroStock = async (
       }
 
       const firstError = submitError ?? outcomes.error;
-      const errorLine = buildStockError(result, firstError);
-      result.error = errorLine ?? undefined;
+      const report = buildStockError(result, firstError);
+      result.error = combineReport(report);
       return {
         outcome: {
           counts: { ...result },
-          lastError: errorLine,
-          status: errorLine ? ("error" as const) : ("ok" as const),
+          finding: report.finding,
+          lastError: report.error,
+          status: report.error ? ("error" as const) : ("ok" as const),
           // A 403 on the quantity command is the same write-scope gap the price loop
           // detects, and the same reconnect fixes both, so it raises the same banner.
-          ...(submitError?.startsWith("WRITE_SCOPE_MISSING") ? { writeScopeMissing: true } : {}),
+          ...(submitError?.startsWith("WRITE_SCOPE_MISSING")
+            ? { writeScopeMissing: true }
+            : {}),
         },
         value: undefined,
       };

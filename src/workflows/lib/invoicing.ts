@@ -96,7 +96,8 @@ export const resolveInvoiceSource = (
     if (client && typeof getInvoicePdf === "function") {
       // Called through `client` rather than as a detached function, so the memoized
       // client stays its own receiver.
-      source.fetchPdf = (invoiceUuid: string) => getInvoicePdf.call(client, invoiceUuid);
+      source.fetchPdf = (invoiceUuid: string) =>
+        getInvoicePdf.call(client, invoiceUuid);
     }
   } catch {
     // Leave `fetchPdf` absent: the caller reports "no PDF surface" rather than crashing.
@@ -113,14 +114,29 @@ export const resolveInvoiceSource = (
       return (
         (rows ?? [])
           .map((row) => ({
-            invoiceNumber: typeof row.invoice_number === "string" ? row.invoice_number : undefined,
-            invoiceUuid: typeof row.invoice_uuid === "string" ? row.invoice_uuid : "",
+            // An adopted invoice was issued by whatever ran before this plugin, and
+            // its PDF belongs to that pipeline's records - the old system attached
+            // it, or decided not to, months ago. Sweeping it now means pushing a
+            // historical document at a historical order on every tick: it fails,
+            // and a permanent failure in the drain's health line is worse than the
+            // attachment was ever worth.
+            adopted: row.adopted_at !== null && row.adopted_at !== undefined,
+            invoiceNumber:
+              typeof row.invoice_number === "string"
+                ? row.invoice_number
+                : undefined,
+            invoiceUuid:
+              typeof row.invoice_uuid === "string" ? row.invoice_uuid : "",
             orderId: typeof row.order_id === "string" ? row.order_id : "",
           }))
           // A row without a uuid has no issued document yet, and one without an order id
           // cannot be matched to an Allegro order. Both are normal states of that table
           // rather than errors, so they are filtered rather than reported.
-          .filter((row) => row.invoiceUuid !== "" && row.orderId !== "")
+          .filter(
+            (row) =>
+              row.invoiceUuid !== "" && row.orderId !== "" && !row.adopted,
+          )
+          .map(({ adopted, ...row }) => row)
       );
     };
   }
