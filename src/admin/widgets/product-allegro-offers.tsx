@@ -18,7 +18,9 @@ import {
   Textarea,
   toast,
 } from "@medusajs/ui";
+import type { TFunction } from "i18next";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { CONFLICT_LABEL, formatDate, PRICE_MODE_COLOR, PUSH_RESULT_COLOR } from "../lib/format";
 import { sdk } from "../lib/sdk";
 import type { OfferDetailResponse, OfferRow, OffersResponse } from "../lib/types";
@@ -38,11 +40,11 @@ import type { OfferDetailResponse, OfferRow, OffersResponse } from "../lib/types
 /** The public storefront page for an offer. Sandbox offers will not resolve. */
 const offerUrl = (offerId: string): string => `https://allegro.pl/oferta/${offerId}`;
 
-const promotedLabel = (promoted: boolean | null | undefined): string => {
+const promotedLabel = (t: TFunction, promoted: boolean | null | undefined): string => {
   if (promoted === null || promoted === undefined) {
-    return "unresolved";
+    return t("common.promoted.unresolved");
   }
-  return promoted ? "yes" : "no";
+  return promoted ? t("common.promoted.yes") : t("common.promoted.no");
 };
 
 /**
@@ -62,6 +64,7 @@ const promotedLabel = (promoted: boolean | null | undefined): string => {
 const VARIANT_FETCH_LIMIT = 200;
 
 const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) => {
+  const { t } = useTranslation("allegro");
   const [variants, setVariants] = useState<AdminProductVariant[]>(
     () => (data.variants ?? []) as AdminProductVariant[],
   );
@@ -99,14 +102,14 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
         if (!cancelled) {
           setVariantsLoading(false);
           toast.error(
-            error instanceof Error ? error.message : "Could not load this product's variants.",
+            error instanceof Error ? error.message : t("productWidget.errors.variantsFailed"),
           );
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [data.id, data.variants]);
+  }, [data.id, data.variants, t]);
   const [busySku, setBusySku] = useState<string | undefined>();
   const [detail, setDetail] = useState<OfferDetailResponse | undefined>();
 
@@ -123,11 +126,11 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
       });
       setOffers(response.offers);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not load the Allegro offers.");
+      toast.error(error instanceof Error ? error.message : t("productWidget.errors.offersFailed"));
     } finally {
       setLoading(false);
     }
-  }, [skus]);
+  }, [skus, t]);
 
   useEffect(() => {
     void load();
@@ -144,7 +147,7 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
       });
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not change the opt-out.");
+      toast.error(error instanceof Error ? error.message : t("common.errors.toggleOptOutFailed"));
     } finally {
       setBusySku(undefined);
     }
@@ -158,7 +161,7 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
         ),
       );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not load the push history.");
+      toast.error(error instanceof Error ? error.message : t("common.errors.pushHistoryFailed"));
     }
   };
 
@@ -174,23 +177,21 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
     <Container className="divide-y p-0">
       <div className="flex items-center justify-between px-6 py-4">
         <div>
-          <Heading level="h2">Allegro</Heading>
+          <Heading level="h2">{t("productWidget.title")}</Heading>
           <Text className="text-ui-fg-subtle" size="small">
-            The offer mapped to each variant SKU, its sync state, and the per-offer price sync
-            opt-out.
+            {t("productWidget.description")}
           </Text>
         </div>
       </div>
 
       {loading || variantsLoading ? (
         <div className="px-6 py-4">
-          <Text size="small">Loading...</Text>
+          <Text size="small">{t("common.loading")}</Text>
         </div>
       ) : (offers.length === 0 ? (
         <div className="px-6 py-4">
           <Text className="text-ui-fg-subtle" size="small">
-            Not on Allegro. No offer maps to this product's SKUs ({skus.join(", ")}). Offer
-            discovery links an offer whose sygnatura (external id) equals a variant SKU.
+            {t("productWidget.notOnAllegro", { skus: skus.join(", ") })}
           </Text>
         </div>
       ) : (
@@ -198,13 +199,13 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
           <Table>
             <Table.Header>
               <Table.Row>
-                <Table.HeaderCell>Variant / SKU</Table.HeaderCell>
-                <Table.HeaderCell>Offer</Table.HeaderCell>
-                <Table.HeaderCell>Status</Table.HeaderCell>
-                <Table.HeaderCell>Pricing</Table.HeaderCell>
-                <Table.HeaderCell>Promoted</Table.HeaderCell>
-                <Table.HeaderCell>Price sync</Table.HeaderCell>
-                <Table.HeaderCell>Last sync</Table.HeaderCell>
+                <Table.HeaderCell>{t("productWidget.table.variantSku")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("productWidget.table.offer")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("productWidget.table.status")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("productWidget.table.pricing")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("productWidget.table.promoted")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("productWidget.table.priceSync")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("productWidget.table.lastSync")}</Table.HeaderCell>
                 <Table.HeaderCell> </Table.HeaderCell>
               </Table.Row>
             </Table.Header>
@@ -238,7 +239,7 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
                                 {offer.offer_id}
                               </a>
                             ) : (
-                              "not linked"
+                              t("productWidget.notLinked")
                             )}
                           </Table.Cell>
                           <Table.Cell>
@@ -247,9 +248,9 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
                                 {CONFLICT_LABEL[offer.conflict] ?? offer.conflict}
                               </StatusBadge>
                             ) : offer.offer_id ? (
-                              <StatusBadge color="green">linked</StatusBadge>
+                              <StatusBadge color="green">{t("productWidget.linked")}</StatusBadge>
                             ) : (
-                              <StatusBadge color="grey">not linked</StatusBadge>
+                              <StatusBadge color="grey">{t("productWidget.notLinked")}</StatusBadge>
                             )}
                             {offer.last_error ? (
                               <Text className="text-ui-fg-subtle txt-compact-xsmall">
@@ -271,12 +272,12 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
                               ) : null}
                               {offer.price_automation_drift ? (
                                 <Badge color="orange" size="2xsmall">
-                                  drift
+                                  {t("common.driftBadge")}
                                 </Badge>
                               ) : null}
                             </div>
                           </Table.Cell>
-                          <Table.Cell>{promotedLabel(offer.promoted)}</Table.Cell>
+                          <Table.Cell>{promotedLabel(t, offer.promoted)}</Table.Cell>
                           <Table.Cell>
                             <Switch
                               checked={offer.price_sync_enabled ?? true}
@@ -286,8 +287,8 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
                           </Table.Cell>
                           <Table.Cell className="text-ui-fg-subtle txt-compact-xsmall">
                             <div className="flex flex-col">
-                              <span>price {formatDate(offer.price_synced_at)}</span>
-                              <span>stock {formatDate(offer.stock_synced_at)}</span>
+                              <span>{t("productWidget.priceLabel", { date: formatDate(offer.price_synced_at) })}</span>
+                              <span>{t("productWidget.stockLabel", { date: formatDate(offer.stock_synced_at) })}</span>
                             </div>
                           </Table.Cell>
                           <Table.Cell>
@@ -297,16 +298,18 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
                                 size="small"
                                 variant="transparent"
                               >
-                                History
+                                {t("common.history")}
                               </Button>
                             </div>
                           </Table.Cell>
                         </>
                       ) : (
                         <>
-                          <Table.Cell className="text-ui-fg-subtle">not linked</Table.Cell>
+                          <Table.Cell className="text-ui-fg-subtle">
+                            {t("productWidget.notLinked")}
+                          </Table.Cell>
                           <Table.Cell>
-                            <StatusBadge color="grey">not linked</StatusBadge>
+                            <StatusBadge color="grey">{t("productWidget.notLinked")}</StatusBadge>
                           </Table.Cell>
                           <Table.Cell className="text-ui-fg-muted">-</Table.Cell>
                           <Table.Cell className="text-ui-fg-muted">-</Table.Cell>
@@ -338,20 +341,19 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
 
             <div>
               <Heading className="mb-2" level="h3">
-                Push history
+                {t("common.pushHistory.title")}
               </Heading>
               <Text className="text-ui-fg-subtle mb-3" size="small">
-                Append-only, and the only record of the price range that was pushed. `observed` rows
-                are the monitor recording a state it did not write.
+                {t("productWidget.pushHistory.description")}
               </Text>
               <Table>
                 <Table.Header>
                   <Table.Row>
-                    <Table.HeaderCell>When</Table.HeaderCell>
-                    <Table.HeaderCell>Result</Table.HeaderCell>
-                    <Table.HeaderCell>Rule</Table.HeaderCell>
-                    <Table.HeaderCell>Bounds</Table.HeaderCell>
-                    <Table.HeaderCell>By</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.when")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.result")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.rule")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.bounds")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.by")}</Table.HeaderCell>
                   </Table.Row>
                 </Table.Header>
                 <Table.Body>
@@ -370,7 +372,10 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
                       </Table.Cell>
                       <Table.Cell className="txt-compact-xsmall">
                         {push.bound_floor && push.bound_ceiling
-                          ? `${push.bound_floor} to ${push.bound_ceiling}`
+                          ? t("common.pushHistory.boundsRange", {
+                            floor: push.bound_floor,
+                            ceiling: push.bound_ceiling,
+                          })
                           : "-"}
                       </Table.Cell>
                       <Table.Cell className="txt-compact-xsmall">
@@ -382,8 +387,7 @@ const ProductAllegroOffersWidget = ({ data }: DetailWidgetProps<AdminProduct>) =
               </Table>
               {(detail?.pushes ?? []).length === 0 ? (
                 <Text className="text-ui-fg-muted py-3" size="small">
-                  Nothing recorded yet. Until a successful push carries bounds, price sync treats
-                  this offer's range as unknown and re-asserts it.
+                  {t("common.pushHistory.empty")}
                 </Text>
               ) : null}
               {(detail?.pushes ?? []).some((push) => push.error) ? (

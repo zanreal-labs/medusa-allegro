@@ -1,6 +1,7 @@
 import { defineRouteConfig } from "@medusajs/admin-sdk";
 import { Alert, Button, Container, Heading, Input, Table, Text, toast } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { formatRate } from "../../../../lib/format";
 import { sdk } from "../../../../lib/sdk";
 import type { CategoryRateRow, CategoryRatesResponse } from "../../../../lib/types";
@@ -32,6 +33,7 @@ interface Draft {
 }
 
 const AllegroCategoryRatesSettingsPage = () => {
+  const { t } = useTranslation("allegro");
   const [rates, setRates] = useState<CategoryRateRow[]>([]);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [loadError, setLoadError] = useState<string | undefined>();
@@ -56,9 +58,9 @@ const AllegroCategoryRatesSettingsPage = () => {
       );
       setLoadError(undefined);
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Could not load the category rates.");
+      setLoadError(error instanceof Error ? error.message : t("categoryRates.errors.loadFailed"));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -82,10 +84,10 @@ const AllegroCategoryRatesSettingsPage = () => {
         },
         method: "POST",
       });
-      toast.success(`Saved rates for ${row.category_id}.`);
+      toast.success(t("categoryRates.toastSaved", { categoryId: row.category_id }));
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not save the rates.");
+      toast.error(error instanceof Error ? error.message : t("categoryRates.errors.saveFailed"));
     } finally {
       setBusyId(undefined);
     }
@@ -102,11 +104,9 @@ const AllegroCategoryRatesSettingsPage = () => {
   return (
     <Container className="divide-y p-0">
       <div className="px-6 py-4">
-        <Heading level="h1">Allegro category rates</Heading>
+        <Heading level="h1">{t("categoryRates.title")}</Heading>
         <Text className="text-ui-fg-subtle" size="small">
-          Sale commission per category, as percentages, entered from Allegro's published fee table.
-          These set the break-even price floor, so an offer in a category with a blank rate is
-          skipped by price sync rather than floored at cost.
+          {t("categoryRates.description")}
         </Text>
       </div>
 
@@ -118,11 +118,7 @@ const AllegroCategoryRatesSettingsPage = () => {
 
       {unset > 0 ? (
         <div className="px-6 py-4">
-          <Alert variant="warning">
-            {unset} categor{unset === 1 ? "y has" : "ies have"} at least one rate unset. Price sync
-            skips those offers with reason `missing-break-even` - a blank rate is deliberately not
-            read as 0%, because that would turn a loss-making price into an acceptable floor.
-          </Alert>
+          <Alert variant="warning">{t("categoryRates.unsetWarning", { count: unset })}</Alert>
         </div>
       ) : null}
 
@@ -130,9 +126,9 @@ const AllegroCategoryRatesSettingsPage = () => {
         <Table>
           <Table.Header>
             <Table.Row>
-              <Table.HeaderCell>Category</Table.HeaderCell>
-              <Table.HeaderCell>Standard %</Table.HeaderCell>
-              <Table.HeaderCell>Promoted %</Table.HeaderCell>
+              <Table.HeaderCell>{t("categoryRates.table.category")}</Table.HeaderCell>
+              <Table.HeaderCell>{t("categoryRates.table.standard")}</Table.HeaderCell>
+              <Table.HeaderCell>{t("categoryRates.table.promoted")}</Table.HeaderCell>
               <Table.HeaderCell> </Table.HeaderCell>
             </Table.Row>
           </Table.Header>
@@ -157,7 +153,7 @@ const AllegroCategoryRatesSettingsPage = () => {
                         },
                       }))
                     }
-                    placeholder="not set"
+                    placeholder={t("categoryRates.notSetPlaceholder")}
                     value={drafts[row.category_id]?.commission ?? ""}
                   />
                 </Table.Cell>
@@ -173,7 +169,7 @@ const AllegroCategoryRatesSettingsPage = () => {
                         },
                       }))
                     }
-                    placeholder="not set"
+                    placeholder={t("categoryRates.notSetPlaceholder")}
                     value={drafts[row.category_id]?.promoted ?? ""}
                   />
                 </Table.Cell>
@@ -185,7 +181,7 @@ const AllegroCategoryRatesSettingsPage = () => {
                       size="small"
                       variant="secondary"
                     >
-                      Save
+                      {t("common.save")}
                     </Button>
                   </div>
                 </Table.Cell>
@@ -196,8 +192,7 @@ const AllegroCategoryRatesSettingsPage = () => {
 
         {rates.length === 0 ? (
           <Text className="text-ui-fg-muted py-4" size="small">
-            No categories yet. Offer discovery creates a row for every category the seller's live
-            offers reference, with blank rates for you to fill in.
+            {t("categoryRates.empty")}
           </Text>
         ) : null}
       </div>
@@ -206,7 +201,8 @@ const AllegroCategoryRatesSettingsPage = () => {
 };
 
 export const config = defineRouteConfig({
-  label: "Allegro category rates",
+  label: "categoryRates.title",
+  translationNs: "allegro",
 });
 
 export default AllegroCategoryRatesSettingsPage;

@@ -2,6 +2,7 @@ import { defineWidgetConfig } from "@medusajs/admin-sdk";
 import { StatusBadge, Text } from "@medusajs/ui";
 import { registerVariantColumn } from "@zanreal/medusa-admin-kit";
 import type { CatalogProduct } from "@zanreal/medusa-admin-kit";
+import i18next from "i18next";
 import { createOfferBatcher } from "../lib/offer-batch";
 import type { OfferFetcher } from "../lib/offer-batch";
 import { sdk } from "../lib/sdk";
@@ -66,6 +67,15 @@ const fetchOffersBySkus: OfferFetcher = async (skus) => {
 /** One batcher for both columns, so they share a request rather than race. */
 const offerBatcher = createOfferBatcher(fetchOffersBySkus);
 
+/**
+ * `header` and `cell` below run outside any component's render - they are
+ * plain callbacks the Catalog table invokes, not components themselves - so
+ * they cannot call the `useTranslation` hook. They read the shared `i18next`
+ * instance the dashboard already initialized instead. See the i18n README's
+ * "component rendering" note.
+ */
+const t = (key: string) => i18next.t(key, { ns: "allegro" });
+
 /** A SKU-less variant cannot be matched to an offer; skip the network entirely. */
 const loadOfferRow = async (sku: string | null) => (sku ? offerBatcher.load(sku) : null);
 
@@ -74,14 +84,14 @@ registerVariantColumn<CatalogProduct, VariantOfferPrice | null>({
     if (!async || async.isLoading) {
       return (
         <Text className="text-ui-fg-muted" size="small">
-          ...
+          {t("variantColumns.loadingCell")}
         </Text>
       );
     }
     if (async.error) {
       return (
         <Text className="text-ui-fg-error" size="small">
-          error
+          {t("variantColumns.priceError")}
         </Text>
       );
     }
@@ -113,7 +123,7 @@ registerVariantColumn<CatalogProduct, VariantOfferPrice | null>({
       </span>
     );
   },
-  header: "Allegro",
+  header: () => t("variantColumns.priceColumnHeader"),
   id: "allegro.price",
   loadData: async (ctx) => resolveVariantOfferPrice(await loadOfferRow(ctx.sku)),
   priority: 9,
@@ -130,24 +140,24 @@ registerVariantColumn<CatalogProduct, VariantOffer | null>({
     if (!async || async.isLoading) {
       return (
         <Text className="text-ui-fg-muted" size="small">
-          ...
+          {t("variantColumns.loadingCell")}
         </Text>
       );
     }
     if (async.error) {
-      return <StatusBadge color="red">error</StatusBadge>;
+      return <StatusBadge color="red">{t("variantColumns.statusError")}</StatusBadge>;
     }
     const offer = async.data;
     if (!offer) {
       return (
         <Text className="text-ui-fg-muted" size="small">
-          not listed
+          {t("variantColumns.notListed")}
         </Text>
       );
     }
     return <StatusBadge color={variantOfferColor(offer)}>{formatVariantOffer(offer)}</StatusBadge>;
   },
-  header: "Allegro status",
+  header: () => t("variantColumns.statusColumnHeader"),
   id: "allegro.offer_status",
   loadData: async (ctx) => classifyVariantOffer(await loadOfferRow(ctx.sku)),
   priority: 10,
