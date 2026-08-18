@@ -16,6 +16,7 @@ import {
   toast,
 } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   CONFLICT_LABEL,
   formatDate,
@@ -55,6 +56,7 @@ const initialFilter = (): Filter => {
 };
 
 const AllegroOffersPage = () => {
+  const { t } = useTranslation("allegro");
   const [data, setData] = useState<OffersResponse | undefined>();
   const [filter, setFilter] = useState<Filter>(initialFilter);
   const [search, setSearch] = useState("");
@@ -76,9 +78,9 @@ const AllegroOffersPage = () => {
       setData(await sdk.client.fetch<OffersResponse>(`/admin/allegro/offers?${params}`));
       setLoadError(undefined);
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Could not load the offer mappings.");
+      setLoadError(error instanceof Error ? error.message : t("offers.errors.loadFailed"));
     }
-  }, [filter, offset, search]);
+  }, [filter, offset, search, t]);
 
   useEffect(() => {
     void load();
@@ -95,17 +97,17 @@ const AllegroOffersPage = () => {
       // kill switch being on is the operator's own earlier decision - both need saying
       // out loud rather than being reported as an error or as a silent success.
       if (response.result.skipped) {
-        toast.info(`${provider}: ${response.result.skipped}`);
+        toast.info(t("offers.toastSkipped", { provider, reason: response.result.skipped }));
       } else if (response.result.error) {
-        toast.warning(`${provider} finished with findings`, {
+        toast.warning(t("offers.toastFindingsTitle", { provider }), {
           description: response.result.error,
         });
       } else {
-        toast.success(`${provider} finished cleanly.`);
+        toast.success(t("offers.toastSuccess", { provider }));
       }
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : `Could not run ${provider}.`);
+      toast.error(error instanceof Error ? error.message : t("offers.errors.runFailed", { provider }));
     } finally {
       setRunning(false);
     }
@@ -120,7 +122,7 @@ const AllegroOffersPage = () => {
       });
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not change the opt-out.");
+      toast.error(error instanceof Error ? error.message : t("common.errors.toggleOptOutFailed"));
     } finally {
       setBusySku(undefined);
     }
@@ -145,7 +147,7 @@ const AllegroOffersPage = () => {
       }
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not push this offer.");
+      toast.error(error instanceof Error ? error.message : t("offers.errors.pushFailed"));
     } finally {
       setBusySku(undefined);
     }
@@ -159,7 +161,7 @@ const AllegroOffersPage = () => {
         ),
       );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not load the push history.");
+      toast.error(error instanceof Error ? error.message : t("common.errors.pushHistoryFailed"));
     }
   };
 
@@ -170,10 +172,9 @@ const AllegroOffersPage = () => {
     <Container className="divide-y p-0">
       <div className="flex flex-wrap items-center justify-between gap-2 px-6 py-4">
         <div>
-          <Heading level="h1">Allegro offers</Heading>
+          <Heading level="h1">{t("offers.title")}</Heading>
           <Text className="text-ui-fg-subtle" size="small">
-            The SKU-to-offer mapping. A row with a conflict is held out of every sync path until it
-            is resolved.
+            {t("offers.description")}
           </Text>
         </div>
         <div className="flex flex-wrap gap-x-2">
@@ -183,7 +184,7 @@ const AllegroOffersPage = () => {
             size="small"
             variant="secondary"
           >
-            Rediscover offers
+            {t("offers.actions.rediscover")}
           </Button>
           <Button
             disabled={running}
@@ -191,13 +192,13 @@ const AllegroOffersPage = () => {
             size="small"
             variant="secondary"
           >
-            Re-observe pricing
+            {t("offers.actions.reobserve")}
           </Button>
           <Button disabled={running} onClick={() => runSync("prices")} size="small">
-            Sync prices now
+            {t("offers.actions.syncPrices")}
           </Button>
           <Button disabled={running} onClick={() => runSync("stock")} size="small">
-            Sync stock now
+            {t("offers.actions.syncStock")}
           </Button>
         </div>
       </div>
@@ -217,12 +218,12 @@ const AllegroOffersPage = () => {
           value={filter}
         >
           <Select.Trigger className="w-56">
-            <Select.Value placeholder="Filter" />
+            <Select.Value placeholder={t("offers.filterPlaceholder")} />
           </Select.Trigger>
           <Select.Content>
-            <Select.Item value="all">All mappings</Select.Item>
-            <Select.Item value="conflict">Conflicts only</Select.Item>
-            <Select.Item value="drift">Price drift only</Select.Item>
+            <Select.Item value="all">{t("offers.filters.all")}</Select.Item>
+            <Select.Item value="conflict">{t("offers.filters.conflict")}</Select.Item>
+            <Select.Item value="drift">{t("offers.filters.drift")}</Select.Item>
           </Select.Content>
         </Select>
         <Input
@@ -231,11 +232,11 @@ const AllegroOffersPage = () => {
             setSearch(changeEvent.target.value);
             setOffset(0);
           }}
-          placeholder="Search SKU"
+          placeholder={t("offers.searchPlaceholder")}
           value={search}
         />
         <Text className="text-ui-fg-muted" size="small">
-          {count} mapping{count === 1 ? "" : "s"}
+          {t("offers.mappingCount", { count })}
         </Text>
       </div>
 
@@ -243,13 +244,13 @@ const AllegroOffersPage = () => {
         <Table>
           <Table.Header>
             <Table.Row>
-              <Table.HeaderCell>SKU</Table.HeaderCell>
-              <Table.HeaderCell>Offer</Table.HeaderCell>
-              <Table.HeaderCell>Status</Table.HeaderCell>
-              <Table.HeaderCell>Pricing</Table.HeaderCell>
-              <Table.HeaderCell>Promoted</Table.HeaderCell>
-              <Table.HeaderCell>Price sync</Table.HeaderCell>
-              <Table.HeaderCell>Last synced</Table.HeaderCell>
+              <Table.HeaderCell>{t("offers.table.sku")}</Table.HeaderCell>
+              <Table.HeaderCell>{t("offers.table.offer")}</Table.HeaderCell>
+              <Table.HeaderCell>{t("offers.table.status")}</Table.HeaderCell>
+              <Table.HeaderCell>{t("offers.table.pricing")}</Table.HeaderCell>
+              <Table.HeaderCell>{t("offers.table.promoted")}</Table.HeaderCell>
+              <Table.HeaderCell>{t("offers.table.priceSync")}</Table.HeaderCell>
+              <Table.HeaderCell>{t("common.lastSynced")}</Table.HeaderCell>
               <Table.HeaderCell> </Table.HeaderCell>
             </Table.Row>
           </Table.Header>
@@ -267,7 +268,7 @@ const AllegroOffersPage = () => {
                   </div>
                 </Table.Cell>
                 <Table.Cell className="text-ui-fg-subtle">
-                  {offer.offer_id ?? "not linked"}
+                  {offer.offer_id ?? t("offers.notLinked")}
                 </Table.Cell>
                 <Table.Cell className="text-ui-fg-subtle">{offer.status ?? "-"}</Table.Cell>
                 <Table.Cell>
@@ -282,7 +283,7 @@ const AllegroOffersPage = () => {
                     ) : null}
                     {offer.price_automation_drift ? (
                       <Badge color="orange" size="2xsmall">
-                        drift
+                        {t("common.driftBadge")}
                       </Badge>
                     ) : null}
                   </div>
@@ -295,10 +296,10 @@ const AllegroOffersPage = () => {
                 */}
                 <Table.Cell>
                   {offer.promoted === null || offer.promoted === undefined
-                    ? "unresolved"
+                    ? t("common.promoted.unresolved")
                     : (offer.promoted
-                      ? "yes"
-                      : "no")}
+                      ? t("common.promoted.yes")
+                      : t("common.promoted.no"))}
                 </Table.Cell>
                 <Table.Cell>
                   <Switch
@@ -318,14 +319,14 @@ const AllegroOffersPage = () => {
                       size="small"
                       variant="secondary"
                     >
-                      Push
+                      {t("offers.actions.push")}
                     </Button>
                     <Button
                       onClick={() => void openHistory(offer.sku)}
                       size="small"
                       variant="transparent"
                     >
-                      History
+                      {t("common.history")}
                     </Button>
                   </div>
                 </Table.Cell>
@@ -336,8 +337,7 @@ const AllegroOffersPage = () => {
 
         {offers.length === 0 ? (
           <Text className="text-ui-fg-muted py-4" size="small">
-            No mappings match. Offer discovery creates them from the seller's live offers, matching
-            each offer's sygnatura against a variant SKU.
+            {t("offers.empty")}
           </Text>
         ) : null}
 
@@ -349,10 +349,14 @@ const AllegroOffersPage = () => {
               size="small"
               variant="secondary"
             >
-              Previous
+              {t("common.previous")}
             </Button>
             <Text className="text-ui-fg-muted" size="small">
-              {offset + 1} to {Math.min(offset + PAGE_SIZE, count)} of {count}
+              {t("offers.paginationRange", {
+                count,
+                from: offset + 1,
+                to: Math.min(offset + PAGE_SIZE, count),
+              })}
             </Text>
             <Button
               disabled={offset + PAGE_SIZE >= count}
@@ -360,7 +364,7 @@ const AllegroOffersPage = () => {
               size="small"
               variant="secondary"
             >
-              Next
+              {t("common.next")}
             </Button>
           </div>
         ) : null}
@@ -384,21 +388,19 @@ const AllegroOffersPage = () => {
 
             <div>
               <Heading className="mb-2" level="h3">
-                Push history
+                {t("common.pushHistory.title")}
               </Heading>
               <Text className="text-ui-fg-subtle mb-3" size="small">
-                Append-only, and the only record of the price range that was pushed - Allegro does
-                not expose an attached rule's bounds. `observed` rows are the monitor recording a
-                state it did not write.
+                {t("offers.pushHistory.description")}
               </Text>
               <Table>
                 <Table.Header>
                   <Table.Row>
-                    <Table.HeaderCell>When</Table.HeaderCell>
-                    <Table.HeaderCell>Result</Table.HeaderCell>
-                    <Table.HeaderCell>Rule</Table.HeaderCell>
-                    <Table.HeaderCell>Bounds</Table.HeaderCell>
-                    <Table.HeaderCell>By</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.when")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.result")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.rule")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.bounds")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("common.pushHistory.table.by")}</Table.HeaderCell>
                   </Table.Row>
                 </Table.Header>
                 <Table.Body>
@@ -414,12 +416,18 @@ const AllegroOffersPage = () => {
                       </Table.Cell>
                       <Table.Cell className="txt-compact-xsmall">
                         {push.rule_name_old && push.rule_name_old !== push.rule_name_new
-                          ? `${push.rule_name_old} to ${push.rule_name_new ?? "-"}`
+                          ? t("offers.pushHistory.ruleChange", {
+                            from: push.rule_name_old,
+                            to: push.rule_name_new ?? "-",
+                          })
                           : (push.rule_name_new ?? "-")}
                       </Table.Cell>
                       <Table.Cell className="txt-compact-xsmall">
                         {push.bound_floor && push.bound_ceiling
-                          ? `${push.bound_floor} to ${push.bound_ceiling}`
+                          ? t("common.pushHistory.boundsRange", {
+                            floor: push.bound_floor,
+                            ceiling: push.bound_ceiling,
+                          })
                           : "-"}
                       </Table.Cell>
                       <Table.Cell className="txt-compact-xsmall">
@@ -431,8 +439,7 @@ const AllegroOffersPage = () => {
               </Table>
               {(detail?.pushes ?? []).length === 0 ? (
                 <Text className="text-ui-fg-muted py-3" size="small">
-                  Nothing recorded yet. Until a successful push carries bounds, price sync treats
-                  this offer's range as unknown and re-asserts it.
+                  {t("common.pushHistory.empty")}
                 </Text>
               ) : null}
               {(detail?.pushes ?? []).some((push) => push.error) ? (
@@ -455,7 +462,8 @@ const AllegroOffersPage = () => {
 };
 
 export const config = defineRouteConfig({
-  label: "Allegro offers",
+  label: "offers.title",
+  translationNs: "allegro",
 });
 
 export default AllegroOffersPage;

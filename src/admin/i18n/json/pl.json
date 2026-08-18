@@ -1,0 +1,317 @@
+{
+  "common": {
+    "save": "Zapisz",
+    "loading": "Wczytywanie...",
+    "history": "Historia",
+    "previous": "Poprzednia",
+    "next": "Następna",
+    "close": "Zamknij",
+    "lastSynced": "Ostatnia synchronizacja",
+    "driftBadge": "dryf",
+    "promoted": {
+      "unresolved": "nieustalone",
+      "yes": "tak",
+      "no": "nie"
+    },
+    "overrideLock": {
+      "prefix": "Jest to wymuszone przez zmienną środowiskową",
+      "suffix": "na tym wdrożeniu; wyczyszczenie tej zmiennej oddaje kontrolę temu ekranowi."
+    },
+    "counts": {
+      "linked": "{{count}} połączonych",
+      "unlinked": "{{count}} niepołączonych",
+      "drifting": "{{count}} z dryfem",
+      "conflict_one": "{{count}} konflikt",
+      "conflict_few": "{{count}} konflikty",
+      "conflict_many": "{{count}} konfliktów",
+      "conflict_other": "{{count}} konfliktu"
+    },
+    "errors": {
+      "toggleOptOutFailed": "Nie udało się zmienić wyłączenia z synchronizacji cen.",
+      "pushHistoryFailed": "Nie udało się wczytać historii wysyłek."
+    },
+    "pushHistory": {
+      "title": "Historia wysyłek",
+      "table": {
+        "when": "Kiedy",
+        "result": "Wynik",
+        "rule": "Reguła",
+        "bounds": "Zakres",
+        "by": "Przez"
+      },
+      "boundsRange": "{{floor}} do {{ceiling}}",
+      "empty": "Nic jeszcze nie zapisano. Dopóki udana wysyłka nie przyniesie zakresu cen, synchronizacja cen traktuje przedział tej oferty jako nieznany i wymusza go ponownie."
+    }
+  },
+  "settings": {
+    "title": "Allegro",
+    "subtitle": "Połącz konto sprzedawcy Allegro, przez które sprzedaje ten sklep.",
+    "justConnected": "Konto Allegro połączone.",
+    "errors": {
+      "loadFailed": "Nie udało się wczytać stanu Allegro.",
+      "connectFailed": "Nie udało się rozpocząć połączenia.",
+      "disconnectFailed": "Nie udało się rozłączyć."
+    },
+    "callbackErrors": {
+      "denied": "Autoryzacja została odrzucona na ekranie zgody Allegro.",
+      "exchangeFailed": "Allegro odrzuciło kod autoryzacyjny. Sprawdź identyfikator klienta, sekret oraz to, czy adres przekierowania zarejestrowany dla aplikacji zgadza się dokładnie z tym adresem. Powód znajdziesz w logu serwera.",
+      "missingCode": "Allegro nie zwróciło kodu autoryzacyjnego. Rozpocznij połączenie ponownie.",
+      "persistFailed": "Połączenie się powiodło, ale tokenów nie udało się zapisać. Sprawdź `encryptionKey` oraz log serwera.",
+      "stateMismatch": "Kontrola bezpieczeństwa nie powiodła się. Zdarza się to, gdy proces trwa dłużej niż 10 minut albo gdy nie został rozpoczęty w tej przeglądarce. Rozpocznij go ponownie.",
+      "unknown": "Połączenie nie powiodło się ({{code}})."
+    },
+    "connection": {
+      "title": "Połączenie",
+      "status": {
+        "notConnected": "Nie połączono",
+        "unreadable": "Nieodczytywalne dane logowania",
+        "connected": "Połączono"
+      },
+      "account": "Konto",
+      "accountNotStored": "nie zapisano - to połączenie powstało przed wprowadzeniem uprawnienia `allegro:api:profile:read`. Połącz ponownie, aby je zapisać.",
+      "connectedAt": "Połączono",
+      "tokenExpires": "Token wygasa",
+      "expiredSuffix": " (wygasł, zostanie odświeżony przy następnym wywołaniu)",
+      "grantedScopes": "Przyznane uprawnienia",
+      "scopeNotReported": "nie zgłoszone przez Allegro",
+      "notConnectedPrefix": "Żadne konto Allegro nie jest połączone. Połączenie otwiera ekran zgody Allegro i prosi o:",
+      "credentialsUnreadableAlert": "Zapisanych tokenów nie da się odszyfrować obecnym `encryptionKey`, więc każde wywołanie Allegro zakończy się błędem. Zdarza się to, gdy klucz zostanie zmieniony lub wpisany błędnie po połączeniu konta. Przywróć pierwotny klucz albo połącz konto ponownie, aby zapisać tokeny pod obecnym kluczem.",
+      "refreshTokenMissingAlert": "Zapisane połączenie nie ma tokenu odświeżającego, więc przestaje działać, gdy tylko token dostępu wygaśnie. Połącz ponownie.",
+      "writeScopeMissingPrefix": "Zapisany token nie może zapisywać ofert: Allegro odpowiedziało błędem 403 na polecenie zmiany ceny lub ilości. Żadna ponowna próba tego nie naprawi - połącz konto Allegro ponownie tak, aby przyznanie obejmowało",
+      "writeScopeMissingSuffix": "Do tego czasu pętle zapisu bezpiecznie nic nie robią i ten baner pozostaje widoczny.",
+      "reconnectButton": "Połącz ponownie",
+      "connectButton": "Połącz Allegro",
+      "disconnectButton": "Rozłącz"
+    },
+    "writers": {
+      "title": "Zapisy",
+      "description": "Każdy z nich to jedna rzecz, którą ta wtyczka wysyła do Allegro, i każdy ma własny przełącznik. Są rozdzielone, bo wyłączenie cen nie oznacza, że nic nie jest zapisywane. Zmiana przełącznika działa od najbliższego uruchomienia; nic nie trzeba restartować. Świeża instalacja startuje z wszystkimi zapisami wyłączonymi, więc najpierw połącz konto i sprawdź mapowanie ofert, a dopiero potem włączaj kolejne zapisy pojedynczo.",
+      "forcedOffBadge": "wymuszone wyłączenie",
+      "armedBadge": "włączone",
+      "disarmedBadge": "wyłączone",
+      "forcedOffText": "Ten zapis jest wyłączony dla całego wdrożenia, więc pozostaje wyłączony niezależnie od ustawienia tego przełącznika.",
+      "toastArmed": "{{label}} włączone. Zacznie działać od następnego uruchomienia.",
+      "toastDisarmed": "{{label}} wyłączone. Zacznie działać od następnego uruchomienia.",
+      "toastChangeFailed": "Nie udało się zmienić: {{label}}."
+    },
+    "pricing": {
+      "title": "Ceny i konfiguracja synchronizacji",
+      "description": "Zacznij od trybu cenowego: to on decyduje, czy ta wtyczka w ogóle zajmuje się cenami i które z poniższych ustawień mają znaczenie. Wszystko tutaj zapisuje się w tym sklepie i zaczyna działać od najbliższego uruchomienia synchronizacji, bez potrzeby restartu. Puste pole korzysta z wartości domyślnej, z jaką wtyczkę zainstalowano - dla większości z nich jest to \"nie ustawiono\", a ustawienie, które nie jest ustawione, jest wymieniane w ostrzeżeniach powyżej za każdym razem, gdy to powstrzymuje uruchomienie przed jakimkolwiek działaniem. Ustawienie może też być zablokowane dla całego wdrożenia - wtedy jest tu pokazane jako zablokowane, wraz z powodem, a edycja nie przyniosłaby żadnego skutku.",
+      "automationRuleWarning": "Ten sklep wycenia oferty regułami automatyzacji Allegro, ale dwie odrębne nazwy reguł nie są jeszcze ustawione, więc nic nie może zostać zapisane: nie ma reguły do podpięcia, a ta wtyczka żadnej nie wymyśla. Uzupełnij obie nazwy poniżej. Każda musi już istnieć na Twoim koncie Allegro, dokładnie pod tą nazwą.",
+      "fixedPriceInfo": "Ten sklep wysyła do oferty Allegro własną cenę wariantu z Medusy. Cena poniżej progu rentowności lub powyżej sufitu SRP jest odrzucana zamiast wysłana, a oferta, która wciąż ma podpiętą regułę automatyzacji Allegro, ma tę regułę najpierw usuniętą - inaczej Allegro przeliczyłoby cenę na nowo tuż po jej wysłaniu.",
+      "monitorInfo": "Ten sklep nie wysyła do Allegro żadnych cen. Każde uruchomienie i tak wylicza próg rentowności oraz sufit SRP dla każdej oferty i zapisuje, ile ofert wykracza poza te granice - to raport, który warto przeczytać przed wyborem trybu, który zapisuje ceny.",
+      "missingSrpWarning": "Nie ustawiono żadnego źródła SRP, więc każda oferta jest pomijana z powodem `missing-srp`. SRP to sufit, powyżej którego żadna oferta nie może być wyceniona, i celowo nie ma tu żadnego zastępczego źródła w postaci obecnej ceny oferty - to pozwoliłoby cenie z jednego uruchomienia stać się sufitem dla kolejnego i bez końca zjeżdżać w dół.",
+      "leaveBlankPlaceholder": "Zostaw puste, aby użyć zainstalowanej wartości domyślnej",
+      "choosePlaceholder": "Wybierz jedną",
+      "lockedBadge": "zablokowane",
+      "wiringCriticalWarning": "Zmiana tego ustawienia zmienia zakres produktów Medusy, które ta wtyczka dopasowuje do ofert Allegro. Błędna wartość tutaj po cichu psuje mapowanie, zamiast tylko nieznacznie rozstroić jedno uruchomienie.",
+      "lockedTextPrefix": "Ustawienie jest zablokowane na wartości",
+      "lockedTextSuffix": "dla całego wdrożenia, więc edycja tutaj nie przyniosłaby żadnego skutku.",
+      "mustBePositiveInteger": "{{label}} musi być dodatnią liczbą całkowitą.",
+      "toastCleared": "{{label}} wyczyszczone. Wraca do wartości domyślnej, z jaką zainstalowano wtyczkę.",
+      "toastSaved": "Zapisano: {{label}}.",
+      "toastSaveFailed": "Nie udało się zapisać: {{label}}."
+    },
+    "catalogue": {
+      "title": "Katalog",
+      "description": "Zestawienie mapowania ofert. Wiarygodny widok dla pojedynczego produktu znajduje się na jego własnej stronie szczegółów; liczniki tutaj odpowiadają tylko na pytanie \"czy coś jest teraz nie tak?\" i prowadzą do widoku ofert przefiltrowanego do wierszy wymagających uwagi."
+    },
+    "offersOrders": {
+      "title": "Oferty i zamówienia",
+      "description": "Tabela ofert obejmująca cały katalog (filtry konfliktów i dryfu, zbiorcze ponowne wykrywanie, ręczna wysyłka) oraz kwarantanna, naprawa i okno importu zamówień to osobne strony w Ustawieniach, ponieważ są to zadania operatora, a nie pojedyncze ustawienie.",
+      "openOffers": "Otwórz oferty Allegro",
+      "openOrders": "Otwórz zamówienia Allegro"
+    },
+    "categoryRatesSection": {
+      "title": "Stawki kategorii",
+      "description": "Prowizje sprzedażowe dla poszczególnych kategorii, które wyznaczają każdy próg cenowy, są konfiguracją i mają własną stronę w Ustawieniach.",
+      "openLink": "Otwórz stawki kategorii"
+    },
+    "syncHealth": {
+      "title": "Stan synchronizacji",
+      "description": "Jeden wiersz na pętlę. Wiersz, który nigdy nie został uruchomiony, nie ma jeszcze żadnego stanu; pętla, która się uruchomiła i nic nie zrobiła, wciąż zapisuje swoje liczniki - dzięki temu \"nic do zrobienia\" da się odróżnić od \"cicho zepsute\".",
+      "table": {
+        "provider": "Dostawca",
+        "status": "Stan",
+        "lastRun": "Ostatnie uruchomienie",
+        "counters": "Liczniki",
+        "lastError": "Ostatni błąd"
+      },
+      "writeScopeMissingCell": "Brak uprawnienia zapisu: połącz konto ponownie z dostępem do zapisu ofert.",
+      "empty": "Nie zapisano żadnego stanu synchronizacji. Każda pętla tworzy swój wiersz przy pierwszym uruchomieniu.",
+      "noRunRecorded": "brak zapisanego uruchomienia",
+      "noCountersRecorded": "brak zapisanych liczników",
+      "providerDescription": {
+        "offers": "Dopasowuje SKU do ofert, sprawdza stan promocji, wykrywa kategorie. Tylko do odczytu.",
+        "orders": "Przenosi zdarzenia z dziennika zamówień do zamówień Medusy.",
+        "price-automation": "Obserwuje regułę cenową każdej oferty i jej dryf. Tylko do odczytu.",
+        "prices": "Stosuje tryb cenowy tego sklepu do każdej połączonej oferty, w granicach progu rentowności i SRP.",
+        "stock": "Wysyła dostępną ilość z Medusy do Allegro."
+      }
+    }
+  },
+  "categoryRates": {
+    "title": "Stawki kategorii Allegro",
+    "description": "Prowizja sprzedażowa dla każdej kategorii, w procentach, wpisana z opublikowanego cennika Allegro. Stawki te wyznaczają próg rentowności ceny, więc oferta w kategorii z pustą stawką jest pomijana przez synchronizację cen, zamiast wycenić ją po koszcie.",
+    "errors": {
+      "loadFailed": "Nie udało się wczytać stawek kategorii.",
+      "saveFailed": "Nie udało się zapisać stawek."
+    },
+    "toastSaved": "Zapisano stawki dla {{categoryId}}.",
+    "unsetWarning_one": "{{count}} kategoria ma nieustawioną co najmniej jedną stawkę. Synchronizacja cen pomija te oferty z powodem `missing-break-even` - pusta stawka celowo nie jest odczytywana jako 0%, bo pozwoliłoby to na wycenę poniżej kosztu jako dopuszczalny próg.",
+    "unsetWarning_few": "{{count}} kategorie mają nieustawioną co najmniej jedną stawkę. Synchronizacja cen pomija te oferty z powodem `missing-break-even` - pusta stawka celowo nie jest odczytywana jako 0%, bo pozwoliłoby to na wycenę poniżej kosztu jako dopuszczalny próg.",
+    "unsetWarning_many": "{{count}} kategorii ma nieustawioną co najmniej jedną stawkę. Synchronizacja cen pomija te oferty z powodem `missing-break-even` - pusta stawka celowo nie jest odczytywana jako 0%, bo pozwoliłoby to na wycenę poniżej kosztu jako dopuszczalny próg.",
+    "unsetWarning_other": "{{count}} kategorii ma nieustawioną co najmniej jedną stawkę. Synchronizacja cen pomija te oferty z powodem `missing-break-even` - pusta stawka celowo nie jest odczytywana jako 0%, bo pozwoliłoby to na wycenę poniżej kosztu jako dopuszczalny próg.",
+    "table": {
+      "category": "Kategoria",
+      "standard": "Standardowa %",
+      "promoted": "Promowana %"
+    },
+    "notSetPlaceholder": "nie ustawiono",
+    "empty": "Brak kategorii. Wykrywanie ofert tworzy wiersz dla każdej kategorii, do której odwołują się aktywne oferty sprzedawcy, z pustymi stawkami do uzupełnienia."
+  },
+  "offers": {
+    "title": "Oferty Allegro",
+    "description": "Mapowanie SKU na oferty. Wiersz z konfliktem jest wyłączony z każdej ścieżki synchronizacji, dopóki konflikt nie zostanie rozwiązany.",
+    "errors": {
+      "loadFailed": "Nie udało się wczytać mapowania ofert.",
+      "runFailed": "Nie udało się uruchomić: {{provider}}.",
+      "pushFailed": "Nie udało się wysłać tej oferty."
+    },
+    "actions": {
+      "rediscover": "Wykryj oferty ponownie",
+      "reobserve": "Obserwuj ceny ponownie",
+      "syncPrices": "Synchronizuj ceny teraz",
+      "syncStock": "Synchronizuj stan magazynowy teraz",
+      "push": "Wyślij"
+    },
+    "toastSkipped": "{{provider}}: {{reason}}",
+    "toastFindingsTitle": "{{provider}}: uruchomienie zakończone z uwagami",
+    "toastSuccess": "{{provider}}: uruchomienie zakończone bez zastrzeżeń.",
+    "filterPlaceholder": "Filtr",
+    "filters": {
+      "all": "Wszystkie mapowania",
+      "conflict": "Tylko konflikty",
+      "drift": "Tylko dryf cenowy"
+    },
+    "searchPlaceholder": "Szukaj SKU",
+    "notLinked": "nie połączono",
+    "mappingCount_one": "{{count}} mapowanie",
+    "mappingCount_few": "{{count}} mapowania",
+    "mappingCount_many": "{{count}} mapowań",
+    "mappingCount_other": "{{count}} mapowania",
+    "table": {
+      "sku": "SKU",
+      "offer": "Oferta",
+      "status": "Stan",
+      "pricing": "Cena",
+      "promoted": "Promowana",
+      "priceSync": "Synchronizacja cen"
+    },
+    "empty": "Brak pasujących mapowań. Wykrywanie ofert tworzy je na podstawie aktywnych ofert sprzedawcy, dopasowując sygnaturę każdej oferty do SKU wariantu.",
+    "paginationRange": "{{from}}-{{to}} z {{count}}",
+    "pushHistory": {
+      "description": "Zapisy tylko dopisywane, jedyny ślad przedziału cen, jaki kiedykolwiek wysłano - Allegro nie udostępnia granic podpiętej reguły. Wiersze `observed` to stan zaobserwowany przez monitor, a nie przez niego zapisany.",
+      "ruleChange": "{{from}} → {{to}}"
+    }
+  },
+  "orders": {
+    "title": "Zamówienia Allegro",
+    "description": "Pobrane z dziennika zdarzeń zamówień Allegro. Kursor przesuwa się tylko po zamówieniach, które się powiodły, więc przejściowy błąd powtarza próbę zamiast gubić zamówienie.",
+    "errors": {
+      "loadFailed": "Nie udało się wczytać zamówień Allegro.",
+      "syncFailed": "Nie udało się opróżnić dziennika.",
+      "repairFailed": "Nie udało się naprawić tego zamówienia.",
+      "importFailed": "Import się nie powiódł."
+    },
+    "actions": {
+      "syncNow": "Synchronizuj teraz",
+      "importWindow": "Okno importu",
+      "repair": "Napraw"
+    },
+    "toastFindingsTitle": "Opróżnianie zakończone z uwagami",
+    "toastSuccess": "Dziennik zdarzeń opróżniony bez zastrzeżeń.",
+    "toastRepaired": "Naprawiono {{id}}. Opróżnianie samo wznowi jego obsługę.",
+    "toastRepairedWithOrder": "Naprawiono {{id}} i utworzono jego zamówienie w Medusie. Opróżnianie samo wznowi jego obsługę.",
+    "repairFailedDefault": "Naprawa się nie powiodła.",
+    "toastImported": "Zaimportowano {{imported}} z {{fetched}} zamówień.",
+    "drainHealth": {
+      "title": "Stan opróżniania",
+      "eventCursor": "Kursor zdarzeń",
+      "cursorNotBootstrapped": "nie zainicjowano - pierwsze uruchomienie zapisze najnowszy identyfikator zdarzenia",
+      "ordersTracked": "Śledzone zamówienia"
+    },
+    "quarantine": {
+      "title": "W kwarantannie ({{count}})",
+      "description": "Te formularze zamówień wielokrotnie zakończyły się błędem, więc kursor zdarzeń przeszedł dalej, aby nie blokować reszty synchronizacji. Nie są ponawiane automatycznie. Napraw każdy z nich po usunięciu przyczyny błędu - powodzenie oddaje go z powrotem opróżnianiu.",
+      "table": {
+        "checkoutForm": "Formularz zamówienia",
+        "failingSince": "Błąd od",
+        "lastError": "Ostatni błąd"
+      },
+      "empty": "Brak pozycji w kwarantannie."
+    },
+    "recent": {
+      "title": "Ostatnie zamówienia",
+      "table": {
+        "checkoutForm": "Formularz zamówienia",
+        "medusaOrder": "Zamówienie Medusa",
+        "allegro": "Allegro",
+        "derived": "Status zamówienia",
+        "total": "Suma",
+        "lastEvent": "Ostatnie zdarzenie"
+      },
+      "notCreated": "nie utworzono",
+      "empty": "Nie zapisano jeszcze żadnych zamówień Allegro. Opróżnianie zaczyna śledzenie od najnowszego zdarzenia przy pierwszym uruchomieniu; użyj okna importu, aby wczytać historię.",
+      "unmappedLine_one": "{{count}} niedopasowana pozycja",
+      "unmappedLine_few": "{{count}} niedopasowane pozycje",
+      "unmappedLine_many": "{{count}} niedopasowanych pozycji",
+      "unmappedLine_other": "{{count}} niedopasowanej pozycji"
+    },
+    "importModal": {
+      "title": "Zaimportuj okno zamówień",
+      "description": "Przegląda `GET /order/checkout-forms` według `updatedAt`. To jedyny sposób na dotarcie do zamówienia, którego dziennik zdarzeń nigdy nie nazwał - Allegro przechowuje zdarzenia przez około 60 dni, a świeża instalacja zaczyna kursor od \"teraz\". Import nigdy nie przesuwa kursora zdarzeń, bo tylko wypełnia lukę za nim.",
+      "updatedSince": "Zaktualizowano od",
+      "updatedUntil": "Zaktualizowano do (opcjonalnie)",
+      "hint": "Jedno uruchomienie obejmuje co najwyżej 3000 zamówień i przez cały czas trzyma blokadę synchronizacji zamówień, więc synchronizacja co minutę nie zaimportuje w tym czasie niczego nowego. Przy większym imporcie uruchom kilka okien po kolei.",
+      "resultSummary": "Pobrano {{fetched}}, zaimportowano {{imported}}, utworzono {{created}}, nie powiodło się {{failed}}.",
+      "importButton": "Importuj"
+    }
+  },
+  "productWidget": {
+    "title": "Allegro",
+    "description": "Oferta dopasowana do każdego SKU wariantu, jej stan synchronizacji oraz wyłączenie synchronizacji cen dla pojedynczej oferty.",
+    "errors": {
+      "variantsFailed": "Nie udało się wczytać wariantów tego produktu.",
+      "offersFailed": "Nie udało się wczytać ofert Allegro."
+    },
+    "notOnAllegro": "Brak na Allegro. Żadna oferta nie pasuje do SKU tego produktu ({{skus}}). Wykrywanie ofert łączy ofertę, której sygnatura (identyfikator zewnętrzny) jest równa SKU wariantu.",
+    "table": {
+      "variantSku": "Wariant / SKU",
+      "offer": "Oferta",
+      "status": "Stan",
+      "pricing": "Cena",
+      "promoted": "Promowana",
+      "priceSync": "Synchronizacja cen",
+      "lastSync": "Ostatnia synchronizacja"
+    },
+    "notLinked": "nie połączono",
+    "linked": "połączono",
+    "priceLabel": "cena {{date}}",
+    "stockLabel": "stan {{date}}",
+    "pushHistory": {
+      "description": "Zapisy tylko dopisywane, jedyny ślad przedziału cen, jaki kiedykolwiek wysłano. Wiersze `observed` to stan zaobserwowany przez monitor, a nie przez niego zapisany."
+    }
+  },
+  "productListSummary": {
+    "title": "Allegro"
+  },
+  "variantColumns": {
+    "loadingCell": "...",
+    "priceError": "błąd",
+    "statusError": "błąd",
+    "notListed": "brak na Allegro",
+    "priceColumnHeader": "Allegro",
+    "statusColumnHeader": "Stan Allegro"
+  }
+}

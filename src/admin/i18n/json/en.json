@@ -1,0 +1,309 @@
+{
+  "common": {
+    "save": "Save",
+    "loading": "Loading...",
+    "history": "History",
+    "previous": "Previous",
+    "next": "Next",
+    "close": "Close",
+    "lastSynced": "Last synced",
+    "driftBadge": "drift",
+    "promoted": {
+      "unresolved": "unresolved",
+      "yes": "yes",
+      "no": "no"
+    },
+    "overrideLock": {
+      "prefix": "It is being held by the",
+      "suffix": "environment variable on this deployment; clearing that variable hands control back to this screen."
+    },
+    "counts": {
+      "linked": "{{count}} linked",
+      "unlinked": "{{count}} unlinked",
+      "drifting": "{{count}} drifting",
+      "conflict_one": "{{count}} conflict",
+      "conflict_other": "{{count}} conflicts"
+    },
+    "errors": {
+      "toggleOptOutFailed": "Could not change the opt-out.",
+      "pushHistoryFailed": "Could not load the push history."
+    },
+    "pushHistory": {
+      "title": "Push history",
+      "table": {
+        "when": "When",
+        "result": "Result",
+        "rule": "Rule",
+        "bounds": "Bounds",
+        "by": "By"
+      },
+      "boundsRange": "{{floor}} to {{ceiling}}",
+      "empty": "Nothing recorded yet. Until a successful push carries bounds, price sync treats this offer's range as unknown and re-asserts it."
+    }
+  },
+  "settings": {
+    "title": "Allegro",
+    "subtitle": "Connect the Allegro seller account this store sells through.",
+    "justConnected": "Allegro account connected.",
+    "errors": {
+      "loadFailed": "Failed to load Allegro status.",
+      "connectFailed": "Could not start the connection.",
+      "disconnectFailed": "Could not disconnect."
+    },
+    "callbackErrors": {
+      "denied": "The authorization was declined on Allegro's consent screen.",
+      "exchangeFailed": "Allegro rejected the authorization code. Check the client id, secret, and that the redirect URI registered for the app matches this one exactly. The server log has the reason.",
+      "missingCode": "Allegro returned no authorization code. Start the connection again.",
+      "persistFailed": "The connection succeeded but the tokens could not be stored. Check `encryptionKey` and the server log.",
+      "stateMismatch": "The security check failed. This happens when the flow takes over 10 minutes, or when it was not started from this browser. Start it again.",
+      "unknown": "The connection failed ({{code}})."
+    },
+    "connection": {
+      "title": "Connection",
+      "status": {
+        "notConnected": "Not connected",
+        "unreadable": "Unreadable credentials",
+        "connected": "Connected"
+      },
+      "account": "Account",
+      "accountNotStored": "not stored - the grant predates the `allegro:api:profile:read` scope. Reconnect to record it.",
+      "connectedAt": "Connected at",
+      "tokenExpires": "Token expires",
+      "expiredSuffix": " (expired, refreshed on next call)",
+      "grantedScopes": "Granted scopes",
+      "scopeNotReported": "not reported by Allegro",
+      "notConnectedPrefix": "No Allegro account is connected. Connecting opens Allegro's consent screen and requests:",
+      "credentialsUnreadableAlert": "The stored tokens cannot be decrypted with the current `encryptionKey`, so every Allegro call will fail. This happens when the key is rotated or mistyped after the account was connected. Restore the original key, or reconnect to store the tokens under the current one.",
+      "refreshTokenMissingAlert": "The stored connection has no refresh token, so it stops working once the access token expires. Reconnect.",
+      "writeScopeMissingPrefix": "The stored token cannot write offers: Allegro answered 403 on a price or quantity command. No retry fixes this - reconnect Allegro so the grant includes",
+      "writeScopeMissingSuffix": "Until then the write loops no-op safely and this banner stays up.",
+      "reconnectButton": "Reconnect",
+      "connectButton": "Connect Allegro",
+      "disconnectButton": "Disconnect"
+    },
+    "writers": {
+      "title": "Writers",
+      "description": "Each of these is one thing this plugin sends to Allegro, and each has its own switch. They are separate because \"prices are off\" does not mean nothing is written. A flip takes effect on the next run; nothing needs restarting. A fresh install starts with every writer off, so connect your account and check your offer mapping first, then turn on one writer at a time.",
+      "forcedOffBadge": "forced off",
+      "armedBadge": "armed",
+      "disarmedBadge": "disarmed",
+      "forcedOffText": "This writer is switched off for the whole deployment, so it stays off however this switch is set.",
+      "toastArmed": "{{label}} armed. It takes effect on the next run.",
+      "toastDisarmed": "{{label}} disarmed. It takes effect on the next run.",
+      "toastChangeFailed": "Could not change {{label}}."
+    },
+    "pricing": {
+      "title": "Pricing and sync configuration",
+      "description": "Start with the pricing mode: it decides what this plugin does with prices at all, and which of the settings under it matter. Everything here is saved in this store and takes effect on the next sync run, with nothing to restart. A field left blank uses the default the plugin was installed with, which for most of them is \"not set\" - and a setting that is not set is named in the warnings above whenever that stops a run from doing anything. A setting can also be fixed for the whole deployment, in which case it is shown locked here with the reason, and an edit would not take effect.",
+      "automationRuleWarning": "This store prices with Allegro automation rules, but two distinct rule names are not set yet, so nothing can be written: there is no rule to attach and this plugin never invents one. Fill both in below. Each must already exist on your Allegro account, under exactly that name.",
+      "fixedPriceInfo": "This store pushes each variant's own Medusa price to its Allegro offer. A price below the break-even floor or above the SRP ceiling is refused rather than pushed, and an offer that still carries an Allegro automation rule has that rule removed first, because otherwise Allegro would recalculate straight over the price.",
+      "monitorInfo": "This store writes no prices to Allegro at all. Each run still works out every offer's break-even floor and SRP ceiling and records how many offers sit outside them, which is the report to read before choosing a mode that writes.",
+      "missingSrpWarning": "No source for the SRP is set, so every offer is skipped with the reason `missing-srp`. The SRP is the ceiling no offer may be priced above, and there is deliberately no fallback to the price an offer currently has - that would let each run's price become the next run's ceiling and walk the price down for ever.",
+      "leaveBlankPlaceholder": "Leave blank to use the installed default",
+      "choosePlaceholder": "Choose one",
+      "lockedBadge": "locked",
+      "wiringCriticalWarning": "Changing this re-scopes which Medusa products this plugin matches against Allegro offers. A wrong value here breaks the mapping silently rather than merely mis-tuning a run.",
+      "lockedTextPrefix": "This is fixed at",
+      "lockedTextSuffix": "for the whole deployment, so an edit here would not take effect.",
+      "mustBePositiveInteger": "{{label}} must be a positive integer.",
+      "toastCleared": "{{label}} cleared. It falls back to the default this plugin was installed with.",
+      "toastSaved": "Saved {{label}}.",
+      "toastSaveFailed": "Could not save {{label}}."
+    },
+    "catalogue": {
+      "title": "Catalogue",
+      "description": "A roll-up of the offer mapping. The authoritative per-product view is on each product's own detail page; the counts here just answer \"is anything wrong right now?\" and link into the offers view filtered to the rows that need attention."
+    },
+    "offersOrders": {
+      "title": "Offers and orders",
+      "description": "The cross-catalogue offer table (conflict/drift filters, bulk rediscovery, manual push) and the orders quarantine/repair and import window are their own Settings pages, since they are operator task-flows rather than a single setting.",
+      "openOffers": "Open Allegro offers",
+      "openOrders": "Open Allegro orders"
+    },
+    "categoryRatesSection": {
+      "title": "Category rates",
+      "description": "The per-category sale commissions that set every price floor are configuration and live on their own Settings page.",
+      "openLink": "Open category rates"
+    },
+    "syncHealth": {
+      "title": "Sync health",
+      "description": "One row per loop. A row that has never run has no state yet; a loop that ran and did nothing still records its counters, which is how \"nothing to do\" stays distinguishable from \"quietly broken\".",
+      "table": {
+        "provider": "Provider",
+        "status": "Status",
+        "lastRun": "Last run",
+        "counters": "Counters",
+        "lastError": "Last error"
+      },
+      "writeScopeMissingCell": "Write scope missing: reconnect with offer write access.",
+      "empty": "No sync state recorded. Each loop creates its row on its first run.",
+      "noRunRecorded": "no run recorded",
+      "noCountersRecorded": "no counters recorded",
+      "providerDescription": {
+        "offers": "Maps SKUs to offers, sweeps promotion state, discovers categories. Read-only.",
+        "orders": "Drains the order event journal into Medusa orders.",
+        "price-automation": "Observes each offer's pricing rule and its drift. Read-only.",
+        "prices": "Applies this store's pricing mode to every linked offer, inside the break-even and SRP bounds.",
+        "stock": "Pushes Medusa available quantity to Allegro."
+      }
+    }
+  },
+  "categoryRates": {
+    "title": "Allegro category rates",
+    "description": "Sale commission per category, as percentages, entered from Allegro's published fee table. These set the break-even price floor, so an offer in a category with a blank rate is skipped by price sync rather than floored at cost.",
+    "errors": {
+      "loadFailed": "Could not load the category rates.",
+      "saveFailed": "Could not save the rates."
+    },
+    "toastSaved": "Saved rates for {{categoryId}}.",
+    "unsetWarning_one": "{{count}} category has at least one rate unset. Price sync skips those offers with reason `missing-break-even` - a blank rate is deliberately not read as 0%, because that would turn a loss-making price into an acceptable floor.",
+    "unsetWarning_other": "{{count}} categories have at least one rate unset. Price sync skips those offers with reason `missing-break-even` - a blank rate is deliberately not read as 0%, because that would turn a loss-making price into an acceptable floor.",
+    "table": {
+      "category": "Category",
+      "standard": "Standard %",
+      "promoted": "Promoted %"
+    },
+    "notSetPlaceholder": "not set",
+    "empty": "No categories yet. Offer discovery creates a row for every category the seller's live offers reference, with blank rates for you to fill in."
+  },
+  "offers": {
+    "title": "Allegro offers",
+    "description": "The SKU-to-offer mapping. A row with a conflict is held out of every sync path until it is resolved.",
+    "errors": {
+      "loadFailed": "Could not load the offer mappings.",
+      "runFailed": "Could not run {{provider}}.",
+      "pushFailed": "Could not push this offer."
+    },
+    "actions": {
+      "rediscover": "Rediscover offers",
+      "reobserve": "Re-observe pricing",
+      "syncPrices": "Sync prices now",
+      "syncStock": "Sync stock now",
+      "push": "Push"
+    },
+    "toastSkipped": "{{provider}}: {{reason}}",
+    "toastFindingsTitle": "{{provider}} finished with findings",
+    "toastSuccess": "{{provider}} finished cleanly.",
+    "filterPlaceholder": "Filter",
+    "filters": {
+      "all": "All mappings",
+      "conflict": "Conflicts only",
+      "drift": "Price drift only"
+    },
+    "searchPlaceholder": "Search SKU",
+    "notLinked": "not linked",
+    "mappingCount_one": "{{count}} mapping",
+    "mappingCount_other": "{{count}} mappings",
+    "table": {
+      "sku": "SKU",
+      "offer": "Offer",
+      "status": "Status",
+      "pricing": "Pricing",
+      "promoted": "Promoted",
+      "priceSync": "Price sync"
+    },
+    "empty": "No mappings match. Offer discovery creates them from the seller's live offers, matching each offer's sygnatura against a variant SKU.",
+    "paginationRange": "{{from}} to {{to}} of {{count}}",
+    "pushHistory": {
+      "description": "Append-only, and the only record of the price range that was pushed - Allegro does not expose an attached rule's bounds. `observed` rows are the monitor recording a state it did not write.",
+      "ruleChange": "{{from}} to {{to}}"
+    }
+  },
+  "orders": {
+    "title": "Allegro orders",
+    "description": "Drained from Allegro's order event journal. The cursor advances only over orders that landed, so a transient failure replays rather than being lost.",
+    "errors": {
+      "loadFailed": "Could not load the Allegro orders.",
+      "syncFailed": "Could not drain the journal.",
+      "repairFailed": "Could not repair this order.",
+      "importFailed": "The import failed."
+    },
+    "actions": {
+      "syncNow": "Sync now",
+      "importWindow": "Import window",
+      "repair": "Repair"
+    },
+    "toastFindingsTitle": "The drain finished with findings",
+    "toastSuccess": "The event journal was drained cleanly.",
+    "toastRepaired": "Repaired {{id}}. The drain resumes handling it automatically.",
+    "toastRepairedWithOrder": "Repaired {{id}} and created its Medusa order. The drain resumes handling it automatically.",
+    "repairFailedDefault": "The repair did not succeed.",
+    "toastImported": "Imported {{imported}} of {{fetched}} order(s).",
+    "drainHealth": {
+      "title": "Drain health",
+      "eventCursor": "Event cursor",
+      "cursorNotBootstrapped": "not bootstrapped - the first run records the newest event id",
+      "ordersTracked": "Orders tracked"
+    },
+    "quarantine": {
+      "title": "Quarantined ({{count}})",
+      "description": "These checkout forms failed repeatedly, so the event cursor was allowed past them to keep the rest of the sync moving. They are NOT retried automatically. Repair each one once the underlying cause is fixed; a success hands it back to the drain.",
+      "table": {
+        "checkoutForm": "Checkout form",
+        "failingSince": "Failing since",
+        "lastError": "Last error"
+      },
+      "empty": "Nothing quarantined."
+    },
+    "recent": {
+      "title": "Recent orders",
+      "table": {
+        "checkoutForm": "Checkout form",
+        "medusaOrder": "Medusa order",
+        "allegro": "Allegro",
+        "derived": "Order status",
+        "total": "Total",
+        "lastEvent": "Last event"
+      },
+      "notCreated": "not created",
+      "empty": "No Allegro orders recorded yet. The drain starts tracking from the newest event at its first run; use the import window to bring in history.",
+      "unmappedLine_one": "{{count}} unmapped line",
+      "unmappedLine_other": "{{count}} unmapped lines"
+    },
+    "importModal": {
+      "title": "Import an order window",
+      "description": "Pages `GET /order/checkout-forms` by `updatedAt`. This is the only route to an order the event journal never named - Allegro retains roughly 60 days of events, and a fresh installation starts its cursor at \"now\". It never moves the event cursor, because an import fills a gap behind it.",
+      "updatedSince": "Updated since",
+      "updatedUntil": "Updated until (optional)",
+      "hint": "One run covers at most 3,000 orders and holds the orders sync claim while it works, so the per-minute drain cannot import anything new in the meantime. For a larger backfill, run several windows.",
+      "resultSummary": "Fetched {{fetched}}, imported {{imported}}, created {{created}}, failed {{failed}}.",
+      "importButton": "Import"
+    }
+  },
+  "productWidget": {
+    "title": "Allegro",
+    "description": "The offer mapped to each variant SKU, its sync state, and the per-offer price sync opt-out.",
+    "errors": {
+      "variantsFailed": "Could not load this product's variants.",
+      "offersFailed": "Could not load the Allegro offers."
+    },
+    "notOnAllegro": "Not on Allegro. No offer maps to this product's SKUs ({{skus}}). Offer discovery links an offer whose sygnatura (external id) equals a variant SKU.",
+    "table": {
+      "variantSku": "Variant / SKU",
+      "offer": "Offer",
+      "status": "Status",
+      "pricing": "Pricing",
+      "promoted": "Promoted",
+      "priceSync": "Price sync",
+      "lastSync": "Last sync"
+    },
+    "notLinked": "not linked",
+    "linked": "linked",
+    "priceLabel": "price {{date}}",
+    "stockLabel": "stock {{date}}",
+    "pushHistory": {
+      "description": "Append-only, and the only record of the price range that was pushed. `observed` rows are the monitor recording a state it did not write."
+    }
+  },
+  "productListSummary": {
+    "title": "Allegro"
+  },
+  "variantColumns": {
+    "loadingCell": "...",
+    "priceError": "error",
+    "statusError": "error",
+    "notListed": "not listed",
+    "priceColumnHeader": "Allegro",
+    "statusColumnHeader": "Allegro status"
+  }
+}

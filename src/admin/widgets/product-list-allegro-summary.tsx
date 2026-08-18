@@ -1,6 +1,7 @@
 import { defineWidgetConfig } from "@medusajs/admin-sdk";
 import { Container, StatusBadge, Text } from "@medusajs/ui";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { sdk } from "../lib/sdk";
 import type { AllegroSummary, SummaryResponse } from "../lib/types";
 
@@ -27,6 +28,7 @@ import type { AllegroSummary, SummaryResponse } from "../lib/types";
  * use Allegro never sees it.
  */
 const ProductListAllegroSummaryWidget = () => {
+  const { t } = useTranslation("allegro");
   const [summary, setSummary] = useState<AllegroSummary | undefined>();
 
   useEffect(() => {
@@ -54,20 +56,22 @@ const ProductListAllegroSummaryWidget = () => {
   return (
     <Container className="mb-2 flex flex-wrap items-center gap-x-6 gap-y-2 px-6 py-3">
       <Text size="small" weight="plus">
-        Allegro
+        {t("productListSummary.title")}
       </Text>
       <a className="text-ui-fg-interactive txt-compact-small" href="/app/settings/allegro/offers">
-        {summary.linked} linked
+        {t("common.counts.linked", { count: summary.linked })}
       </a>
-      <Text className="text-ui-fg-subtle txt-compact-small">{summary.unlinked} unlinked</Text>
+      <Text className="text-ui-fg-subtle txt-compact-small">
+        {t("common.counts.unlinked", { count: summary.unlinked })}
+      </Text>
       <a className="flex items-center gap-x-1" href="/app/settings/allegro/offers?filter=drift">
         <StatusBadge color={summary.drifting > 0 ? "orange" : "grey"}>
-          {summary.drifting} drifting
+          {t("common.counts.drifting", { count: summary.drifting })}
         </StatusBadge>
       </a>
       <a className="flex items-center gap-x-1" href="/app/settings/allegro/offers?filter=conflict">
         <StatusBadge color={summary.conflicts > 0 ? "red" : "grey"}>
-          {summary.conflicts} conflict{summary.conflicts === 1 ? "" : "s"}
+          {t("common.counts.conflict", { count: summary.conflicts })}
         </StatusBadge>
       </a>
     </Container>
