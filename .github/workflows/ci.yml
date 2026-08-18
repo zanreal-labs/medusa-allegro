@@ -40,6 +40,15 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.ADMIN_KIT_READ_TOKEN }}@github.com/".insteadOf "ssh://git@github.com/"
           git config --global url."https://x-access-token:${{ secrets.ADMIN_KIT_READ_TOKEN }}@github.com/".insteadOf "git@github.com:"
 
+      - name: DEBUG git config state
+        run: |
+          echo "HOME=$HOME"
+          git config --global --list --show-origin || true
+          echo "--- env GIT_* ---"
+          env | grep -i '^GIT_' || true
+          echo "--- direct ls-remote trace ---"
+          GIT_TRACE=1 git ls-remote ssh://git@github.com/zanreal-labs/medusa-admin-kit.git 2>&1 | head -20 || true
+
       - name: Install
         run: npm ci
 
