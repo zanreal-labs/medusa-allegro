@@ -31,6 +31,15 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
 
+      # @zanreal/medusa-admin-kit is a private sibling repo, installed straight
+      # from git. The runner has no SSH key, so rewrite the ssh:// (and the
+      # scp-like git@github.com: form other plugins' lockfiles use) to an
+      # https URL authenticated with a token instead.
+      - name: Authenticate git for the private admin-kit dependency
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.ADMIN_KIT_READ_TOKEN }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.ADMIN_KIT_READ_TOKEN }}@github.com/".insteadOf "git@github.com:"
+
       - name: Install
         run: npm ci
 
@@ -75,6 +84,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      # See the matching step in the verify job: without this, npm ci tries
+      # to fetch @zanreal/medusa-admin-kit over ssh:// and the runner has no key.
+      - name: Authenticate git for the private admin-kit dependency
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.ADMIN_KIT_READ_TOKEN }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.ADMIN_KIT_READ_TOKEN }}@github.com/".insteadOf "git@github.com:"
 
       - name: Install
         run: npm ci
