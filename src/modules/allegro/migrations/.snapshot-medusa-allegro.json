@@ -2076,6 +2076,22 @@
           "enumItems": [],
           "mappedType": "text"
         },
+        "last_finding": {
+          "name": "last_finding",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
         "last_synced_at": {
           "name": "last_synced_at",
           "type": "timestamptz",
@@ -2125,7 +2141,8 @@
             "idle",
             "running",
             "ok",
-            "error"
+            "error",
+            "disabled"
           ],
           "mappedType": "enum"
         },
