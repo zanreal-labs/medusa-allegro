@@ -257,13 +257,16 @@
         "checkoutForm": "Formularz zamówienia",
         "medusaOrder": "Zamówienie Medusa",
         "allegro": "Allegro",
-        "derived": "Stan wynikowy",
+        "derived": "Status zamówienia",
         "total": "Suma",
         "lastEvent": "Ostatnie zdarzenie"
       },
       "notCreated": "nie utworzono",
       "empty": "Nie zapisano jeszcze żadnych zamówień Allegro. Opróżnianie zaczyna śledzenie od najnowszego zdarzenia przy pierwszym uruchomieniu; użyj okna importu, aby wczytać historię.",
-      "unmappedLine": "{{count}} niedopasowana pozycja"
+      "unmappedLine_one": "{{count}} niedopasowana pozycja",
+      "unmappedLine_few": "{{count}} niedopasowane pozycje",
+      "unmappedLine_many": "{{count}} niedopasowanych pozycji",
+      "unmappedLine_other": "{{count}} niedopasowanej pozycji"
     },
     "importModal": {
       "title": "Zaimportuj okno zamówień",

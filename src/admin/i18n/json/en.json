@@ -251,13 +251,14 @@
         "checkoutForm": "Checkout form",
         "medusaOrder": "Medusa order",
         "allegro": "Allegro",
-        "derived": "Derived",
+        "derived": "Order status",
         "total": "Total",
         "lastEvent": "Last event"
       },
       "notCreated": "not created",
       "empty": "No Allegro orders recorded yet. The drain starts tracking from the newest event at its first run; use the import window to bring in history.",
-      "unmappedLine": "{{count}} unmapped line"
+      "unmappedLine_one": "{{count}} unmapped line",
+      "unmappedLine_other": "{{count}} unmapped lines"
     },
     "importModal": {
       "title": "Import an order window",
