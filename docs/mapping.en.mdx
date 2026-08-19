@@ -1,0 +1,163 @@
+---
+title: Offers, SKUs and stock
+description: The sygnatura contract that links a Medusa variant to an Allegro offer, the five mapping conflicts the plugin records instead of resolving, and why the stock loop refuses a whole plan rather than push half of one.
+---
+
+## Why the SKU, and not the offer id
+
+`allegro_offer.sku` carries a unique constraint because it is the identity of the
+row. `allegro_offer.offer_id` is a **resolved cache**, never the identity.
+
+Allegro offer ids are not stable across an item's life. Re-listing an ended offer
+produces a new id, and one SKU legitimately moves between offers over time. A
+mapping keyed on the offer id turns every re-list into a silent orphan: the row
+still looks healthy, and it quietly stops receiving stock and price updates. A
+mapping keyed on the SKU turns the same event into a row whose `offer_id` needs
+re-resolving, which the next discovery pass does on its own without anyone
+noticing there was a problem.
+
+So the practical instruction is short: **fill in the sygnatura on every Allegro
+offer you want managed**, and leave it blank on every offer you do not.
+
+## What discovery does
+
+The hourly pass reads a complete listing of the seller's offers and, for each
+one, matches `external.id` against Medusa variant SKUs within the configured
+sales channel. In the same run it sweeps promotion state in one paginated pass
+and creates a category rate row for every category it meets.
+
+Two guards make the pass safe to act on.
+
+**The listing is fail-closed.** A short page is an error rather than a smaller
+array, because every consumer of this data draws a conclusion from an offer's
+absence.
+
+**Unlinking requires a trustworthy listing.** Discovery unlinks a stored mapping
+whose offer is no longer present, which is only sound if the listing is both
+non-empty and verified complete against Allegro's own `totalCount`. A transient
+failure yielding zero offers would otherwise clear every mapping the store has,
+leaving the next run nothing to rebuild from.
+
+## Conflicts are recorded, never resolved
+
+A conflicted row is stripped of its `offer_id` and its `promoted` flag, so no
+write path can act on it. Five conflicts exist:
+
+| Conflict | Meaning | What to do |
+| --- | --- | --- |
+| `duplicate-sku` | Two live offers claim one SKU, or two variants share one | Decide which keeps it. The message names the competing ids. |
+| `missing-external-id` | A previously mapped offer no longer carries a sygnatura | Set the sygnatura back on Allegro. |
+| `no-variant` | A sygnatura matches no variant in the Allegro sales channel | Fix the sygnatura, or publish the product to the channel. |
+| `no-offer` | A stored mapping's offer is gone from the listing | Usually nothing. The link was cleared and discovery re-links on re-list. |
+| `sku-mismatch` | The live offer contradicts its mapping row | Fix the sygnatura on Allegro, or let discovery re-map it. |
+
+Picking a winner for a contested SKU would push a price or a quantity to the
+wrong offer, which is a real mispricing or a real oversell. So the plugin
+refuses, names both sides, and waits for a human.
+
+Two of these repay a closer look.
+
+**`duplicate-sku` covers a case that looks innocent from either side.** Two offers
+can reach the same variant by *different* keys - one by sygnatura, another by an
+EAN matching that variant's barcode - so neither offer looks contested when you
+inspect it alone. Both are held out.
+
+**`sku-mismatch` is recorded by the stock loop, not by discovery**, because the
+stock push is the only place where the mapping row and the live offer are
+compared at write time. A seller who edits a sygnatura between discovery and the
+push makes the two disagree, and re-pairing on the live value is exactly how one
+product's quantity lands on another product's listing. Only that offer is
+skipped; the rest of the catalogue still syncs.
+
+After fixing the cause, press **Rediscover offers** on the Offers page. You do
+not need to clear the conflict by hand.
+
+## Stock: Medusa is the source of truth
+
+The quantity pushed to Allegro is `retrieveAvailableQuantity`, stocked minus
+reserved, so units already promised to unfulfilled Medusa orders are not
+advertised again.
+
+**Keeping Medusa's inventory honest is explicitly not this plugin's job.** That
+belongs one layer up, where the supplier response is actually visible. A second
+guard here would be a guess about data this plugin has no source for.
+
+What the loop does refuse on is its own uncertainty, and the line is drawn at
+**unknowns**, not at gaps.
+
+An ambiguous SKU match, or a quantity that could not be *read* on either side,
+refuses the **whole plan**. A partial push in that state leaves some offers fresh
+and others stale with nothing recording which is which, so the next run cannot
+tell either.
+
+A known, bounded exclusion refuses nothing. Each is counted, reported in
+`last_error`, and leaves exactly one offer alone:
+
+- an inactive offer
+- a variant that does not manage inventory, so Medusa has no quantity to publish
+  (a digital product, say)
+- an offer that contradicts its mapping row
+- a mapped offer absent from the listing
+- an offer whose own Allegro listing carried no usable `stock.available`
+- an eligible variant that no mapped offer claims
+
+That distinction is not academic. Treating "this variant has no inventory" as an
+unknown is what once let a single digital product with an Allegro offer refuse
+the entire catalogue's stock sync indefinitely.
+
+### Two ways an empty answer becomes a catastrophe
+
+Both of these produce the same shape of disaster - every variant reads zero, the
+plan looks perfectly safe, and the run delists the whole catalogue while reporting
+itself complete - so both abort the run instead.
+
+**A store with no stock locations.** Medusa's `retrieveAvailableQuantity` answers
+`0` for an empty location list rather than failing. Create a stock location, or
+set `stockLocationIds`.
+
+**A configured `stockLocationIds` naming a location that does not exist.** Medusa
+reports zero available quantity for an unknown location rather than failing, so a
+single typo reproduces the empty case exactly. The ids are validated against the
+locations that exist, and an unknown one aborts the run.
+
+### Ordering inside the run
+
+The offer listing is read **before** quantities. Paging a full catalogue is the
+slowest step in the run, so reading quantities first left every figure ageing
+across the whole pagination window before it was compared and written.
+
+## Where you see all this
+
+**On the product.** The product detail widget is the authoritative per-product
+view: for every variant SKU it shows the linked offer with a link to the live
+listing, a short status, the observed price mode and drift, promotion state, the
+last price and stock sync times, and the per-offer price sync opt-out. The push
+history opens in a drawer.
+
+**In the catalogue.** The plugin registers two columns into
+[`@zanreal/medusa-admin-kit`](https://github.com/zanreal-labs/medusa-admin-kit)'s
+Catalog route, which lists one variant per row. `Allegro` is the live offer price,
+placed next to the shop price and the SRP so the three line up as money columns;
+a price on a paused or ended offer is muted, because the figure is real but nobody
+can buy at it. `Allegro status` names what is wrong with that one SKU: the
+conflict code in red, `drift` in orange, Allegro's own offer status in green when
+it is listed and healthy, `unlinked` in grey, and a muted "not listed" when the
+SKU has no mapping at all.
+
+Both columns share one request per page. `loadData` runs per row, so two columns
+over a hundred rows would otherwise be two hundred single-SKU requests for one
+table; the plugin coalesces every SKU asked for within a tick into a single call
+and de-duplicates the SKU both columns want. It deliberately keeps no cache
+across batches, because a price is exactly the thing a sync changes underneath
+the operator.
+
+Without admin-kit installed you still get a compact roll-up above the stock
+products table - N linked, N unlinked, N drifting, N conflicts - each count
+linking into the filtered Offers page. Medusa 2.18 does not allow injecting a
+custom column into the core products table and exposes no list-row widget zone,
+so on that page a roll-up is the only thing a plugin can offer.
+
+**For triage.** **Settings -> Allegro -> Offers** is the cross-catalogue table,
+with conflict and drift filters, bulk rediscovery and manual push. That is the
+surface for catalogue-wide "which offers are not syncing, and fix them" work,
+which the per-product widget cannot serve.

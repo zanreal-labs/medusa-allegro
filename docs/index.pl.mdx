@@ -1,0 +1,195 @@
+---
+title: Wprowadzenie
+description: Wtyczka Medusa v2 do Allegro - oferty powiązane po SKU, ceny zapisywane wyłącznie w granicach progu rentowności i SRP, uzgadnianie stanów magazynowych i drenaż dziennika zdarzeń zamówień.
+---
+
+`@zanreal/medusa-allegro` łączy sklep na Medusa v2 z [Allegro](https://allegro.pl).
+Wtyczka odnajduje Twoje istniejące oferty, pilnuje, żeby ich ceny i stany
+magazynowe zgadzały się z tym, co masz w Medusie, i zaciąga zamówienia z Allegro
+do Medusy.
+
+Nie wystawia ofert i nie kończy ich. Wystawianie to decyzja handlowa, którą
+podejmujesz w panelu sprzedawcy, a wtyczka, która potrafiłaby wystawić ofertę,
+potrafiłaby też wystawić złą. Jej zadanie zaczyna się tam, gdzie oferta już
+istnieje, i sprowadza się do jednego: żeby to, co widzi kupujący, było prawdą.
+
+## Jedna zasada, z której wynika reszta
+
+**Wariant w Medusie i ofertę na Allegro łączy SKU. Tylko i wyłącznie SKU.**
+
+Allegro pozwala sprzedawcy nadać każdej ofercie własny identyfikator - w API jest
+to pole `external.id`, w panelu sprzedawcy **sygnatura**. Umowa tej wtyczki brzmi:
+wpisujesz tam SKU wariantu z Medusy. Oferta bez sygnatury jest dla wtyczki
+niewidoczna i tak ma być, bo puste pole to najprostszy sposób, żeby zostawić
+ofertę poza kontrolą Medusy.
+
+Z tej jednej decyzji wynika cała reszta, łącznie z rzeczami, które na pierwszy
+rzut oka wyglądają na szczegół implementacyjny. Dlaczego identyfikator oferty
+jest tylko pamięcią podręczną, a nie tożsamością wiersza, i co się dzieje, gdy
+dwie oferty upomną się o to samo SKU - opisuje
+[Oferty, SKU i stany magazynowe](./mapping.pl.mdx).
+
+## Domyślnie nic nie trafia na Allegro
+
+Każdy zapis do Allegro ma własny przełącznik, który operator włącza w
+**Ustawienia -> Allegro**, i każdy z nich po świeżej instalacji jest **wyłączony**.
+Świeżo podłączony sklep nie publikuje niczego. Pętle mimo to działają, bo to
+właśnie te tylko do odczytu mówią Ci, czy włączanie zapisów jest bezpieczne.
+
+| Zapis | Po instalacji |
+| --- | --- |
+| Ceny | wyłączony |
+| Ilości | wyłączony |
+| Drenaż zamówień | wyłączony |
+| Zwrotny zapis realizacji | wyłączony |
+| Dołączanie faktur | włączony, ale bezczynny, dopóki moduł fakturowy nie wysyła zdarzeń |
+
+Zmiana przełącznika działa od najbliższego uruchomienia, bez restartu, bo każda
+ścieżka wykonania odczytuje zapisany wiersz na starcie, a nie zapamiętuje wartość
+przy starcie procesu. Niezależnie od tego zmienna środowiskowa potrafi wymusić
+wyłączenie dowolnego zapisu i nic poza przełącznikiem nie potrafi go włączyć z
+powrotem. Szczegóły w [Konfiguracji i sterowaniu](./configuration.pl.mdx).
+
+Są jeszcze dwa niezależne hamulce. Synchronizacja cen bez nazw reguł
+automatyzacji jest bezczynna z definicji, więc włączony zapis cen bez
+skonfigurowanych reguł nic nie zapisze, zamiast cokolwiek zgadywać. A świeża
+instalacja ustawia kursor zamówień na „teraz”, więc samo podłączenie konta nie
+wciąga do Medusy sześćdziesięciu dni historii, o którą nikt nie prosił.
+
+## Co działa i jak często
+
+Pięć pętli. Każda ma własny wiersz ze stanem zdrowia, własne zajęcie na wyłączność
+i - jeśli zapisuje - własny wyłącznik awaryjny.
+
+```text
+  co godzinę        wykrywanie ofert  ->  monitor cen  ->  synchronizacja cen
+  (15 * * * *)      tylko odczyt          tylko odczyt      wysyła polecenia
+
+  co 15 minut       wysyłka stanów magazynowych
+                    wysyła polecenia zmiany ilości
+
+  co 20 sekund      drenaż zamówień
+                    czyta GET /order/events, zapisuje zamówienia w Medusie
+```
+
+Pierwsze trzy są spięte w jedno zadanie, bo potrzebują tego samego wsadu: pełnej
+listy ofert sprzedawcy. Przewertowanie całego katalogu trzy razy na godzinę to
+prosta droga do limitu zapytań. Kolejność też ma znaczenie: wykrywanie ustala,
+która oferta należy do którego SKU, a synchronizacja cen odmawia dotknięcia
+czegokolwiek, co wykrywanie oznaczyło jako konflikt.
+
+Poza pętlami zapisują jeszcze dwie rzeczy, obie na zdarzenie z Medusy: zwrotny
+zapis realizacji i dołączanie faktur. Żadna z nich nie jest pętlą, bo nie ma tam
+stanu, który dałoby się porównać. Wszystko inne jest uzgadnianiem: każde
+uruchomienie czyta cały istotny stan i liczy różnicę, więc zgubione zdarzenie
+kosztuje najwyżej jeden cykl nieaktualności zamiast zostawiać na stałe błędną
+ilość.
+
+## Instalacja
+
+Pakietu nie ma jeszcze na npm. Instaluje się go jako zależność z gita, przypiętą
+do konkretnego commita:
+
+```jsonc title="package.json"
+{
+  "dependencies": {
+    "@zanreal/medusa-allegro": "github:zanreal-labs/medusa-allegro#b0e864ab6a05e63e6d57a20b3c8adaf943049cdd"
+  }
+}
+```
+
+Przypnij commit, na którym testowałeś. Nie ma jeszcze opublikowanego taga, więc
+`#main` przesunąłby Ci się pod rękami przy najbliższym pushu; przypięty commit
+jutro znaczy to samo co dziś.
+
+Pakiet kompiluje się sam podczas instalacji, bo skrypt `prepare` uruchamia
+`medusa plugin:build` i zamienia pobrane źródła w katalog `.medusa/server`, na
+który wskazują jego `exports`. pnpm w wersji 10 i nowszej domyślnie odmawia
+uruchomienia takiego skryptu dla zależności, której jeszcze nie ufa, więc trzeba
+mu to raz pozwolić u siebie:
+
+```yaml title="pnpm-workspace.yaml"
+allowBuilds:
+  "@zanreal/medusa-allegro@https://codeload.github.com/zanreal-labs/medusa-allegro/tar.gz/b0e864ab6a05e63e6d57a20b3c8adaf943049cdd": true
+```
+
+Kluczem jest dokładny adres archiwum, do którego pnpm rozwiązuje przypięty commit
+- dlatego niesie ten sam SHA co linia zależności. Przesuwając pin, przesuń oba
+naraz.
+
+Wtyczka ciągnie za sobą jeszcze
+[`@zanreal/medusa-admin-kit`](https://github.com/zanreal-labs/medusa-admin-kit),
+również przypięty do commita, bo rejestruje w nim dwie kolumny katalogu.
+Rozwiązuje się sam, nie musisz go dodawać.
+
+Potem rejestracja:
+
+```ts title="medusa-config.ts"
+import { defineConfig } from "@medusajs/framework/utils";
+
+module.exports = defineConfig({
+  plugins: [
+    {
+      resolve: "@zanreal/medusa-allegro",
+      options: {
+        clientId: process.env.ALLEGRO_CLIENT_ID,
+        clientSecret: process.env.ALLEGRO_CLIENT_SECRET,
+
+        // Musi zgadzać się z aplikacją zarejestrowaną w portalu dla deweloperów
+        // Allegro. Allegro odrzuca zapytania, których User-Agent nie wskazuje
+        // na istniejącą aplikację.
+        appName: "MojSklepAllegro",
+        appVersion: "1.0.0",
+        docsUrl: "https://mojsklep.example.com/integracje/allegro",
+
+        // openssl rand -base64 32
+        encryptionKey: process.env.ALLEGRO_ENCRYPTION_KEY,
+      },
+    },
+  ],
+});
+```
+
+I migracje:
+
+```bash
+npx medusa db:migrate
+```
+
+Te pięć opcji to cały wymagany zestaw. Wszystko poza nimi ma wartość domyślną, a
+każda opcja jest sprawdzana w loaderze modułu, więc błędna konfiguracja wywala się
+przy starcie z konkretnym komunikatem, zamiast wyjść godzinę później jako
+niezrozumiały błąd z Allegro.
+
+## Co dalej
+
+- [Podłączanie konta](./connecting.pl.mdx) - rejestracja aplikacji w Allegro,
+  klucz szyfrujący i to, co chroni adres zwrotny OAuth.
+- [Oferty, SKU i stany magazynowe](./mapping.pl.mdx) - umowa o sygnaturze, pięć
+  rodzajów konfliktu mapowania i powód, dla którego pętla stanów woli odmówić
+  całego planu niż wysłać jego połowę.
+- [Ceny](./pricing.pl.mdx) - trzy tryby cenowe, próg rentowności i sufit SRP oraz
+  mechanika, która ogranicza szkody z jednego złego uruchomienia.
+- [Zamówienia i faktury](./orders.pl.mdx) - drenaż dziennika zdarzeń, drabina
+  statusów, zwrotny zapis realizacji i łańcuch fakturowy.
+- [Konfiguracja i sterowanie](./configuration.pl.mdx) - wszystkie opcje, wszystkie
+  zmienne środowiskowe i zasady pierwszeństwa między nimi.
+
+## Status
+
+Wersja przedpremierowa. Schemat bazy uznajemy za ustalony, powierzchnię API za
+wciąż ruchomą do 1.0. Wtyczka powstawała falami, ścieżki odczytu przed ścieżkami
+zapisu, tak żeby każdy etap dało się uruchomić na produkcji i obejrzeć, zanim
+następny dostał prawo cokolwiek zmieniać: fundament, wykrywanie tylko do odczytu,
+zapisy, zamówienia, faktury.
+
+Znane luki są wypisane, a nie zostawione do odkrycia. Największa: odświeżanie
+tokenu jest odróżniane tylko w obrębie jednego procesu, więc dwie instancje
+Medusy mogą trzymać własnego klienta i ścigać się o rotację tokenu odświeżającego.
+Zajęcia na wyłączność chronią pętle między procesami, ale odświeżania tokenu
+jeszcze nie obejmują - do tego czasu uruchamiaj zadania cykliczne w jednej
+instancji. Zaimportowane zamówienia nie mają też wyliczonych linii podatkowych,
+bo ceny pozycji bierzemy z Allegro dosłownie.
+
+Licencja MIT. Zgłoszenia i pull requesty są mile widziane na
+[zanreal-labs/medusa-allegro](https://github.com/zanreal-labs/medusa-allegro).

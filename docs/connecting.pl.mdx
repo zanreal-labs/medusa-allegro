@@ -1,0 +1,191 @@
+---
+title: Podłączanie konta
+description: Rejestracja aplikacji w Allegro, klucz szyfrujący zapisane tokeny, przejście przez OAuth z panelu administracyjnego i to, co chroni adres zwrotny.
+---
+
+Wtyczka rozmawia z Allegro jako Twoje konto sprzedawcy, przez OAuth 2.0 w wariancie
+authorization code. Oba tokeny są zapieczętowane algorytmem AES-256-GCM, zanim
+dotkną bazy danych, bo token odświeżający to długowieczne poświadczenie do całego
+konta.
+
+## 1. Zarejestruj aplikację
+
+Zaloguj się na [apps.developer.allegro.pl](https://apps.developer.allegro.pl) kontem
+sprzedawcy, które chcesz podłączyć. Dla piaskownicy użyj
+[apps.developer.allegro.pl.allegrosandbox.pl](https://apps.developer.allegro.pl.allegrosandbox.pl)
+i ustaw `environment: "sandbox"`.
+
+Utwórz aplikację typu **aplikacja webowa z adresem przekierowania**. Ta wtyczka
+korzysta z przepływu authorization code, a nie z device flow.
+
+Cztery szczegóły są istotne i każdy z nich potrafi położyć połączenie:
+
+**Nazwa musi być stabilna i bez spacji.** Żadnych spacji ani separatorów HTTP.
+Dokładnie ten ciąg trafia do opcji `appName`, bo Allegro wymaga, żeby każde
+zapytanie niosło nagłówek `User-Agent` wskazujący jednoznacznie na zarejestrowaną
+aplikację, i egzekwuje to od czerwca 2026. Wtyczka składa
+`{appName}/{appVersion} (+{docsUrl})` i sprawdza każdy człon już przy tworzeniu
+klienta, więc nazwa ze spacją zostanie odrzucona, zanim wyjdzie choć jedno
+zapytanie. Znak `+` przed adresem jest wymagany przez walidator Allegro.
+
+**Adres przekierowania jest porównywany bajt po bajcie** podczas wymiany kodu na
+tokeny. To adres Twojego backendu plus `redirectPath`:
+
+```text
+https://backend-mojego-sklepu.example.com/admin/allegro/oauth/callback
+```
+
+Różnica jednego ukośnika na końcu to nieudane połączenie, a nie ostrzeżenie.
+
+**`docsUrl` musi być prawdziwym, publicznym adresem http(s)**, pod którym da się
+przeczytać o integracji albo skontaktować z jej właścicielem. Ten adres ląduje w
+nagłówku `User-Agent`, który czyta wsparcie Allegro, gdy chce ustalić, kto dobija
+się do ich API.
+
+**Przyznaj uprawnienia, które skonfigurowałeś.** Domyślnie są to odczyt ofert,
+zapis ofert i odczyt zamówień:
+
+```text
+allegro:api:sale:offers:read allegro:api:sale:offers:write allegro:api:orders:read
+```
+
+Jeśli chcesz tylko obserwować, usuń `:write`. Wtyczka pokaże wtedy w panelu, że
+brakuje uprawnienia do zapisu, zamiast wywrócić się nieczytelnie na pierwszym
+poleceniu.
+
+Identyfikator i sekret klienta przepisz do `ALLEGRO_CLIENT_ID` i
+`ALLEGRO_CLIENT_SECRET`.
+
+## 2. Wygeneruj klucz szyfrujący
+
+```bash
+openssl rand -base64 32
+```
+
+Wartość trafia do `ALLEGRO_ENCRYPTION_KEY`. Każdy zapisany token jest pieczętowany
+jako `base64(iv[12] || authTag[16] || szyfrogram)`, ze świeżym losowym IV dla
+każdej wartości, więc dwukrotne zaszyfrowanie tego samego tokenu daje inny
+szyfrogram, a manipulacja przy zapisanej wartości jest wykrywalna.
+
+Wtyczka odmawia startu, jeśli wartość nie jest kanonicznym base64 - standardowym
+albo URL-safe - dla dokładnie 32 bajtów. Sprawdzenie celowo dotyczy **kodowania**,
+a nie tylko długości, bo `Buffer.from(value, "base64")` nigdy nie rzuca wyjątkiem:
+po cichu pomija każdy znak spoza alfabetu i zatrzymuje się na pierwszym
+dopełnieniu. Sam test długości przepuściłby więc wejście poszatkowane, a
+`"A".repeat(43)` dekoduje się do całkiem poprawnego klucza z samych zer, którego
+AES użyłby bez mrugnięcia. Oba przypadki są odrzucane z nazwy.
+
+Dwie konsekwencje warto zapisać, zanim będą potrzebne:
+
+- **Rotacja klucza czyni zapisane tokeny nieczytelnymi.** Po rotacji trzeba
+  połączyć konto ponownie. Panel odróżnia „koperta się nie otwiera” od „brak
+  połączenia”, bo pierwsze odsyła Cię do własnej konfiguracji, a drugie do Allegro.
+- **Ten sam klucz podpisuje parametr `state`** w OAuth, więc rotacja unieważnia
+  także każdy proces łączenia, który akurat jest w locie.
+
+## 3. Połącz z panelu
+
+Wejdź w **Ustawienia -> Allegro** i kliknij **Połącz Allegro**. Trafiasz na ekran
+zgody Allegro, zatwierdzasz i wracasz na stronę ustawień z uzupełnionym loginem
+konta, przyznanymi uprawnieniami i datą wygaśnięcia tokenu.
+
+Strona odróżnia trzy niezdrowe stany od działającego połączenia, bo każdy wymaga
+innej reakcji:
+
+| Stan | Co znaczy | Co zrobić |
+| --- | --- | --- |
+| Brak tokenu odświeżającego | Połączenie przestanie działać, gdy tylko wygaśnie token dostępu | Połącz ponownie od razu, nie później |
+| Nieodczytywalne poświadczenia | `encryptionKey` nie otwiera już tego, co jest zapisane | Przywróć poprzedni klucz albo połącz ponownie |
+| Brak uprawnienia do zapisu | Allegro odpowiedziało 403 na polecenie | Połącz ponownie i zatwierdź zapis ofert |
+
+Wiersz, którego koperty nie da się otworzyć, jest raportowany właśnie tak, a nie
+jako zielone „Połączono”. Pokazanie go jako połączonego wysłałoby operatora do
+Allegro, podczas gdy problem siedzi w jednej zmiennej środowiskowej.
+
+## Co chroni adres zwrotny
+
+Proces łączenia to jedyne miejsce, w którym ktoś, kto nakłoni przeglądarkę
+administratora do jednego żądania GET, mógłby podpiąć obce konto Allegro do
+Twojego sklepu. Stoją temu na przeszkodzie cztery rzeczy.
+
+**Podpisany `state`, a nie nieprzezroczysty nonce.**
+`GET /admin/allegro/oauth/start` wystawia `v1.<czas>.<nonce>.<mac>`, gdzie MAC to
+HMAC-SHA256 po czasie wystawienia, nonce i identyfikatorze `actor_id`
+administratora, kluczowany wartością `encryptionKey`. Identyfikatora
+administratora celowo **nie ma** w samej wartości: `state` wędruje przez adres
+autoryzacyjny Allegro i ląduje w logach Allegro, w historii przeglądarki i w
+Twoich własnych logach dostępowych, więc wpisanie tam wewnętrznego identyfikatora
+użytkownika oddałoby go wszystkim trzem bez żadnego zysku. Adres zwrotny zna
+własny `actor_id` i przelicza MAC po nim, co jest mocniejszym sprawdzeniem niż
+odbicie wartości z powrotem.
+
+**Ciasteczko, które dowodzi tej samej przeglądarki.** `state` jest odkładany do
+ciasteczka `httpOnly` z atrybutem `SameSite=Lax` i dziesięciominutowym życiem.
+`Lax`, a nie `Strict`, bo ciasteczko musi przetrwać dokładnie jeden skok między
+witrynami - przekierowanie 302 z Allegro z powrotem - a `Strict` wstrzymałby je
+przy tej nawigacji i odrzucał każdy uczciwy proces. Po https ciasteczko dostaje
+prefiks `__Host-`, dzięki czemu sąsiednia subdomena nie może go przykryć; po
+zwykłym http nie dostaje, bo ciasteczko `__Host-` bez `Secure` jest po prostu
+odrzucane i lokalna praca przestałaby działać.
+
+**Oba sprawdzenia, nie jedno z dwóch.** Adres zwrotny wymaga, żeby `state`
+zgadzał się z ciasteczkiem, porównywany w stałym czasie, **oraz** żeby
+zweryfikował się względem administratora kończącego proces i mieścił się w
+ostatnich dziesięciu minutach. Ciasteczko dowodzi tej samej przeglądarki, podpis
+dowodzi tego samego serwera, tego samego administratora i świeżości. `state`
+podrzucony do cudzej przeglądarki nie przejdzie drugiego sprawdzenia.
+
+**Jednorazowość, unieważniana we właściwym momencie.** Ciasteczko jest czyszczone
+dopiero wtedy, gdy kod autoryzacyjny naprawdę trafił do Allegro, czyli wtedy, gdy
+`state` faktycznie został zużyty. Gałęzie wykonywane przed weryfikacją -
+`?error=...`, brak kodu, niezgodność `state` - celowo zostawiają je w spokoju,
+więc podstępnie wywołany GET na adres zwrotny nie zniszczy procesu, który operator
+uczciwie rozpoczął w innej karcie.
+
+Obie trasy leżą pod `/admin`, które Medusa uwierzytelnia domyślnie, i adres
+zwrotny przy tej domyślności zostaje. Przekierowanie z Allegro to nawigacja
+najwyższego poziomu metodą GET, a ciasteczko sesji panelu ma `SameSite=Lax`, więc
+sesja przeżywa skok. Otwarcie tej trasy publicznie zabrałoby przy okazji
+`actor_id`, względem którego weryfikowany jest podpisany `state`, więc każdy proces
+zacząłby się kończyć błędem, a nie sukcesem.
+
+**Jeden kształt wdrożenia nie zadziała.** Jeśli Twój panel uwierzytelnia się
+tokenem w `localStorage`, a nie ciasteczkiem sesji, adres zwrotny odpowie 401, bo
+przeglądarka nie ma czego wysłać przy tej nawigacji. Podawaj panel i backend z
+tego samego origin, z sesją w ciasteczku. Nie obchodź tego, otwierając adres
+zwrotny publicznie.
+
+## Za proxy
+
+Adres przekierowania musi być identyczny bajt po bajcie przy `start` i przy
+`callback`, bo Allegro weryfikuje go podczas wymiany. Obie trasy wyprowadzają go
+tak samo, a za proxy, które przepisuje `Host`, to wyprowadzenie potrafi się
+rozjechać.
+
+Ustaw `backendUrl` (albo `MEDUSA_BACKEND_URL`) na bezwzględny adres bazowy
+backendu, a nagłówki przestaną mieć znaczenie. To jest zalecane rozwiązanie.
+
+Bez tego origin jest odczytywany z `x-forwarded-host` i `x-forwarded-proto`. Te
+nagłówki potrafi ustawić klient, co normalnie byłoby wstrzyknięciem nagłówka
+`Host`, a bezpieczne jest **tutaj i tylko tutaj** ze względu na to, do czego
+wartość służy: staje się parametrem `redirect_uri` wysyłanym do Allegro, a Allegro
+przyjmuje wyłącznie `redirect_uri` zarejestrowany dla aplikacji znak w znak.
+Podrobiony host daje odrzuconą wymianę, a nie przekierowanie gdziekolwiek. Wartość
+nigdy nie służy jako cel przekierowania, nigdy nie trafia do nagłówka `Location` i
+nigdy nie jest zapisywana.
+
+## Rozłączanie
+
+`POST /admin/allegro/disconnect` unieważnia token odświeżający i token dostępu po
+stronie Allegro, a potem usuwa zapisany wiersz.
+
+Unieważnienie jest **najlepszym staraniem**. Jeśli Allegro jest nieosiągalne,
+lokalne połączenie i tak zostaje usunięte, bo odmowa rozłączenia zostawiłaby
+operatora bez możliwości odebrania dostępu, o którego odebranie właśnie poprosił.
+
+Gdy unieważnienie zostanie pominięte albo się nie powiedzie, odpowiedź niesie pole
+`warning`, a strona ustawień je pokazuje. Ma to tu większe znaczenie niż zwykle:
+zapisane wiersze są jedyną kopią tokenów, więc po tym wywołaniu nie ma już czym
+unieważniać, a token odświeżający pozostaje ważny po stronie Allegro aż do
+wygaśnięcia, o ile nie odbierzesz aplikacji dostępu ręcznie w panelu dla
+deweloperów.

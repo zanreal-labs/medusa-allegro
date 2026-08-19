@@ -1,0 +1,235 @@
+---
+title: Ceny
+description: Trzy tryby cenowe, próg rentowności i sufit SRP ograniczające każdy z nich, powody pominięcia oferty oraz mechanika ograniczająca szkody z jednego złego uruchomienia.
+---
+
+To, jak sklep wycenia swoje oferty na Allegro, jest **ustawieniem, a nie
+założeniem**. Wybierz jeden z trzech trybów w **Ustawienia -> Allegro**; zadziała
+od najbliższego uruchomienia synchronizacji, bez restartu.
+
+| Tryb | Co zapisuje do Allegro |
+| --- | --- |
+| `monitor` | Zupełnie nic. Każde uruchomienie i tak wylicza próg i sufit każdej oferty i liczy, ile ofert jest poza nimi. |
+| `automation_rule` | Jedno polecenie automatyzacji ceny na ofertę: podepnij regułę, której wymaga stan promocji, z przedziałem `[próg, sufit]` jako zakresem cen reguły. Silnik Allegro wybiera liczbę w środku. |
+| `fixed_price` | Jedno polecenie zmiany ceny na ofertę, ustawiające cenę Kup teraz na własną cenę wariantu z Medusy - poprzedzone usunięciem reguły, jeśli oferta wciąż ma podpiętą regułę automatyzacji. |
+
+Domyślny jest `automation_rule`, bo to właśnie robiła ta wtyczka, zanim tryb w
+ogóle powstał. Aktualizacja nie zmienia niczego w tym, co Twój sklep zapisuje.
+
+## Próg i sufit obowiązują w każdym trybie
+
+Próg rentowności i sufit SRP to opowieść o bezpieczeństwie całej tej wtyczki, więc
+żaden tryb nie ma prawa ich pominąć:
+
+- `monitor` wylicza oba i raportuje, ile ofert jest wycenionych poza nimi. To ten
+  raport czytasz, **zanim** wybierzesz tryb, który zapisuje.
+- `automation_rule` wysyła je jako zakres cen reguły, więc silnik Allegro nie może
+  wyprowadzić ceny poza nie.
+- `fixed_price` sprawdza względem nich cenę z Medusy i **odmawia** wysłania takiej,
+  która jest poniżej progu albo powyżej sufitu.
+
+Odmowa jest zamierzona i nie jest przycięciem do granicy. Przycięcie sprzedawałoby
+po cenie, której sklep nigdy nie ustalił; wysłanie sprzedawałoby poniżej kosztu.
+Odmowa nie robi ani jednego, ani drugiego, i wymienia z nazwy warianty, których
+cena w Medusie wymaga poprawki.
+
+### Próg
+
+`kosztBrutto / (1 - stawkaProwizji)` - najmniejsza cena brutto, przy której dochód
+netto sięga zera, zaokrąglona w górę do pełnej jednostki, bo zarządzane reguły tego
+wymagają.
+
+`kosztBrutto` pochodzi z modułu kosztów produktu, rozwiązywanego leniwie i
+opcjonalnie. Stawka prowizji pochodzi z `allegro_category_rate`, wybierana po
+kategorii oferty **i jej stanie promocji**.
+
+### Sufit
+
+SRP, odczytywane albo z `srpMetadataKey` (klucz w metadanych wariantu, z odwrotem
+do metadanych produktu), albo z `srpPriceListId` (cena wariantu w tym cenniku).
+Ustawienie obu naraz wywala start: dwa źródła to niejednoznaczny sufit, a to sufit
+powstrzymuje regułę przed zjeżdżaniem z ceną w dół.
+
+SRP z cennika jest dopasowywane do **własnej waluty oferty** i celowo nie ma tu
+żadnego przeliczania - przeliczony sufit zależałby od kursu, którego ta wtyczka nie
+ma i nie potrafi zweryfikować, więc oferta w walucie bez wiersza SRP jest pomijana.
+Goła liczba w metadanych wariantu nie niesie waluty i jest traktowana jako podana w
+walucie oferty, bo dokładnie to znaczy wpisanie tam gołej liczby.
+
+### Żadna z granic nigdy nie ma wartości domyślnej
+
+Każdy brakujący wsad powoduje pominięcie oferty z policzonym powodem. Domyślny próg
+to licencja na sprzedaż ze stratą. Sufit zgadnięty z bieżącej ceny sprzedaży
+pozwala regule zjeżdżać z ceną przy każdym uruchomieniu, bo cena z jednego
+uruchomienia staje się sufitem dla następnego.
+
+## Dlaczego oferta została pominięta
+
+Powody pominięcia, w kolejności, w jakiej raportuje je drabina:
+
+```text
+not-linked  ->  sync-disabled  ->  status-unknown  ->  offer-not-active
+            ->  promotion-unresolved  ->  missing-break-even
+            ->  missing-srp  ->  invalid-bounds
+```
+
+Kolejność **jest** raportowanym powodem i tak ma być. Niepowiązane SKU raportuje
+`not-linked` nawet wtedy, gdy brakuje mu również SRP, a wyłączenie pojedynczej
+oferty zwiera obwód przed jakimkolwiek sprawdzeniem danych, więc wyłączona oferta
+nigdy nie wystawi fałszywego „brak progu rentowności”, za którym ktoś miałby gonić.
+
+Tryb ceny stałej dokłada dwa własne, na dwa sposoby, na jakie cena z Medusy może nie
+nadawać się na cenę Allegro: `missing-medusa-price` (brak ceny w walucie oferty) i
+`price-outside-bounds` (cena jest, i zostaje odrzucona zamiast przycięta).
+
+### `promotion-unresolved`, czyli ten, który spotkasz pierwszy
+
+`allegro_offer.promoted` ma **trzy stany**: `true`, `false` albo NULL, co znaczy
+„przejście po opcjach promocji tego nie ustaliło”. NULL to nie jest „bez promocji”,
+a różnica to pieniądze. Stan promocji wybiera stawkę prowizji, stawka wyznacza próg
+rentowności, a próg jest granicą, do której reguła może zjechać z ceną - więc
+wycenienie nieustalonej oferty jako niepromowanej daje faktycznie promowanej próg
+poniżej jej prawdziwej rentowności.
+
+Wykrywanie uzupełnia tę wartość po udanym przejściu. Do tego czasu oferta jest
+pomijana, a strona ofert pokazuje `unresolved`. Przejście nie zwraca niczego
+rozstrzygalnego, gdy trafi w limit stron, gdy Allegro odpowie „Feature unavailable”
+albo przy błędzie niesystemowym, i każdy z tych przypadków jest raportowany w
+wierszu stanu ofert.
+
+Monitor wstrzymuje dla tych samych ofert swój werdykt o dryfie. Bez ustalonego stanu
+promocji nie ma oczekiwania, z którym można porównać podpiętą regułę, więc
+raportowanie „brak dryfu” byłoby zgadywaniem.
+
+### Dwie dalsze subtelności
+
+Oferta promowana, której kategoria ma uzupełnioną stawkę standardową, ale **pustą
+stawkę promowaną**, jest pomijana, bo oparcie jej progu na stawce standardowej
+zaniżyłoby ten próg.
+
+`status-unknown` jest osobnym powodem, a nie przepuszczeniem dalej. Zapis jest
+bezpieczny wyłącznie względem oferty pozytywnie zaobserwowanej jako ACTIVE.
+
+## Czego wymaga tryb ceny stałej
+
+Dwie rzeczy warto powiedzieć wprost, zanim przełączysz na niego żywy sklep.
+
+**Uprawnienie już jest.** Polecenie zmiany ceny wymaga
+`allegro:api:sale:offers:write`, które jest w domyślnym zestawie uprawnień i jest
+tym samym uprawnieniem, którego używa już przypisywanie reguł. Przejście na tryb
+ceny stałej nie wymaga ponownego łączenia ani nowej zgody.
+
+**Reguła automatyzacji wygrywa z ceną stałą, więc reguła musi zejść pierwsza.**
+Silnik Allegro przelicza ofertę we własnym rytmie, więc cena wysłana pod żywą regułą
+tego nie przeżyje. Tryb ceny stałej wystawia więc polecenie usunięcia reguły dla
+marketplace'u oferty, czeka na jego potwierdzenie i dopiero potem ustawia cenę.
+**Jeśli usunięcie się nie potwierdzi, cena nie jest wysyłana w ogóle** - para
+zastosowana w połowie, która zostawiłaby podpiętą regułę i zmienioną cenę, to
+dokładnie ta walka z silnikiem Allegro, dla uniknięcia której powstała ta kolejność.
+Powtórzenie pary w następnym takcie jest idempotentne. Oba polecenia liczą się jako
+jedna oferta wobec limitu zmian.
+
+Sama cena to domyślna cena wariantu w Medusie, w walucie oferty, z dwiema regułami
+fail-closed. **Wiersze z cennika są ignorowane**, bo cena z `price_list_id` to
+promocja albo nadpisanie dla grupy klientów, z własnym oknem ważności i warunkami,
+których ta wtyczka nie ocenia - wysłanie takiej ceny zostawiłoby cenę promocyjną na
+Allegro długo po końcu promocji. I **nie ma żadnego przeliczania walut**.
+
+## Mechanika bezpieczeństwa
+
+**Głośne rozwiązywanie reguł.** Obie nazwy reguł są rozwiązywane względem żywej
+listy reguł przy każdym uruchomieniu. Brakująca, przemianowana albo niejednoznaczna
+przerywa całe uruchomienie i nic nie zostaje zapisane. Wtyczka nigdy nie zgaduje, o
+którą regułę Ci chodziło, i nigdy żadnej nie tworzy.
+
+**Limit zmian.** Błąd, który uzna cały katalog za rozjechany, przeceni najwyżej tyle
+ofert, ile wynosi limit, zanim człowiek zobaczy uruchomienie i zdąży przestawić
+przełącznik. Reszta czeka na następny takt.
+
+**Kwarantanna oferty** po pięciu kolejnych niepowodzeniach, żeby jedna trwale
+zepsuta oferta nie zjadała budżetu uruchomienia w każdym takcie. Nigdy po cichu:
+wymieniona w `last_error` i w panelu, a lekarstwem jest ręczna wysyłka.
+
+**Bezpiecznik.** Takt, w którym każde polecenie zawiodło, albo w którym którekolwiek
+trafiło na 429, 5xx, błąd autoryzacji lub 403, jest systemowy: nic nie idzie do
+kwarantanny, uruchomienie wstrzymuje się, następny takt ponawia. Kwarantanna jest
+bezpieczna wyłącznie na dowodzie, że reszta potoku działa - bez tej bramki
+pięciominutowa awaria wsadziłaby do kwarantanny cały zestaw roboczy naraz. Zacięte i
+samo się leczące bije pominięte.
+
+**Wykrywanie braku uprawnienia do zapisu.** 403 na poleceniu to sygnatura tokenu
+przyznanego bez uprawnienia do zapisu. To jeden warunek systemowy, a nie sto
+zepsutych ofert, więc ustawia `write_scope_missing`, podnosi trwały baner w panelu i
+bezpiecznie nic nie robi. Pierwsze uruchomienie, które dojdzie do endpointu bez 403,
+zdejmuje flagę.
+
+**Zajęcie na wyłączność** na wierszu dostawcy, żeby zaplanowane uruchomienie i ręczna
+wysyłka operatora nie przeplotły się na tej samej ofercie. Zajęcie w stanie `running`
+starsze niż sześć minut jest przejmowane jako po awarii, więc jeden ubity proces nie
+zaklinuje pętli.
+
+### Jak dobrać limit zmian
+
+`changeCap` wychodzi z pudełka jako `1` i jest to wartość zastępcza, a nie
+rekomendacja. Zasięg rażenia to decyzja o ryzyku należąca do sklepu, który to ryzyko
+ponosi, więc ta wtyczka nie publikuje cudzej skłonności do ryzyka jako punktu
+wyjścia. Wysyła najostrożniejszą wartość, która wciąż jest działającą konfiguracją, i
+oczekuje, że podniesiesz ją świadomie.
+
+Mylić się w dół jest bezpiecznie i, co ważne, nie po cichu: każde uruchomienie, które
+trafi w limit, loguje `change cap (N) hit; M offer(s) wait for the next tick`, więc
+sklep wciąż stojący na `1` widzi dokładnie, dlaczego katalog zbiega się po jednej
+ofercie na takt. Mylić się w górę to ten kierunek, przed którym limit ma chronić.
+
+Limit ogranicza także ręczne wysyłki w ruchomym oknie godziny, więc zostawienie go na
+`1` czyni ręczne wysyłki odpowiednio rzadkimi. Wybierz liczbę odpowiadającą temu, jak
+duże błędne uruchomienie jesteś w stanie znieść między dwoma taktami.
+
+## Ślad audytowy
+
+Każdy tryb pisze do tej samej, wyłącznie dopisywanej tabeli `allegro_price_push`, ale
+wypełniają różne kolumny i ta różnica jest nośna.
+
+Wiersze trybu regułowego niosą `bound_floor` i `bound_ceiling` oraz identyfikatory
+reguł. Te dwie kolumny są **jedyną** pamięcią o zakresie cen podpiętym do reguły, bo
+Allegro przyjmuje zakres i nigdzie go nie zwraca. Po ich stronie jest to zapis tylko
+do zapisu, więc ta tabela jest jedynym miejscem, które potrafi odpowiedzieć „do
+jakiego progu jest przypięta ta oferta i kto go ustawił”.
+
+Wiersze trybu ceny stałej niosą `price_amount` i `price_currency`, zostawiają kolumny
+granic puste i dokładają `rule_id_old` oraz `rule_name_old` dla usuniętej reguły.
+Wpisanie tam barierek sprawiłoby, że późniejsze uruchomienie w trybie regułowym
+odczytałoby zakres cen, którego nigdy nie podpięto, i pominęło ofertę, którą powinno
+podpiąć na nowo.
+
+Odczyt granic z powrotem rządzi się dwiema zasadami: wiersze od najnowszego, przy czym
+wygrywa **pierwszy sukces dla danej oferty** (nowszy sukces bez granic celowo zajmuje
+to miejsce, więc czyta się jako „brak zapisanych granic” i wyzwala ponowną wysyłkę,
+zamiast pozwolić starszemu wierszowi udawać aktualny zakres), oraz liczy się wyłącznie
+`result: "success"` - wiersz `observed` to monitor zapisujący stan, którego nie
+zmieniał, a granice z wiersza `failed` nigdy nie doleciały. Oferta bez zapisanych
+granic jest wysyłana ponownie, co jest idempotentne.
+
+Nigdy nie aktualizuj ani nie usuwaj wiersza. Pomyłkę poprawia się dopisaniem.
+
+## Tryb monitora a przełącznik zapisu cen
+
+Tryb monitora działa nawet przy wyłączonym przełączniku **Ceny**, bo nie ma ścieżki
+poleceń, do której mógłby sięgnąć. Dwa tryby zapisujące respektują przełącznik tak jak
+zawsze, odczytując go przed każdym pojedynczym poleceniem. Wyraźna wysyłka pojedynczej
+oferty z karty produktu jest w trybie monitora odrzucana, a nie po cichu wykonywana.
+
+## Prowizje kategorii uzupełnia się ręcznie
+
+`allegro_category_rate` trzyma prowizję od sprzedaży dla kategorii Allegro, zwykłą i
+promowaną, a operator wpisuje je z opublikowanej tabeli opłat Allegro w
+**Ustawienia -> Allegro -> Prowizje kategorii**.
+
+Tak jest celowo. Allegro udostępnia wprawdzie kalkulator opłat, ale na produkcji
+odrzuca on treści ofert, jakie da się zbudować z żywych ofert samego sprzedawcy, więc
+przejście po prawdziwym katalogu zwraca błędy zamiast stawek.
+
+Obie kolumny stawek dopuszczają wartość pustą, żeby „nieznane” pozostało odróżnialne
+od „zerowa prowizja”. Wyliczenie marży, które odczyta brakującą stawkę jako 0%, po
+cichu zamienia cenę przynoszącą stratę w akceptowalną. Dopóki kategoria nie ma obu
+stawek, każda oferta w niej jest pomijana z powodem `missing-break-even`.

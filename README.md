@@ -7,6 +7,9 @@
 Medusa v2 plugin for [Allegro](https://allegro.pl), the largest marketplace in
 Poland.
 
+Full documentation, in English and Polish, is published at
+<https://zanreal.com/docs/oss/medusa-allegro> and authored in [`docs/`](./docs).
+
 **Status: pre-release.** The full sync engine is here: offer discovery, a read-only
 pricing monitor, price-automation writes, the quantity push, and the order event
 drain. Treat the schema as settled and the API surface as still moving until 1.0.
@@ -54,10 +57,34 @@ importing history. See [Runtime toggles](#runtime-toggles) and
 
 ## Install
 
-```bash
-npm install @zanreal/medusa-allegro
-npx medusa plugin:add @zanreal/medusa-allegro   # local development only
+**This package is not on npm yet.** It installs as a git dependency, pinned to a
+commit:
+
+```jsonc
+// package.json
+{
+  "dependencies": {
+    "@zanreal/medusa-allegro": "github:zanreal-labs/medusa-allegro#b0e864ab6a05e63e6d57a20b3c8adaf943049cdd"
+  }
+}
 ```
+
+Pin the commit you tested against. There is no published tag yet, so `#main` would
+move under you on the next push.
+
+The package compiles itself on install - `prepare` runs `medusa plugin:build`,
+which turns the checked-out source into the `.medusa/server` output its `exports`
+point at. pnpm 10 and newer refuse to run that script for a dependency they do not
+already trust, so a fresh install needs it allowed once in your own project:
+
+```yaml
+# pnpm-workspace.yaml
+allowBuilds:
+  "@zanreal/medusa-allegro@https://codeload.github.com/zanreal-labs/medusa-allegro/tar.gz/b0e864ab6a05e63e6d57a20b3c8adaf943049cdd": true
+```
+
+The key is the exact tarball URL pnpm resolves the pinned commit to, which is why it
+carries the same SHA as the dependency line - move both together.
 
 Register it in `medusa-config.ts`:
 

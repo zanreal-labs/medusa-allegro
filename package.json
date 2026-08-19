@@ -48,6 +48,7 @@
     "test": "npm run test:types && npm run test:unit",
     "test:types": "tsc --noEmit -p tsconfig.spec.json && tsc --noEmit -p src/admin/tsconfig.json",
     "test:unit": "TEST_TYPE=unit NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit",
+    "prepare": "medusa plugin:build",
     "prepublishOnly": "medusa plugin:build"
   },
   "devDependencies": {

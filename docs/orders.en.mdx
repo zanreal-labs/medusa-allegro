@@ -1,0 +1,280 @@
+---
+title: Orders and invoices
+description: Draining Allegro's order event journal into Medusa orders, the derived status ladder, fulfillment write-back, and attaching an issued invoice PDF to the Allegro order.
+---
+
+## Why the event journal, and nothing else
+
+`GET /order/events` is the only scheduled input. Polling checkout forms with
+`updatedAt.gte=` cannot replace it, because Allegro does not reliably bump a
+form's `updatedAt` when only its fulfillment status changed - so a window sweep
+cannot see the most common status change there is.
+
+The drain runs on a 20 second interval rather than a cron expression, because
+Medusa's cron only resolves to the minute and a fresh order should be drained
+sub-minute. `ALLEGRO_ORDERS_SYNC_CRON` switches it back to cron if you prefer;
+the two are mutually exclusive in Medusa's scheduler and the cron wins when both
+are set.
+
+## Cursor discipline
+
+Events are consumed in order, and the cursor advances only over the **leading run
+of events whose order landed**. The first event belonging to a failed or deferred
+order stops the advance, so it and everything after it replay next tick.
+
+Applying an order twice is harmless, because the upsert is idempotent. Losing a
+status change to a transient failure is not, which is why the cursor is
+conservative in that direction.
+
+Three failure modes a single-input sync has to answer for:
+
+**One bad order must not wedge the tick.** After five consecutive failures the
+form is quarantined and the cursor is allowed past it. Without that escape, one
+permanently broken order pins the cursor forever and eventually nothing imports at
+all.
+
+**An outage must not be mistaken for a hundred bad orders.** A tick where every
+refresh failed and none succeeded is systemic: no streak grows, nothing is
+quarantined, the cursor holds.
+
+**A backlog must not starve new orders.** The per-run cap is spent oldest-first,
+because that is the only order in which a backlog shrinks - but 20 of the 100 are
+reserved for the newest candidates, applied out of cursor order. Pure newest-first
+was rejected because it deadlocks: deferring the oldest blocks the cursor at the
+first event, so the same page replays forever.
+
+### Bootstrap
+
+With no cursor, the newest event id is recorded and **nothing is consumed**.
+Replaying the sixty days Allegro retains would be thousands of calls, so a fresh
+install starts tracking from "now" and importing history is a deliberate operator
+action.
+
+## The status ladder
+
+Allegro reports a checkout status and a seller-managed fulfillment status. Their
+product is `allegro_order.derived_status`:
+
+| Allegro | Derived |
+| --- | --- |
+| checkout `CANCELLED` (wins over anything) | `cancelled` |
+| fulfillment `NEW` + checkout `BOUGHT` | `pending` |
+| fulfillment `NEW` + `READY_FOR_PROCESSING` | `new` |
+| `PROCESSING`, `SUSPENDED` | `processing` |
+| `READY_FOR_SHIPMENT`, `READY_FOR_PICKUP` | `ready_for_shipment` |
+| `SENT` | `sent` |
+| `PICKED_UP` | `delivered` |
+| `RETURNED` | `returned` |
+| an unmodelled fulfillment status | nothing is written |
+
+Medusa's `order.status` enum has no `sent` or `ready_for_shipment`, so only the
+two ends Medusa genuinely models are pushed onto the order, through their own
+workflows: `cancelled` cancels it, `delivered` completes it. Writing the column
+directly would fight the dashboard and the order-edit flows.
+
+**`derived_status` is the comparison basis, not the raw status columns.** The raw
+columns are rewritten on every pass, so re-deriving from them made a single
+suppressed status write permanent - the guard saw "no transition" forever after
+and the order froze at whatever status it happened to carry. `derived_status` is
+written in the same operation as any action, so a lost write simply retries, and a
+staff edit survives because staff change the order and leave the derived status
+where Allegro put it.
+
+**Crash-safe ordering.** The bookkeeping row goes in first without `synced_at`,
+then the Medusa order, then the status action, then the watermark last. A crash
+anywhere earlier leaves the row unfinished so the next pass repairs it.
+
+## What the plugin will not do to an order
+
+**Unmatched lines do not lose the sale.** A line whose sygnatura matches no Medusa
+variant is carried as a title-only custom item and recorded in `line_conflicts`.
+The sale happened on Allegro whatever Medusa's catalogue says, and an order nobody
+can see is not safer than one that is visibly half-mapped.
+
+**Totals and line prices come from Allegro verbatim**, never recomputed. Money is
+a decimal string end to end, because round-tripping through a float is how a sync
+starts pushing `233.20999999999998`.
+
+**A disputed total is recorded, not corrected.** Every order's Medusa total is
+compared against the `totalToPay` Allegro recorded for the form, to the grosz and
+in the same currency. A disagreement lands on `allegro_order.conflict` as
+`total-mismatch` with both figures in `conflict_detail`, and the Orders page shows
+it beside the total. It never blocks or rolls back the order, and it clears itself
+on the next pass once the totals agree. The usual benign cause is a title-only
+custom line, which can legitimately move the total - the detail says how many
+custom lines the order has for exactly that reason, so check that count before
+investigating arithmetic.
+
+Note also that imported orders carry **no computed tax lines**. Taking line prices
+from Allegro verbatim is right for reconciliation, but it means an Allegro order's
+tax breakdown in Medusa is empty.
+
+## Fulfillment write-back
+
+A subscriber on `order.fulfillment_created` and `shipment.created` sets Allegro's
+seller-managed status - `READY_FOR_SHIPMENT` and `SENT` respectively - for
+Allegro-sourced orders. It is a no-op for any other order.
+
+It is the one part of this plugin that is event-driven rather than reconciled, and
+that is structural rather than convenient: a fulfillment is a point-in-time act,
+not reconcilable state. There is no "current fulfillment status" in Medusa for a
+sweep to compare against Allegro's, so the event is the only signal there is.
+
+**It never throws.** The Medusa fulfillment already exists by the time it runs, so
+failing the subscriber would not undo it and would bury the reason. The error is
+recorded on `allegro_order.last_error` instead, and an operator can set the status
+by hand on Allegro.
+
+**It has its own toggle**, `fulfillment_writeback_enabled`, and deliberately does
+*not* read `ordersSyncDisabled`. That switch stops the drain from consuming the
+journal, and pausing an import is a different decision from refusing to tell a
+buyer that a shipment happened. So if a mapping is suspect and you are worried
+about marking the wrong Allegro order as shipped, disarm this one writer, fix the
+mapping, and re-arm - order import is unaffected, and there is no reconnect.
+
+One known wrinkle: a store that creates a fulfillment and a shipment in one action
+sends two updates. The second wins, which is correct but wasteful.
+
+## The invoice chain
+
+Allegro expects the invoice for an order to be downloadable from the order view.
+This plugin does not issue invoices, so the chain is:
+
+```text
+order paid  ->  an invoicing module issues the invoice
+            ->  emits `infakt.invoice.issued`
+            ->  medusa-allegro registers the document on the checkout form
+            ->  uploads the PDF
+            ->  stamps allegro_order.invoice_attached_at
+```
+
+**Neither plugin imports the other.** The whole contract is an event name, its
+payload, and a container key (`invoiceModuleKey`) that this plugin resolves
+lazily. A store can invoice without selling on Allegro and sell on Allegro without
+invoicing, so a hard dependency either way would make each plugin unusable without
+the other. With no invoicing module registered the chain is simply inert: nothing
+is logged, nothing is retried, and every other loop behaves identically.
+
+The event payload is read defensively, because it crosses a version boundary.
+`order_id` and `invoice_uuid` are required, everything else is optional, unknown
+fields are ignored, and a malformed payload is **logged and dropped rather than
+thrown** - a throwing subscriber would be retried with the same malformed payload
+until its budget ran out, and the reason would never reach anybody.
+
+### Why the dedupe read is not optional
+
+`POST /order/checkout-forms/{id}/invoices` **has no idempotency key**. A second
+call with the same invoice number registers a second document rather than
+returning the first, and Allegro accepts at most ten documents per order. So two
+things happen before any create:
+
+1. If `allegro_order.allegro_invoice_id` is set, that document is reused outright.
+2. Otherwise `GET .../invoices` is read and matched on invoice number. A match is
+   reused.
+
+The id is persisted the instant a create returns, **before** the upload is
+attempted. That write is the whole reason the column exists: a crash between a
+successful create and the upload would otherwise register a second document for
+the same invoice on the retry.
+
+The size check also happens before anything is registered. Allegro rejects a file
+over 3 MB, and a registered document with no file still counts against the ten, so
+registering first could eventually leave an order unable to accept the invoice
+that *would* fit. An oversized or empty PDF is recorded on the row and never
+uploaded.
+
+Two further details are worth knowing. The file is uploaded as the **raw request
+body** with `Content-Type: application/pdf`, not JSON and not multipart - handing
+a `Uint8Array` to `JSON.stringify` yields `{}`, which Allegro *accepts*, leaving
+the order carrying an invoice document with a two-byte file and nothing reporting
+a failure. And fetching the PDF flips the invoice to `printed` on the invoicing
+side, which is that system recording that the document left it rather than a
+mistake, so this plugin resolves the Allegro client *before* fetching: paying that
+side effect for an upload that cannot happen buys nothing.
+
+### The retry sweep
+
+The event is not the only path. At the end of every orders drain, inside the same
+single-flight claim because it writes to the same rows, a bounded sweep asks the
+invoicing module for its 50 most recently touched invoices and attaches any whose
+Allegro order has no `invoice_attached_at`, up to 10 per tick. It covers both
+halves of a failed attach: the one that registered nothing, and the one that
+registered but never uploaded.
+
+Candidates come from the invoicing module rather than from a marker of this
+plugin's own, deliberately. Attach failures are recorded in
+`allegro_order.last_error`, which is shared with the drain and cleared on its next
+clean pass of the same form, so a sweep keyed off that string would silently lose
+exactly the orders that are otherwise healthy. Comparing "what has been issued"
+against `invoice_attached_at` cannot be invalidated that way.
+
+Two limitations, stated rather than left to be discovered:
+
+- **The sweep only runs when the drain runs**, so `ordersSyncDisabled` pauses the
+  retry as well. The event path is unaffected, so a newly issued invoice still
+  lands.
+- **An attach failure can be overwritten in `last_error`** by a later healthy
+  drain pass of the same form. The sweep is unaffected, but the admin may stop
+  showing the reason; the run's own error line on the orders state row names the
+  count.
+
+### Its own kill switch
+
+Invoice attach has its own toggle, `invoice_attach_enabled`, and it is the one
+writer that ships **on** - because by the time this plugin hears about an invoice
+it already exists as a legal document, so delivering it is the safe default. It is
+on but inert until an invoicing module is emitting events.
+
+It is deliberately not a reading of `ordersSyncDisabled`. That switch stops the
+drain from consuming the journal, and an operator reaches for it to halt a runaway
+import; delivering an invoice the marketplace order needs is a different decision
+with different consequences. One switch covering both would mean pausing an import
+silently stops issued invoices reaching buyers.
+
+When the writer is disarmed, the reason is recorded on the order row rather than
+only logged. "The invoice is not on the order" looks identical to a broken
+integration from outside, and a disarmed writer is the one explanation nobody
+guesses.
+
+## Operator tools
+
+**A quarantined order.** The Orders page quarantine list carries each entry's
+error and how long it has been failing. Fix the cause, then press **Repair**. A
+success clears both failure maps and hands the form back to the drain. A failed
+repair does *not* grow the streak, so retrying while you work on it cannot make
+things worse. If the order is older than Allegro's event retention, Repair still
+works - it fetches the form directly rather than through the journal.
+
+**Importing orders the journal never named.** The **Import window** on the Orders
+page covers the cases the drain structurally cannot: the drain was disabled longer
+than the retention window, a database was restored, the cursor was lost, or you
+want history on a new install. It never moves the event cursor, because an import
+fills a gap behind it, and it holds the orders claim while it runs so the drain
+cannot import anything new in the meantime. One run covers at most 3,000 orders;
+for a larger backfill, run several windows with a moving `since`.
+
+## Allegro order quirks worth knowing
+
+**A checkout form carries up to three different people.** `buyer` is the account
+holder's registration data, which no Allegro seller ever sees in their own UI;
+`delivery.address` is the buyer-entered shipping recipient, and it *is* what the
+seller sees against the order; `invoice.address` is the invoice recipient, which
+can legitimately name someone else again. Reading only the first is how an
+integration ends up displaying a name the Allegro seller panel contradicts. This
+plugin puts `delivery.address` on the Medusa shipping address and
+`invoice.address` on the billing address, falling back to shipping rather than to
+the account holder.
+
+**The buyer block spells the postal code `postCode`**, not `zipCode`, alone among
+the addresses in a checkout form. Typing it as the common address shape silently
+drops it.
+
+**An invoice company's tax id lives in a typed array now.** `company.ids` with a
+`PL_NIP` entry is the current source; the flat `company.taxId` is deprecated but
+still populated, so it stays as the fallback. The other id types Allegro can
+return are foreign registration numbers of similar length to a NIP, so this plugin
+deliberately does *not* read them - a wrong pairing is worse than no pairing.
+
+**`RETURNED` is Allegro-managed.** It appears once every unit is returned and
+refunded, and the fulfillment endpoint rejects it, so it is readable but never
+settable.

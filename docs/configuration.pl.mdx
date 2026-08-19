@@ -1,0 +1,307 @@
+---
+title: Konfiguracja i sterowanie
+description: Wszystkie opcje wtyczki i zmienne środowiskowe, zapisane przełączniki uzbrajające każdy zapis, zasady pierwszeństwa między trzema warstwami i kolejność włączania zapisów.
+---
+
+Konfiguracja mieszka w trzech warstwach, a wiedza o tym, która wygrywa, to różnica
+między przełącznikiem, który przestawisz w trakcie awarii, a ponownym wdrożeniem.
+
+```text
+  zmienna środowiskowa   ->  twarde nadpisanie; dla zapisu potrafi tylko WYŁĄCZYĆ
+  zapisana wartość       ->  to, co operator edytuje w Ustawienia -> Allegro
+  medusa-config.ts       ->  wartość domyślna, z jaką wtyczkę zainstalowano
+```
+
+## Opcje
+
+Pięć jest wymaganych. Cała reszta ma wartość domyślną.
+
+| Opcja | Typ | Wymagana | Domyślnie | Uwagi |
+| --- | --- | --- | --- | --- |
+| `clientId` | `string` | tak | - | Identyfikator klienta aplikacji Allegro. |
+| `clientSecret` | `string` | tak | - | Sekret klienta aplikacji Allegro. |
+| `appName` | `string` | tak | - | Musi zgadzać się z nazwą zarejestrowanej aplikacji. Bez spacji i separatorów HTTP. |
+| `appVersion` | `string` | tak | - | Wersja Twojej integracji, np. `"1.0.0"`. |
+| `docsUrl` | `string` | tak | - | Publiczny adres http(s) opisujący integrację albo dający z nią kontakt. |
+| `encryptionKey` | `string` | tak | - | 32 bajty w base64. Pieczętuje zapisane tokeny. Rotacja czyni istniejące tokeny nieczytelnymi. |
+| `environment` | `"production" \| "sandbox"` | nie | `"production"` | Piaskownica rozmawia z `api.allegro.pl.allegrosandbox.pl`. |
+| `redirectPath` | `string` | nie | `"/admin/allegro/oauth/callback"` | Ścieżka od korzenia na tym backendzie, zgodna znak w znak z zarejestrowanym adresem przekierowania. `//host/...` jest odrzucane: to adres bez protokołu, a nie ścieżka. |
+| `scopes` | `string` | nie | odczyt i zapis ofert, odczyt zamówień | Rozdzielone spacjami. Usuń `:write` dla trybu tylko do odczytu; wtyczka pokaże wtedy brak uprawnienia w panelu. |
+| `backendUrl` | `string` | nie | wyprowadzany | Bezwzględny adres bazowy backendu. Ustaw, gdy proxy przepisuje `Host`. Odwrót do `MEDUSA_BACKEND_URL`, potem do żądania. |
+
+### Opcje synchronizacji
+
+| Opcja | Typ | Domyślnie | Uwagi |
+| --- | --- | --- | --- |
+| `pricingMode` | `"monitor" \| "automation_rule" \| "fixed_price"` | `"automation_rule"` | Patrz [Ceny](./pricing.pl.mdx). To wartość domyślna; zapisany wybór z panelu ją bije. |
+| `automationRules` | `{ promoted: string; standard: string }` | - | Nazwy dwóch reguł, które muszą **już istnieć** na koncie Allegro. Rozwiązywane po nazwie przy każdym uruchomieniu. **Bez tego synchronizacja cen jest bezczynna.** |
+| `changeCap` | `number` | `1` | Polecenia automatyzacji ceny na uruchomienie. Dodatnia liczba całkowita; `0` jest odrzucane. Celowo minimalna wartość zastępcza, nie rekomendacja. |
+| `salesChannelId` | `string` | - | Zawęża, które produkty kwalifikują się do synchronizacji. Bez tego i bez `salesChannelName` kwalifikuje się cały katalog. **Krytyczne dla okablowania.** |
+| `salesChannelName` | `string` | - | Rozwiązywane po nazwie w czasie działania. Nazwa, która nie istnieje, to **błąd**, a nie odwrót do całego katalogu. |
+| `stockLocationIds` | `string[]` | wszystkie lokalizacje | Lokalizacje, których dostępność jest sumowana do wysyłki. Sprawdzane względem istniejących lokalizacji. |
+| `srpMetadataKey` | `string` | - | Czyta SRP z tego klucza w metadanych wariantu, z odwrotem do metadanych produktu. Wyklucza się z `srpPriceListId`. |
+| `srpPriceListId` | `string` | - | Czyta SRP z ceny wariantu w tym cenniku. |
+| `marketplaceId` | `string` | `"allegro-pl"` | Marketplace, do którego kierowane jest przypisanie reguły. **Krytyczne dla okablowania.** |
+| `regionId` | `string` | wyprowadzany | Region, w którym powstają zamówienia z Allegro. Odwrót do pierwszego regionu w walucie zamówienia, potem do pierwszego w ogóle, z ostrzeżeniem. |
+| `costsModuleKey` | `string` | `"productCosts"` | Klucz kontenera opcjonalnego modułu kosztów, rozwiązywany leniwie. Bez niego każda oferta jest pomijana z `missing-break-even`. Nie ma domyślnego progu. |
+| `invoiceModuleKey` | `string` | `"infakt"` | Klucz kontenera opcjonalnego modułu fakturowego, rozwiązywany leniwie. Bez niego łańcuch fakturowy jest bezczynny. |
+
+### Opcje wymuszające wyłączenie
+
+Każda z nich potrafi wyłącznie **wyłączyć** zapis. Żadna niczego nie uzbraja.
+
+| Opcja | Zapis |
+| --- | --- |
+| `priceSyncDisabled` | Ceny |
+| `stockSyncDisabled` | Ilości |
+| `ordersSyncDisabled` | Drenaż zamówień |
+| `fulfillmentWritebackDisabled` | Wysyłka statusu sprzedawcy przy realizacji lub przesyłce w Medusie |
+| `invoiceAttachDisabled` | Dołączanie plików PDF faktur |
+
+### Co wywala start i dlaczego
+
+Każda opcja jest sprawdzana w loaderze modułu, więc błędna konfiguracja wywala się
+przy starcie z konkretnym komunikatem, zamiast wyjść później jako niezrozumiały błąd
+z Allegro. Trzy sprawdzenia warto znać, bo każde wyłapuje pomyłkę, która inaczej
+objawiłaby się jako po cichu bezczynna pętla.
+
+**Ciąg wyglądający na wartość logiczną na wyłączniku rzuca wyjątkiem.**
+`priceSyncDisabled: process.env.X` daje `"true"`, co test prawdziwości uzna, a test
+`=== true` zignoruje - przełącznik czytałby się jako włączony, podczas gdy Ty byłbyś
+przekonany, że jest wyłączony.
+
+**Jedna nazwa reguły użyta dla obu stanów promocji rzuca wyjątkiem.** Zmiana promocji
+byłaby wtedy przełączeniem bez efektu, więc promowana stawka prowizji nigdy nie
+dotarłaby do progu ceny, a synchronizacja cen wyglądałaby zdrowo, systematycznie
+zaniżając próg każdej promowanej oferty.
+
+**Ustawienie obu źródeł SRP naraz rzuca wyjątkiem.** To sufit powstrzymuje regułę
+przed zjeżdżaniem z ceną; dwa źródła to niejednoznaczny sufit.
+
+## Zmienne środowiskowe
+
+| Zmienna | Efekt |
+| --- | --- |
+| `ALLEGRO_PRICE_SYNC_DISABLED` | `1`, `true` albo `yes` wymusza wyłączenie zapisu cen, bijąc uzbrojony zapisany przełącznik. |
+| `ALLEGRO_STOCK_SYNC_DISABLED` | To samo dla zapisu ilości. **Sam `ALLEGRO_PRICE_SYNC_DISABLED` nie zatrzymuje wszystkich zapisów.** |
+| `ALLEGRO_ORDERS_SYNC_DISABLED` | To samo dla drenażu zamówień. |
+| `ALLEGRO_FULFILLMENT_WRITEBACK_DISABLED` | To samo dla zwrotnego zapisu realizacji. |
+| `ALLEGRO_INVOICE_ATTACH_DISABLED` | To samo dla dołączania faktur. |
+| `ALLEGRO_OFFER_SYNC_CRON` | Harmonogram godzinnego przejścia po katalogu. Domyślnie `"15 * * * *"`. |
+| `ALLEGRO_STOCK_SYNC_CRON` | Harmonogram wysyłki ilości. Domyślnie `"*/15 * * * *"`. |
+| `ALLEGRO_ORDERS_SYNC_INTERVAL_MS` | Odstęp drenażu zamówień w ms. Domyślnie `20000`. |
+| `ALLEGRO_ORDERS_SYNC_CRON` | Przestawia drenaż z powrotem na wyrażenie cron. Sposoby wykluczają się; przy obu wygrywa cron. |
+| `ALLEGRO_STOCK_LOCATION_IDS` | Identyfikatory lokalizacji po przecinku, nadpisujące `stockLocationIds`. |
+| `ALLEGRO_PRICING_MODE` | **Blokuje** tryb cenowy. Ignorowane, jeśli nie wskazuje istniejącego trybu. |
+| `ALLEGRO_AUTOMATION_RULE_STANDARD` | **Blokuje** nazwę reguły dla ofert standardowych. |
+| `ALLEGRO_AUTOMATION_RULE_PROMOTED` | **Blokuje** nazwę reguły dla ofert promowanych. |
+| `ALLEGRO_SRP_METADATA_KEY` | **Blokuje** klucz metadanych SRP. |
+| `ALLEGRO_SRP_PRICE_LIST_ID` | **Blokuje** identyfikator cennika SRP. |
+| `ALLEGRO_CHANGE_CAP` | **Blokuje** limit zmian. Ignorowane, jeśli nie jest dodatnią liczbą całkowitą. |
+| `ALLEGRO_MARKETPLACE_ID` | **Blokuje** identyfikator marketplace'u. **Krytyczne dla okablowania.** |
+| `ALLEGRO_SALES_CHANNEL_ID` | **Blokuje** identyfikator kanału sprzedaży. **Krytyczne dla okablowania.** |
+| `ALLEGRO_SALES_CHANNEL_NAME` | **Blokuje** nazwę kanału sprzedaży. |
+| `MEDUSA_BACKEND_URL` | Odwrót dla `backendUrl` przy wyprowadzaniu adresu przekierowania OAuth. |
+
+Harmonogramy i wymuszone wyłączenia są zmiennymi środowiskowymi, a nie opcjami
+wtyczki, z powodu strukturalnego: Medusa oblicza pole `schedule` zadania cyklicznego
+w chwili ładowania wtyczki, zanim istnieje kontener DI, a więc i `options` tej
+wtyczki. Nie da się odczytać rozwiązanych opcji modułu z tego statycznego eksportu.
+
+**Harmonogramy zaczynają chodzić, gdy tylko wtyczka się załaduje, ale zapisy uzbrajają
+zapisane przełączniki, które wychodzą z pudełka wyłączone.** Instalacja albo
+aktualizacja uruchamia pętle w ich rytmie; każdy zapis pozostaje rozbrojony, dopóki go
+nie uzbroisz. Ścieżki odczytu są nieszkodliwe, bo wykrywanie i monitor nie zapisują do
+Allegro niczego.
+
+## Przełączniki czasu działania
+
+Każdy zapis docierający do Allegro ma zapisany, przestawialny przez operatora
+przełącznik, trzymany w jednowierszowym singletonie `allegro_settings`. Przestawienie
+działa od najbliższego taktu albo zdarzenia, bez ponownego wdrożenia, bo każda ścieżka
+wykonania ustala swój efektywny stan z zapisanego wiersza na starcie uruchomienia, a
+nie z wartości zapamiętanej przy starcie procesu.
+
+| Przełącznik | Kolumna | Świeża instalacja | Wymuszone wyłączenie |
+| --- | --- | --- | --- |
+| Ceny | `price_sync_enabled` | **wyłączony** | `ALLEGRO_PRICE_SYNC_DISABLED` |
+| Ilości | `stock_sync_enabled` | **wyłączony** | `ALLEGRO_STOCK_SYNC_DISABLED` |
+| Drenaż zamówień | `orders_sync_enabled` | **wyłączony** | `ALLEGRO_ORDERS_SYNC_DISABLED` |
+| Zwrotny zapis realizacji | `fulfillment_writeback_enabled` | **wyłączony** | `ALLEGRO_FULFILLMENT_WRITEBACK_DISABLED` |
+| Dołączanie faktur | `invoice_attach_enabled` | **włączony** (bezczynny) | `ALLEGRO_INVOICE_ATTACH_DISABLED` |
+
+### Pierwszeństwo
+
+Środowisko, i opcja wtyczki z chwili startu, to twarde nadpisanie, które potrafi
+wyłącznie **wyłączyć** zapis. Nigdy żadnego nie uzbraja:
+
+```text
+efektywnieWłączone = zapisaneWłączone && !wymuszoneWyłączenie
+```
+
+- zapisane **włączone** + brak zmiennej -> **włączone**
+- zapisane **włączone** + wymuszone wyłączenie -> **wyłączone**, bo operatora
+  reagującego na awarię nie unieważnia nieaktualny uzbrojony przełącznik
+- zapisane **wyłączone** + brak zmiennej -> **wyłączone**; zapis uzbraja wyłącznie
+  przełącznik
+
+Panel pokazuje przełącznik wyłączony przez środowisko jako **zablokowany** i
+„wymuszone wyłączenie”, razem ze zmienną do wyczyszczenia. Nigdy nie rysuje
+uzbrojonego przełącznika dla zapisu, który środowisko trzyma na dole. Zapis do
+wyłączonego przełącznika i tak jest przyjmowany i zapamiętywany, więc intencja
+przetrwa do chwili zdjęcia nadpisania.
+
+Dołączanie faktur to jedyny zapis wychodzący z pudełka **włączony**, bo zanim ta
+wtyczka usłyszy o fakturze, dokument już istnieje jako zapis prawny, więc dostarczenie
+go jest bezpiecznym domyślnym zachowaniem. Jest bezczynny, dopóki moduł fakturowy nie
+jest podłączony i nie emituje zdarzeń.
+
+## Pola konfiguracji synchronizacji
+
+Dziewięć ustawień da się edytować w **Ustawienia -> Allegro** na tym samym singletonie:
+tryb cenowy, dwie nazwy reguł automatyzacji, dwa źródła SRP, limit zmian, identyfikator
+marketplace'u i zakres kanału sprzedaży. Edycja zapisuje się i działa od najbliższego
+uruchomienia, bez ponownego wdrożenia.
+
+Sklep, który nigdy nie dotknie tych pól, zachowuje się dokładnie jak wcześniej: każda
+zapisana kolumna startuje jako `null`, a `null` przepuszcza dalej do opcji z
+`medusa-config.ts`.
+
+### Pierwszeństwo dla wartości, a nie dla flagi
+
+Dla ciągu znaków ani liczby nie istnieje „wyłączone”, więc ustawiona blokada
+środowiskowa wygrywa bezwarunkowo:
+
+```text
+efektywnaWartość = blokadaŚrodowiskowa ?? wartośćZapisana ?? domyślnaZKonfiguracji
+```
+
+Ustawiona blokada środowiskowa jest rozstrzygająca - bije i zapisaną edycję z panelu, i
+opcję z `medusa-config.ts`, a panel pokazuje pole jako zablokowane, tak samo jak
+wyłączony przełącznik. Wyczyszczenie pola w panelu zapisuje `null`, co wraca do opcji z
+`medusa-config.ts`, a nie do pustej wartości.
+
+### Dwa pola są krytyczne dla okablowania
+
+Edycja `marketplaceId` albo `salesChannelId` **zmienia zakres produktów Medusy, które
+ta wtyczka dopasowuje do ofert Allegro**. Błędna wartość psuje mapowanie po cichu,
+zamiast dać oczywiście zły wynik. Oba pozostają edytowalne, z blokadą środowiskową jako
+wyjściem awaryjnym: ustaw `ALLEGRO_MARKETPLACE_ID` albo `ALLEGRO_SALES_CHANNEL_ID`, żeby
+przypiąć właściwą wartość na wypadek pomyłki w panelu podczas przełączania. Panel
+rysuje na obu polach wyraźne ostrzeżenie.
+
+### Dwie niezmienniki są pilnowane przy każdym zapisie
+
+Nazwy reguły standardowej i promowanej muszą się różnić, a źródło SRP może być ustawione
+najwyżej jedno. Oba istniały już jako sprawdzenia przy starcie, a teraz są pilnowane
+także przy każdym zapisie z panelu, bo zapisanie jednego pola niezależnie od drugiego
+potrafi stworzyć kolizję, której sprawdzenie startowe nigdy nie widziało. Zapis jest
+odrzucany, a nie po cichu przyjmowany.
+
+## Włączanie zapisów
+
+Każdy zapis wychodzi rozbrojony, więc pętle chodzą tylko do odczytu, dopóki nie
+uzbroisz kolejnych. Bezpieczna kolejność i powód, dla którego każdy krok stoi tam, gdzie
+stoi:
+
+1. **Połącz** konto z uprawnieniem do zapisu. Bez niego każde polecenie odpowiada 403, a
+   panel podnosi baner o ponownym połączeniu.
+2. **Zostaw zapisy rozbrojone** w czasie przygotowań. To domyślny stan świeżej
+   instalacji, więc nie ma tu nic do roboty, chyba że aktualizowałeś z już uzbrojonymi
+   zapisami. Jeśli przełączasz się z innego systemu, który obecnie pisze do Allegro,
+   ustaw zmienne wymuszające wyłączenie, żeby żadne przestawienie przełącznika nie
+   uzbroiło zapisu, zanim stary system nie zostanie wygaszony. Dwa systemy piszące do
+   jednego katalogu to najgorszy możliwy stan, a każdy zapis jest osobny.
+3. **Pozwól popracować wykrywaniu i monitorowi.** Oba są tylko do odczytu. Rozwiąż każdy
+   konflikt na stronie ofert i zobacz, co tryb ceny i dryf naprawdę mówią o katalogu. To
+   ten krok zamienia uzbrojenie zapisów w decyzję zamiast w skok na głęboką wodę.
+4. **Uzupełnij prowizje kategorii.** Dopóki kategoria nie ma obu, każda oferta w niej
+   jest pomijana z `missing-break-even`.
+5. **Skonfiguruj źródło SRP** i sprawdź, czy warianty faktycznie niosą wartość. Bez tego
+   każda oferta jest pomijana z `missing-srp`.
+6. **Utwórz dwie reguły automatyzacji ceny** na koncie Allegro i wpisz ich nazwy w
+   `automationRules`. Do tego czasu synchronizacja cen jest bezczynna z definicji.
+7. **Uzbrój zapisy - najpierw stany, potem ceny.** Zła ilość jest odwracalna w jednym
+   uruchomieniu; zła cena mogła już coś sprzedać. Podnieś `changeCap` dopiero wtedy, gdy
+   obejrzysz historię wysyłek i uwierzysz uruchomieniu. Drenaż zamówień, zwrotny zapis
+   realizacji i dołączanie faktur uzbrajaj wtedy, gdy będziesz gotowy na każde z osobna.
+
+## Zatrzymanie zapisów, natychmiast
+
+Ustaw odpowiednią zmienną i przeładuj środowisko procesu:
+
+```bash
+ALLEGRO_PRICE_SYNC_DISABLED=1      # polecenia automatyzacji ceny
+ALLEGRO_STOCK_SYNC_DISABLED=1      # polecenia zmiany ilości
+ALLEGRO_ORDERS_SYNC_DISABLED=1     # drenaż zamówień
+ALLEGRO_INVOICE_ATTACH_DISABLED=1  # dołączanie plików PDF faktur
+```
+
+Wyłączona pętla **zapisuje** na swoim wierszu stanu, że była wyłączona, więc
+„wyłączone” pozostaje odróżnialne od „zepsute” - z zewnątrz oba wyglądają jak „nic się
+nie stało”.
+
+**Zmienna potrafi wyłącznie wyłączyć, nigdy włączyć.** Rozstrzygnięcie brzmi
+`option === true || envIsTruthy`, więc `ALLEGRO_PRICE_SYNC_DISABLED=0` nie uzbraja
+pętli, której opcja to `true`. Co jest potrzebne do ponownego uzbrojenia, zależy więc od
+tego, jak napisano Twoją konfigurację, i warto to ustalić, zanim będzie trzeba pod
+presją:
+
+```ts
+// Wzorzec A - opcja przypięta. Ponowne uzbrojenie to edycja konfiguracji i wdrożenie.
+priceSyncDisabled: true,
+
+// Wzorzec B - opcja wyprowadzona z tej samej zmiennej. Ponowne uzbrojenie to jedna
+// zmiana środowiska, a wyłącznik awaryjny nadal wygrywa, bo =1 też daje opcję true:
+//   brak -> true (wyłączone)    =1 -> true (wyłączone)    =0 -> false (uzbrojone)
+priceSyncDisabled: process.env.ALLEGRO_PRICE_SYNC_DISABLED !== "0",
+```
+
+Wzorzec B jest lepszym domyślnym wyborem przy etapowym przełączaniu: jedna zmienna jest
+zarazem blokadą przed przełączeniem i przełącznikiem uzbrajającym, więc między
+operatorem a działającą synchronizacją nie stoi żadna edycja konfiguracji. Wzorzec A jest
+właściwy, gdy chcesz, żeby uzbrojenie wymagało przeglądu kodu. Wzorzec B musi porównywać
+z `"0"` wprost, a nie rzutować, bo `Boolean(process.env.X)` jest `true` dla ciągu `"0"`,
+co przypięłoby wyłączenie na zawsze.
+
+Zwróć uwagę, że `ordersSyncDisabled` nie zatrzymuje zwrotnego zapisu realizacji ani
+dołączania faktur - każde ma własny wyłącznik. Zatrzymuje natomiast przejście ponawiające
+faktury, które chodzi na końcu drenażu. Żeby zatrzymać każdy zapis do Allegro, rozłącz
+konto.
+
+## Jak czytać pętlę, która wygląda na zaciętą
+
+Sprawdź `status` wiersza stanu na stronie ustawień:
+
+- **`running` i nic się nie rusza.** Uruchomienie po awarii trzyma zajęcie do sześciu
+  minut, po czym następny takt przejmuje je jako nieświeże i zapisuje to w logu.
+  Nieświeżość mierzy się od `claim_heartbeat_at`, które żywe uruchomienie podbija co
+  najmniej raz na minutę, więc długie, ale zdrowe uruchomienie utrzymuje swoje zajęcie
+  zamiast zostać przejęte w locie.
+- **`running` i linia w logu o utracie zajęcia.** Uruchomienie odkryło, że zostało
+  przejęte, i zatrzymało się, nie zapisując już niczego, łącznie z własnym wynikiem. Nic
+  nie ginie; porzucona praca powtórzy się.
+- **`idle` albo `error` z komunikatem o wyłączniku, gdy trwa inne uruchomienie.**
+  Pominięcie, które przychodzi w chwili, gdy zajęcie trzyma inne uruchomienie, celowo nie
+  dotyka wiersza stanu i zapisuje w logu, że tego odmówiło. Zapisanie zwolniłoby zajęcie
+  tamtego uruchomienia i pozwoliło następnemu taktowi wystartować drugie równoległe.
+- **`error` ze słowem `SYSTEMIC` w komunikacie.** Pętla czeka na Allegro. Nic nie zostało
+  pominięte ani wsadzone do kwarantanny; ponowi sama.
+- **`ok` z zerowymi licznikami.** Nie ma nic do roboty, co jest czymś innym niż zepsute.
+  Liczniki są w tabeli zdrowia właśnie po to, żeby te dwa stany dało się odróżnić.
+- **`idle` z komunikatem o wyłączniku.** Działa zgodnie z konfiguracją.
+
+## Budżet ręcznych wysyłek
+
+`POST /admin/allegro/offers/:sku/push` dzieli zasięg rażenia z zaplanowaną pętlą. Ręczne
+wysyłki są liczone w ruchomym oknie godziny, a gdy licznik sięgnie `changeCap`, kolejne
+są odrzucane z kodem HTTP 429 i nagłówkiem `Retry-After` na godzinę.
+
+Istnieje to dla skryptów, a nie dla ludzi. Każde wywołanie bierze zajęcie synchronizacji,
+więc wywołania szeregują się - ale szeregowanie to nie ograniczanie, a pętla po tej
+trasie przeceniłaby inaczej cały katalog, obchodząc prosto limit, który istnieje po to,
+żeby zły plan tego nie zrobił. Licznik pochodzi z `pushed_by` w tabeli audytu, więc własne
+pętle wtyczki nigdy nie zjadają budżetu operatora, a limit przeżywa restart.
+
+Jeśli naprawdę potrzebujesz wysłać w godzinę więcej, podnieś `changeCap` - co podnosi go
+także dla zaplanowanej pętli, i to celowo, bo jest to ta sama decyzja.
