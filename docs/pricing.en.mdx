@@ -37,7 +37,9 @@ names the variants whose Medusa price needs fixing.
 `grossCost / (1 - commissionRate)` - the smallest gross price at which net income
 reaches zero, ceiled to a whole unit because the managed rules require it.
 
-`grossCost` comes from a product costs module, resolved lazily and optionally.
+`grossCost` comes from a product costs module, resolved lazily and optionally -
+[`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs) is the one this
+plugin was built against, and any module exposing the same read works.
 The commission rate comes from `allegro_category_rate`, selected by the offer's
 category **and its promotion state**.
 

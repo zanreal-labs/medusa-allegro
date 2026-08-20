@@ -43,7 +43,7 @@ Pięć jest wymaganych. Cała reszta ma wartość domyślną.
 | `srpPriceListId` | `string` | - | Czyta SRP z ceny wariantu w tym cenniku. |
 | `marketplaceId` | `string` | `"allegro-pl"` | Marketplace, do którego kierowane jest przypisanie reguły. **Krytyczne dla okablowania.** |
 | `regionId` | `string` | wyprowadzany | Region, w którym powstają zamówienia z Allegro. Odwrót do pierwszego regionu w walucie zamówienia, potem do pierwszego w ogóle, z ostrzeżeniem. |
-| `costsModuleKey` | `string` | `"productCosts"` | Klucz kontenera opcjonalnego modułu kosztów, rozwiązywany leniwie. Bez niego każda oferta jest pomijana z `missing-break-even`. Nie ma domyślnego progu. |
+| `costsModuleKey` | `string` | `"productCosts"` | Klucz kontenera opcjonalnego modułu kosztów ([`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs)), rozwiązywany leniwie. Bez niego każda oferta jest pomijana z `missing-break-even`. Nie ma domyślnego progu. |
 | `invoiceModuleKey` | `string` | `"infakt"` | Klucz kontenera opcjonalnego modułu fakturowego, rozwiązywany leniwie. Bez niego łańcuch fakturowy jest bezczynny. |
 
 ### Opcje wymuszające wyłączenie

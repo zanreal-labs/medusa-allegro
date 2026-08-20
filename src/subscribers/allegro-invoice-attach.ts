@@ -7,7 +7,7 @@ import { attachAllegroInvoice } from "../workflows/attach-allegro-invoice";
 /**
  * Attach an invoice to its Allegro order as soon as the invoice is issued.
  *
- * Listens for `infakt.invoice.issued`, which `@zanreal/medusa-infakt` emits once the
+ * Listens for `infakt.invoice.issued`, which the invoicing module emits once the
  * document exists (and, for a B2B sale, once it is filed to KSeF). Neither plugin
  * imports the other: the event name and its payload are the whole contract, and the
  * payload is read defensively because it crosses a version boundary.

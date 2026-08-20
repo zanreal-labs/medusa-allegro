@@ -43,7 +43,7 @@ Five are required. Everything else has a default.
 | `srpPriceListId` | `string` | - | Reads the SRP from the variant's price in that price list. |
 | `marketplaceId` | `string` | `"allegro-pl"` | Marketplace the rule assignment targets. **Wiring-critical.** |
 | `regionId` | `string` | derived | Region Allegro orders are created in. Falls back to the first region matching the order currency, then the first region at all, with a warning. |
-| `costsModuleKey` | `string` | `"productCosts"` | Container key of the optional product costs module, resolved lazily. Without it every offer is skipped with `missing-break-even`. There is never a default floor. |
+| `costsModuleKey` | `string` | `"productCosts"` | Container key of the optional product costs module ([`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs)), resolved lazily. Without it every offer is skipped with `missing-break-even`. There is never a default floor. |
 | `invoiceModuleKey` | `string` | `"infakt"` | Container key of the optional invoicing module, resolved lazily. Without it the invoice chain is inert. |
 
 ### Force-disable options

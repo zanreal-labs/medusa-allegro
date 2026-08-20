@@ -3,7 +3,7 @@ import type { MedusaContainer } from "@medusajs/framework/types";
 /**
  * The soft dependency on the module that issues invoices.
  *
- * `@zanreal/medusa-infakt` issues the documents and emits `infakt.invoice.issued`; this
+ * The invoicing module issues the documents and emits `infakt.invoice.issued`; this
  * plugin attaches them to Allegro orders. Neither depends on the other, on purpose: a
  * store can invoice without selling on Allegro and sell on Allegro without invoicing,
  * and a hard dependency in either direction would make each plugin unusable without the

@@ -35,8 +35,8 @@ What is here:
   write-back and an operator import window for gaps beyond the event retention
   period.
 - **Invoice attach** puts an issued invoice PDF onto the Allegro order, driven by an
-  event from `@zanreal/medusa-infakt` and retried by a bounded sweep. A soft
-  dependency in one direction only - see [The invoice chain](#the-invoice-chain).
+  event from an invoicing module and retried by a bounded sweep. A soft dependency
+  in one direction only - see [The invoice chain](#the-invoice-chain).
 - Admin surfaces built around one rule - **per-product state on the product,
   everything else under Settings**. A product detail widget shows each variant
   SKU's linked offer, status, drift, promotion state and per-offer price sync
@@ -153,8 +153,8 @@ npx medusa db:migrate
 | `stockLocationIds`   | `string[]`                               | no       | every location   | Locations whose available quantity is summed for the push. `ALLEGRO_STOCK_LOCATION_IDS` overrides it.                                                                                                                                                                                                                                 |
 | `srpMetadataKey`     | `string`                                 | no       | -                | Reads the SRP (the price-range ceiling) from that key in the variant's `metadata`, falling back to the product's. Mutually exclusive with `srpPriceListId`. Also editable and persisted from the admin.                                                                                                                               |
 | `srpPriceListId`     | `string`                                 | no       | -                | Reads the SRP from the variant's price in that price list. Also editable and persisted from the admin.                                                                                                                                                                                                                                |
-| `costsModuleKey`     | `string`                                 | no       | `"productCosts"` | Container key of `@zanreal/medusa-product-costs`, resolved lazily and optionally. Without it, every offer is skipped with `missing-break-even`. There is never a default floor.                                                                                                                                                       |
-| `invoiceModuleKey`   | `string`                                 | no       | `"infakt"`       | Container key of `@zanreal/medusa-infakt`, resolved lazily and optionally. Without it the invoice chain is inert. See [The invoice chain](#the-invoice-chain).                                                                                                                                                                        |
+| `costsModuleKey`     | `string`                                 | no       | `"productCosts"` | Container key of [`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs), resolved lazily and optionally. Without it, every offer is skipped with `missing-break-even`. There is never a default floor.                                                                                                                                                       |
+| `invoiceModuleKey`   | `string`                                 | no       | `"infakt"`       | Container key of the invoicing module that issues your documents, resolved lazily and optionally. Without it the invoice chain is inert. See [The invoice chain](#the-invoice-chain).                                                                                                                                                                        |
 | `marketplaceId`      | `string`                                 | no       | `"allegro-pl"`   | Marketplace the rule assignment targets. Also editable and persisted from the admin - **wiring-critical**, see [Sync configuration fields](#sync-configuration-fields).                                                                                                                                                               |
 | `regionId`           | `string`                                 | no       | derived          | Region Allegro orders are created in. Falls back to the first region matching the order currency, then the first region at all (with a warning).                                                                                                                                                                                      |
 
@@ -229,7 +229,9 @@ existed. Upgrading changes nothing about what your store writes.
 
 ### The floor and the ceiling apply in every mode
 
-The break-even floor (from `@zanreal/medusa-product-costs`, grossed for VAT and for the
+The break-even floor (from
+[`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs),
+grossed for VAT and for the
 category commission) and the SRP ceiling (from variant metadata or a price list) are the
 safety story of this whole plugin, so no mode is allowed to skip them:
 
@@ -343,8 +345,7 @@ Every **writer** ships **off**, so a freshly connected store publishes nothing t
 Allegro until an operator arms each writer deliberately. **Invoice attach** is the one
 exception - it ships **on but inert**: by the time an invoice event reaches this plugin
 the document already exists as a legal record, so delivering it is the safe default, and
-there is nothing to attach until an invoicing module (`@zanreal/medusa-infakt`) is wired
-and emitting events.
+there is nothing to attach until an invoicing module is wired and emitting events.
 
 The singleton row is created lazily under a fixed primary key on first read, with these
 defaults. Upgrading an existing install runs the additive migration that creates the
@@ -742,9 +743,9 @@ reserved, so units already promised to unfulfilled Medusa orders are not adverti
 again.
 
 **Keeping Medusa inventory honest is explicitly not this plugin's job.** In this
-stack that belongs to [`@zanreal/medusa-marken`](https://github.com/zanreal-labs/medusa-marken),
-which owns the supplier snapshot and the `stockArmed` gate that refuses to propagate
-an untrustworthy one into Medusa inventory. That guard lives one layer up, where the
+stack that belongs to a separate inventory plugin, which owns the supplier snapshot
+and the arming gate that refuses to propagate an untrustworthy one into Medusa
+inventory. That guard lives one layer up, where the
 supplier response is actually visible; a second one here would be a guess about data
 this plugin has no source for.
 
@@ -826,7 +827,8 @@ range a pushed price has to sit inside in `fixed_price`, and as the report in `m
 
 - **The floor** is `grossCost / (1 - commissionRate)`, the smallest gross price at
   which net income reaches zero. `grossCost` comes from
-  `@zanreal/medusa-product-costs` (a **soft** dependency, resolved lazily), and the
+  [`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs)
+  (a **soft** dependency, resolved lazily), and the
   commission rate from `allegro_category_rate` selected by the offer's category
   **and its promotion state**. Ceiled to a whole unit, because the managed rules
   require it.
@@ -1018,10 +1020,10 @@ each fulfillment event, so a flip takes effect immediately.
 ### The invoice chain
 
 Allegro expects the invoice for an order to be downloadable from the order view. This
-plugin does not issue invoices - `@zanreal/medusa-infakt` does - so the chain is:
+plugin does not issue invoices - your invoicing module does - so the chain is:
 
 ```
-order paid -> medusa-infakt issues the invoice (+ KSeF for a B2B sale)
+order paid -> the invoicing module issues the invoice (+ KSeF for a B2B sale)
            -> emits `infakt.invoice.issued`
            -> medusa-allegro registers the document on the checkout form
            -> uploads the PDF

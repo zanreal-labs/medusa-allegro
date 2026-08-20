@@ -84,8 +84,8 @@ export interface AllegroPluginOptions {
   invoiceAttachDisabled?: boolean;
   /**
    * Container key of the invoicing module that issues the documents, resolved
-   * lazily and optionally. Defaults to `"infakt"`
-   * (`@zanreal/medusa-infakt`).
+   * lazily and optionally. Defaults to `"infakt"`, after the invoicing module
+   * this plugin was first paired with.
    *
    * A SOFT dependency, duck-typed on the two reads the attach path makes, so a
    * store that invoices somewhere else - or nowhere - is a supported configuration
@@ -450,9 +450,13 @@ export const changeCapEnvOverride = (
 
 /** Default price-automation marketplace: a single-account PL seller lives here. */
 export const DEFAULT_MARKETPLACE_ID = "allegro-pl";
-/** Default container key of the optional `@zanreal/medusa-product-costs` module. */
+/**
+ * Default container key of the optional
+ * {@link https://github.com/zanreal-labs/medusa-product-costs `@zanreal/medusa-product-costs`}
+ * module.
+ */
 export const DEFAULT_COSTS_MODULE_KEY = "productCosts";
-/** Default container key of the optional `@zanreal/medusa-infakt` module. */
+/** Default container key of the optional invoicing module. */
 export const DEFAULT_INVOICE_MODULE_KEY = "infakt";
 /**
  * Default per-run cap on price-automation commands: deliberately the smallest

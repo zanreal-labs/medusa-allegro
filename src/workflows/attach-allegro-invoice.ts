@@ -17,7 +17,7 @@ import type { InvoiceSource } from "./lib/invoicing";
  * Attach an issued invoice PDF to the Allegro order it belongs to.
  *
  * The last link in the invoicing chain: a Medusa order sourced from Allegro gets its
- * invoice issued by `@zanreal/medusa-infakt`, and Allegro requires the document on the
+ * invoice issued by the invoicing module, and Allegro requires the document on the
  * checkout form so the buyer can download it from the order view.
  *
  * Event-driven, like the fulfillment push and for the same reason - an invoice being

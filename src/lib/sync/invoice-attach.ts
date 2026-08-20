@@ -21,7 +21,7 @@ import type { CheckoutFormInvoice } from "../allegro/types";
  *   the ten an order allows. So the check happens before anything is created.
  */
 
-/** The event this plugin listens for. Emitted by `@zanreal/medusa-infakt`. */
+/** The event this plugin listens for. Emitted by the invoicing module. */
 export const INVOICE_ISSUED_EVENT = "infakt.invoice.issued";
 
 /**
