@@ -1,0 +1,142 @@
+name: Release
+
+# The only path this package has to the registry. That is not a convention: npm
+# provenance is a signed statement about where a tarball was built and from which
+# commit, and only a cloud CI run holding an OIDC identity can produce one. A
+# `npm publish` from a laptop would put a version on npm with no provenance, and
+# a published version cannot be replaced afterwards, only deprecated.
+
+on:
+  release:
+    types: [published]
+
+# No cancel-in-progress, unlike ci.yml. Cancelling a publish that has already
+# uploaded leaves a version on the registry that no run claims to have made.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Mints the OIDC token. Provenance needs it today, and trusted publishing needs
+  # the same token once it is configured. Without it `npm publish --provenance`
+  # fails outright rather than publishing something unsigned.
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+
+    # Costs nothing today and is the hook for a required reviewer on a publish.
+    # It is also the environment name to enter on npmjs.com's trusted publisher
+    # form, which matches on it when set.
+    environment: npm
+
+    steps:
+      # A release event checks out the release tag, which is what the guard below
+      # compares against package.json.
+      - uses: actions/checkout@v4
+
+      # This repository is on npm, not pnpm - there is a package-lock.json and
+      # ci.yml runs `npm ci`. A release must install exactly what CI installed,
+      # so it uses the same lockfile and the same client. ci.yml also runs the
+      # verify job on Node 20 and 22; 20 is only the floor declared in engines,
+      # and a publish needs one Node, so this takes the current LTS.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          # Writes the .npmrc that points at npmjs.org and reads NODE_AUTH_TOKEN.
+          # Needed even under trusted publishing: the registry host is what npm
+          # derives the OIDC audience from.
+          registry-url: https://registry.npmjs.org
+
+      # Node 22 ships npm 10, which can do provenance but cannot do the trusted
+      # publishing token exchange - that landed in npm 11.5.1. Installing it now
+      # means switching to trusted publishing later is a change on npmjs.com
+      # only, with no edit to this file.
+      - name: Use npm 11
+        run: npm install -g "npm@^11.5.1"
+
+      # NODE_AUTH_TOKEN is deliberately set only on the publish step and not at
+      # job level: hoisting it here would hand a publish credential to every
+      # dependency lifecycle script that this install and the build below run.
+      #
+      # The @zanreal/medusa-admin-kit dependency is a `github:` spec. npm
+      # resolves that over HTTPS by default and the repository is public, so it
+      # needs no credential and no git config - unlike the pnpm-based sibling
+      # repositories, which have to rewrite the SSH form first.
+      - name: Install
+        run: npm ci
+
+      # A tag that disagrees with package.json publishes a version under a tag
+      # pointing somewhere else. This is the only failure here that is still
+      # cheap to fix, because nothing has reached the registry yet.
+      - name: Check the tag matches package.json
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "v${version}" ]; then
+            echo "Release tag $TAG does not match package.json version $version."
+            echo "Expected v${version}. Delete the release and the tag, then cut it again."
+            exit 1
+          fi
+          echo "Tag $TAG matches package.json."
+
+      # npm rejects a duplicate version by itself, but only after prepare has run
+      # and the tarball has been uploaded, and the error it prints reads like an
+      # auth failure. Failing here says what actually happened.
+      - name: Check the version is not already published
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on the registry."
+            echo "A published version cannot be replaced. Bump the version and cut a new release."
+            exit 1
+          fi
+          echo "${name}@${version} is not on the registry yet."
+
+      # `npm install <pkg>` with no version resolves to the latest dist-tag, so a
+      # release candidate published there is what every new consumer gets. GitHub
+      # already knows which releases are prereleases; use its answer.
+      - name: Choose the dist-tag
+        id: dist-tag
+        env:
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+            echo "Prerelease: publishing under the next dist-tag."
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "Publishing under the latest dist-tag."
+          fi
+
+      # Compiles src to .medusa/server, the one directory the files field ships,
+      # and bundles the admin extension. `prepare` builds again during publish;
+      # this runs first so a broken export map fails before anything is uploaded.
+      - name: Build
+        run: npx medusa plugin:build
+
+      # `npm test` here is test:types + test:unit, the same two checks ci.yml
+      # runs as separate steps.
+      - name: Test
+        run: npm test
+
+      # --provenance and --access repeat what publishConfig already sets, so this
+      # line reads correctly without opening the manifest. --access public is what
+      # makes a first publish of a SCOPED package land as public; the default for
+      # a scope is restricted, which fails on a free account.
+      - name: Publish
+        env:
+          # Unset once trusted publishing is configured on npmjs.com. npm tries
+          # the OIDC exchange first and falls back to this token only when the
+          # exchange fails, so removing the secret needs no change here.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public --tag "${{ steps.dist-tag.outputs.tag }}"
