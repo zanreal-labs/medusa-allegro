@@ -127,7 +127,9 @@ jobs:
       # group matters - a guard that reddens CI on an unrelated force push gets
       # disabled by the third person it inconveniences.
       #
-      # Credit: medusa-marken found this one.
+      # Credit where it is due: this hole was not reasoned out here. A sibling
+      # ZanReal Medusa plugin shipped a migration-less snapshot commit straight
+      # through the step above, and this guard is ported from the fix.
       - name: Fail if the snapshot moved without a new migration
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}

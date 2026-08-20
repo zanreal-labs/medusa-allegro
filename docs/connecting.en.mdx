@@ -1,0 +1,183 @@
+---
+title: Connecting an account
+description: Registering an Allegro application, generating the encryption key that seals the stored tokens, running the OAuth flow from the admin, and what protects the callback.
+---
+
+The plugin talks to Allegro as your seller account, through OAuth 2.0
+authorization code. Both tokens are sealed with AES-256-GCM before they touch the
+database, because the refresh token is a long-lived credential for the whole
+account.
+
+## 1. Register an application
+
+Sign in at [apps.developer.allegro.pl](https://apps.developer.allegro.pl) with the
+seller account you want to connect. For sandbox, use
+[apps.developer.allegro.pl.allegrosandbox.pl](https://apps.developer.allegro.pl.allegrosandbox.pl)
+and set `environment: "sandbox"`.
+
+Create an application of the type that has **a web application with a redirect
+URI**. This plugin uses the authorization code grant, not the device flow.
+
+Four details matter, and each one fails a connection if you get it wrong:
+
+**The name must be stable and machine-safe.** No spaces, no HTTP separators. That
+exact string is the `appName` option, because Allegro requires every request to
+carry a `User-Agent` identifying the registered app one-to-one, and has been
+enforcing it since June 2026. The plugin composes
+`{appName}/{appVersion} (+{docsUrl})` and validates every part at construction
+time, so a name with a space is rejected before a single request goes out. The
+`+` before the URL is required by Allegro's own validator.
+
+**The redirect URI is compared byte for byte** during the token exchange. It is
+your backend plus `redirectPath`:
+
+```text
+https://your-medusa-backend.example.com/admin/allegro/oauth/callback
+```
+
+A trailing slash difference is a failed connection, not a warning.
+
+**`docsUrl` has to be a real public http(s) URL** documenting or contacting the
+integration. It ends up in the User-Agent that Allegro's support reads when they
+want to know who is hammering their API.
+
+**Grant the scopes you configured.** The default is offer read, offer write and
+order read:
+
+```text
+allegro:api:sale:offers:read allegro:api:sale:offers:write allegro:api:orders:read
+```
+
+Drop `:write` if you only ever want to observe. The plugin then reports the
+missing write scope in the admin rather than failing obscurely on the first
+command.
+
+Copy the client id and secret into `ALLEGRO_CLIENT_ID` and
+`ALLEGRO_CLIENT_SECRET`.
+
+## 2. Generate an encryption key
+
+```bash
+openssl rand -base64 32
+```
+
+Put it in `ALLEGRO_ENCRYPTION_KEY`. Every stored token is sealed as
+`base64(iv[12] || authTag[16] || ciphertext)` with a fresh random IV per value, so
+encrypting the same token twice yields different ciphertext and tampering is
+detectable.
+
+The plugin refuses to boot unless the value is canonical base64, standard or
+URL-safe, for exactly 32 bytes. The check is deliberately strict about the
+**encoding** and not only the length, because `Buffer.from(value, "base64")`
+never throws: it silently drops every character outside the alphabet and stops at
+the first padding it finds. A length test alone therefore accepts mangled input,
+and `"A".repeat(43)` decodes to a perfectly well-formed all-zero key that AES
+would happily use. Both are rejected by name.
+
+Two consequences worth writing down before you need them:
+
+- **Rotating the key makes existing tokens unreadable.** Reconnect after a
+  rotation. The admin distinguishes "the envelope will not open" from "not
+  connected", because the first sends you to your own configuration and the second
+  sends you to Allegro.
+- **The key also signs the OAuth `state`**, so rotating it invalidates any
+  connection flow that is mid-air as well as the stored tokens.
+
+## 3. Connect from the admin
+
+Open **Settings -> Allegro** and press **Connect Allegro**. You land on Allegro's
+consent screen, approve, and come back to the settings page with the account
+login, the granted scopes and the token expiry filled in.
+
+The page distinguishes three unhealthy states from a working connection, because
+each needs a different response:
+
+| State | What it means | What to do |
+| --- | --- | --- |
+| No refresh token | The connection stops working the moment the access token expires | Reconnect now, not later |
+| Unreadable credentials | `encryptionKey` no longer opens what is stored | Restore the old key, or reconnect |
+| Write scope missing | Allegro answered 403 on a command | Reconnect and approve the write scope |
+
+A row whose envelope will not open is reported as such rather than as a green
+"Connected". Reporting it as connected would send an operator looking at Allegro
+when the problem is one environment variable away.
+
+## What protects the callback
+
+The connection flow is the one place where an attacker who can get an admin's
+browser to issue a single GET could otherwise bind a foreign Allegro account to
+your store. Four things stand in the way.
+
+**A signed state, not an opaque nonce.** `GET /admin/allegro/oauth/start` mints
+`v1.<issuedAt>.<nonce>.<mac>`, where the MAC is HMAC-SHA256 over the mint time,
+the nonce and the admin's `actor_id`, keyed by `encryptionKey`. The admin id is
+deliberately **not** in the value: the state travels through Allegro's authorize
+URL and lands in Allegro's logs, in browser history and in your own access logs,
+so putting an internal user id there would leak it to all three for no gain. The
+callback already knows its own actor id and recomputes the MAC over it, which is
+a stronger check than echoing it back.
+
+**A cookie that proves same-browser.** The state is parked in an httpOnly
+`SameSite=Lax` cookie with a ten-minute life. `Lax` rather than `Strict` because
+the cookie has to survive exactly one cross-site hop, Allegro's 302 back to the
+callback, and `Strict` would withhold it on that navigation and reject every
+legitimate flow. Over https the cookie carries the `__Host-` prefix, so a sibling
+subdomain cannot shadow it; over plain http it does not, because a `__Host-`
+cookie without `Secure` is simply dropped and local development would break.
+
+**Both checks, not either.** The callback requires the state to match the cookie,
+compared in constant time, **and** to verify against the actor completing the
+flow, within the last ten minutes. The cookie proves same-browser; the signature
+proves same-server, same admin, recent. A state planted in someone else's browser
+fails the second check.
+
+**Single use, spent at the right moment.** The cookie is cleared only once the
+authorization code has actually been handed to Allegro, which is when the state
+is genuinely spent. Branches that run before verification - `?error=...`, a
+missing code, a state mismatch - deliberately leave it alone, so a lured GET to
+the callback cannot destroy a flow the operator legitimately started in another
+tab.
+
+Both routes live under `/admin`, which Medusa authenticates by default, and the
+callback keeps that default. Allegro's redirect back is a top-level GET
+navigation and Medusa's admin session cookie is `SameSite=Lax`, so the session
+survives the hop. Making the route public would also remove the `actor_id` the
+signed state is verified against, so every flow would fail instead of succeeding.
+
+**One deployment shape does not work.** If your admin authenticates with a bearer
+token in local storage rather than a session cookie, the callback will 401,
+because the browser has no cookie to send on that navigation. Serve the admin and
+the backend on the same origin with session auth. Do not make the callback public
+to work around it.
+
+## Behind a proxy
+
+The redirect URI has to be byte-identical at `start` and at `callback`, because
+Allegro validates it during the exchange. Both derive it the same way, and behind
+a proxy that rewrites `Host` the derivation can drift.
+
+Set `backendUrl` (or `MEDUSA_BACKEND_URL`) to the absolute base URL of the
+backend and the headers stop mattering. That is the documented recommendation.
+
+Without it, the origin is read from `x-forwarded-host` and `x-forwarded-proto`.
+Those are client-settable headers, which is normally a host-header injection, and
+it is safe **here and only here** because of what the value is used for: it
+becomes the `redirect_uri` sent to Allegro, and Allegro accepts only a
+`redirect_uri` registered for the app character for character. A forged host
+produces a rejected exchange, not a redirect anywhere. The value is never used as
+a redirect target, never written to a `Location` header, and never stored.
+
+## Disconnecting
+
+`POST /admin/allegro/disconnect` revokes the refresh and access tokens at Allegro
+and then deletes the stored row.
+
+Revocation is **best-effort**. If Allegro is unreachable the local connection is
+still removed, because refusing to disconnect would leave an operator unable to
+remove access they explicitly asked to remove.
+
+When revocation is skipped or fails the response carries a `warning` and the
+settings page shows it. That matters more here than in most places: the stored
+rows are the only copy of the tokens, so after this call there is nothing left to
+revoke with, and the refresh token stays valid at Allegro until it expires unless
+you remove the application's access by hand in the developer panel.

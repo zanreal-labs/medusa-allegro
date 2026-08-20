@@ -5,9 +5,9 @@ import type { AllegroOffer } from "../allegro/types";
  * Pure planner for the quantity push.
  *
  * Medusa inventory is the source of truth for the quantity that reaches Allegro.
- * Keeping Medusa inventory honest is somebody else's job - in this stack, the
- * `@zanreal/medusa-marken` plugin, which owns the supplier snapshot and the
- * `stockArmed` gate that refuses to propagate an untrustworthy one. This planner
+ * Keeping Medusa inventory honest is somebody else's job - in this stack, a
+ * separate inventory plugin, which owns the supplier snapshot and the arming
+ * gate that refuses to propagate an untrustworthy one. This planner
  * assumes the inventory it is handed is already trustworthy and concerns itself
  * only with the marketplace side: which offers may be written to, and what.
  *

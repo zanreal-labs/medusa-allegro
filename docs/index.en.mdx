@@ -1,0 +1,191 @@
+---
+title: Overview
+description: A Medusa v2 plugin for Allegro, Poland's largest marketplace - offers matched by SKU, price writes fenced between a break-even floor and an SRP ceiling, stock reconciliation, and an order event drain.
+---
+
+`@zanreal/medusa-allegro` connects a Medusa v2 store to
+[Allegro](https://allegro.pl), the largest marketplace in Poland. It discovers
+your live offers, keeps their quantities and prices in step with Medusa, and
+drains Allegro's order events into Medusa orders.
+
+It is an integration for a catalogue that already exists on Allegro. The plugin
+never creates an offer and never ends one - listing is a merchandising decision
+made in the seller panel, and a plugin that could create a listing could also
+create the wrong one. What it does is keep the offers you have already published
+truthful.
+
+## The one rule everything else follows
+
+**A Medusa variant and an Allegro offer are linked by SKU, and only by SKU.**
+
+Allegro lets a seller stamp their own identifier on every offer - `external.id`
+in the API, **sygnatura** in the seller panel. This plugin's contract is that you
+put the Medusa variant SKU there, and an offer without one is invisible to the
+plugin by design. That is the correct default: leaving the field blank is how a
+seller keeps an offer outside Medusa's control.
+
+Everything downstream falls out of that choice, including the parts that look
+like implementation detail. Read [Offers, SKUs and stock](./mapping.en.mdx) for
+why the offer id is a cache rather than an identity, and what happens when two
+offers claim one SKU.
+
+## Nothing reaches Allegro until you arm it
+
+Every writer is governed by a persisted toggle that an operator flips under
+**Settings -> Allegro**, and every one of them ships **off** on a fresh install.
+A newly connected store publishes nothing. The loops still run, because the
+read-only ones are what tell you whether arming the writers is safe.
+
+| Writer | Ships |
+| --- | --- |
+| Price writes | off |
+| Quantity writes | off |
+| Order drain | off |
+| Fulfillment write-back | off |
+| Invoice attach | on, and inert until an invoicing module emits events |
+
+A flip takes effect on the next tick, with no redeploy, because every runtime
+path re-reads the persisted row at the top of each run rather than capturing a
+value at boot. On top of that, an environment variable can force any writer off
+and nothing can arm it back except the toggle. See
+[Configuration and control](./configuration.en.mdx).
+
+Two further brakes exist independently of the toggles. Price sync is inert
+without automation rule names, so an armed price writer with nothing configured
+writes nothing rather than guessing. And a fresh install starts its order cursor
+at "now", so connecting an account does not import sixty days of history into
+Medusa unasked.
+
+## What runs, and when
+
+Five loops, each with its own health row, its own single-flight claim, and - for
+the ones that write - its own kill switch.
+
+```text
+  hourly            offer discovery  ->  pricing monitor  ->  price sync
+  (15 * * * *)      read only            read only            writes commands
+
+  every 15 min      stock push
+                    writes quantity commands
+
+  every 20s         order drain
+                    reads GET /order/events, writes Medusa orders
+```
+
+The first three are chained into one job because they all need the same input, a
+complete listing of the seller's offers, and paging a full catalogue three times
+an hour is how a well-behaved integration earns a rate limit. The order is
+load-bearing too: discovery establishes which offer owns which SKU, and price
+sync refuses to touch anything discovery marked conflicted.
+
+Two things write to Allegro outside the loops, both on a Medusa event: the
+fulfillment write-back and the invoice attach. Neither is a loop because neither
+has reconcilable state to compare against. Everything else is a reconciliation
+that reads the whole relevant state each run, so a missed event costs at most one
+cycle of staleness instead of leaving a permanently wrong quantity behind.
+
+## Install
+
+This package is not on npm yet. It installs as a git dependency, pinned to a
+commit:
+
+```jsonc title="package.json"
+{
+  "dependencies": {
+    "@zanreal/medusa-allegro": "github:zanreal-labs/medusa-allegro#b0e864ab6a05e63e6d57a20b3c8adaf943049cdd"
+  }
+}
+```
+
+Pin the commit you tested against. There is no published tag yet, so `#main`
+would move under you on the next push; a pinned commit means the same thing
+tomorrow that it means today.
+
+The package compiles itself on install, because `prepare` runs
+`medusa plugin:build` to turn the checked-out source into the `.medusa/server`
+output its `exports` point at. pnpm 10 and newer refuse to run that script for a
+dependency they do not already trust, so a fresh install needs it allowed once in
+your own project:
+
+```yaml title="pnpm-workspace.yaml"
+allowBuilds:
+  "@zanreal/medusa-allegro@https://codeload.github.com/zanreal-labs/medusa-allegro/tar.gz/b0e864ab6a05e63e6d57a20b3c8adaf943049cdd": true
+```
+
+The key is the exact tarball URL pnpm resolves the pinned commit to, which is why
+it carries the same SHA as the dependency line. Move both together when you move
+the pin.
+
+The plugin also pulls in
+[`@zanreal/medusa-admin-kit`](https://github.com/zanreal-labs/medusa-admin-kit),
+itself a pinned git dependency, for the two catalogue columns it registers. That
+resolves on its own; you do not have to add it.
+
+Then register it:
+
+```ts title="medusa-config.ts"
+import { defineConfig } from "@medusajs/framework/utils";
+
+module.exports = defineConfig({
+  plugins: [
+    {
+      resolve: "@zanreal/medusa-allegro",
+      options: {
+        clientId: process.env.ALLEGRO_CLIENT_ID,
+        clientSecret: process.env.ALLEGRO_CLIENT_SECRET,
+
+        // Must match the app registered in the Allegro Developer Portal.
+        // Allegro rejects requests whose User-Agent does not identify a real app.
+        appName: "MyStoreAllegro",
+        appVersion: "1.0.0",
+        docsUrl: "https://mystore.example.com/integrations/allegro",
+
+        // openssl rand -base64 32
+        encryptionKey: process.env.ALLEGRO_ENCRYPTION_KEY,
+      },
+    },
+  ],
+});
+```
+
+And run the migrations:
+
+```bash
+npx medusa db:migrate
+```
+
+Those five options are the whole required set. Everything else has a default, and
+every option is validated in a module loader, so a misconfiguration fails at boot
+with a specific message rather than surfacing as an opaque Allegro error an hour
+later.
+
+## Where to go next
+
+- [Connecting an account](./connecting.en.mdx) - registering the Allegro app,
+  the encryption key, and what protects the OAuth callback.
+- [Offers, SKUs and stock](./mapping.en.mdx) - the sygnatura contract, the five
+  mapping conflicts, and why the stock loop refuses a whole plan rather than push
+  half of one.
+- [Pricing](./pricing.en.mdx) - the three pricing modes, the floor and the
+  ceiling, and the machinery that bounds a bad run.
+- [Orders and invoices](./orders.en.mdx) - the event journal drain, the status
+  ladder, fulfillment write-back, and the invoice chain.
+- [Configuration and control](./configuration.en.mdx) - every option, every
+  environment variable, and the precedence rules between them.
+
+## Status
+
+Pre-release. The schema is settled; the API surface is still moving until 1.0.
+The plugin has shipped in waves, read paths before write paths, so each stage
+could run in production and be observed before the next was allowed to change
+anything: foundation, read-only discovery, writes, orders, invoices.
+
+Known gaps are stated rather than left to be discovered. The largest: refresh
+token de-duplication is per process, so two Medusa instances can each hold a
+memoized client and race on a token rotation. The single-flight claims protect
+the loops across processes, but the token refresh is not yet covered - run the
+scheduled jobs in one instance until it is. Imported orders also carry no
+computed tax lines, because line prices are taken from Allegro verbatim.
+
+MIT licensed. Issues and pull requests are welcome at
+[zanreal-labs/medusa-allegro](https://github.com/zanreal-labs/medusa-allegro).

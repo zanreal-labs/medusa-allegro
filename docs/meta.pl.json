@@ -1,0 +1,5 @@
+{
+  "title": "@zanreal/medusa-allegro",
+  "description": "Synchronizacja z Allegro dla Medusa v2: oferty powiązane po SKU, zapisy cen w wyznaczonych granicach, stany magazynowe i drenaż dziennika zamówień.",
+  "pages": ["index", "connecting", "mapping", "pricing", "orders", "configuration"]
+}

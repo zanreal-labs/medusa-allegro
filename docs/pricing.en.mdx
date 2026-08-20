@@ -1,0 +1,232 @@
+---
+title: Pricing
+description: The three pricing modes, the break-even floor and the SRP ceiling that bound every one of them, the reasons an offer is skipped, and the machinery that limits the damage a bad run can do.
+---
+
+How a store prices its Allegro offers is a **setting, not an assumption**. Pick
+one of three modes under **Settings -> Allegro**; it takes effect on the next sync
+run, with nothing to restart.
+
+| Mode | What it writes to Allegro |
+| --- | --- |
+| `monitor` | Nothing at all. Every run still works out each offer's floor and ceiling and counts how many offers sit outside them. |
+| `automation_rule` | One price-automation command per offer: attach the rule its promotion state calls for, with `[floor, ceiling]` as the rule's price range. Allegro's engine then picks a number inside it. |
+| `fixed_price` | One price-change command per offer, setting the Buy Now price to the variant's own Medusa price - preceded by a rule removal when the offer still carries an automation rule. |
+
+`automation_rule` is the default, because it is what this plugin did before the
+mode existed. Upgrading changes nothing about what your store writes.
+
+## The floor and the ceiling apply in every mode
+
+The break-even floor and the SRP ceiling are the safety story of this whole
+plugin, so no mode is allowed to skip them:
+
+- `monitor` computes both and reports how many offers are priced outside them.
+  That report is what you read **before** choosing a mode that writes.
+- `automation_rule` sends them as the rule's price range, so Allegro's engine
+  cannot move the price outside them.
+- `fixed_price` checks the Medusa price against them and **refuses** to push one
+  below the floor or above the ceiling.
+
+A refusal is deliberate, and it is not a clamp. Clamping would sell at a price the
+store never set; pushing would sell below cost. Refusing does neither, and it
+names the variants whose Medusa price needs fixing.
+
+### The floor
+
+`grossCost / (1 - commissionRate)` - the smallest gross price at which net income
+reaches zero, ceiled to a whole unit because the managed rules require it.
+
+`grossCost` comes from a product costs module, resolved lazily and optionally -
+[`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs) is the one this
+plugin was built against, and any module exposing the same read works.
+The commission rate comes from `allegro_category_rate`, selected by the offer's
+category **and its promotion state**.
+
+### The ceiling
+
+The SRP, read from either `srpMetadataKey` (a key in the variant's metadata,
+falling back to the product's) or `srpPriceListId` (the variant's price in that
+price list). Setting both at once throws at boot: two sources means an ambiguous
+ceiling, and the ceiling is what stops a rule ratcheting a price down.
+
+A price-list SRP is matched to the offer's **own currency**, and there is
+deliberately no conversion - a converted ceiling would depend on a rate this
+plugin does not have and cannot audit, so an offer whose currency has no SRP row
+is skipped. A bare number in variant metadata carries no currency and is taken as
+being in the offer's currency, which is what putting a bare number there means.
+
+### Neither bound is ever defaulted
+
+Any missing input skips the offer with a counted reason. A defaulted floor is a
+licence to sell at a loss. A ceiling guessed from the current selling price lets a
+rule ratchet the price down on every run, because each run's price becomes the
+next run's ceiling.
+
+## Why an offer was skipped
+
+The skip reasons, in the order the ladder reports them:
+
+```text
+not-linked  ->  sync-disabled  ->  status-unknown  ->  offer-not-active
+            ->  promotion-unresolved  ->  missing-break-even
+            ->  missing-srp  ->  invalid-bounds
+```
+
+The order **is** the reported reason, deliberately. An unlinked SKU reports
+`not-linked` even when it is also missing an SRP, and the per-offer opt-out
+short-circuits before any data check, so a disabled offer never surfaces a
+spurious "missing break-even" for somebody to chase.
+
+Fixed-price mode adds two of its own, for the two ways a Medusa price can fail to
+be a usable Allegro price: `missing-medusa-price` (no price in the offer's
+currency) and `price-outside-bounds` (there is one, and it is refused rather than
+clamped).
+
+### `promotion-unresolved`, the one you will meet first
+
+`allegro_offer.promoted` is **three-state**: `true`, `false`, or NULL meaning "the
+promo options sweep has not resolved it". NULL is not "not promoted", and the
+difference is money. Promotion state selects the commission rate, the rate sets
+the break-even, and the break-even is the floor a rule may sell down to - so
+pricing an unresolved offer as unpromoted gives a genuinely promoted one a floor
+below its true break-even.
+
+Discovery fills it in from a successful sweep. Until then the offer is skipped and
+the Offers page shows `unresolved`. The sweep returns nothing resolvable when it
+hits its page cap, when Allegro answers "Feature unavailable", or on a
+non-systemic error, and each of those is reported on the offers state row.
+
+The monitor withholds its drift verdict for the same offers. Without a resolved
+promotion state there is no expectation to compare the attached rule against, so
+reporting "no drift" would be a guess.
+
+### Two more subtleties
+
+A promoted offer whose category has a standard rate filled in but a **blank
+promoted rate** is skipped, because flooring it on the standard rate would
+under-floor it.
+
+`status-unknown` is its own reason rather than a pass-through. A write is only
+safe against an offer positively observed as ACTIVE.
+
+## What fixed-price mode needs
+
+Two things are worth stating plainly before you switch a live store to it.
+
+**The scope is already there.** The price-change command needs
+`allegro:api:sale:offers:write`, which is in the default scope string and is the
+same scope the rule assignment already uses. Moving to fixed-price mode needs no
+reconnect and no new consent.
+
+**An automation rule beats a fixed price, so the rule has to go first.** Allegro's
+engine recalculates an offer on its own schedule, so a price pushed under a live
+rule does not survive it. Fixed-price mode therefore issues a rule removal for the
+offer's marketplace, waits for it to confirm, and only then sets the price. **If
+the removal does not confirm, the price is not sent at all** - a half-applied pair
+that left the rule attached and the price changed is precisely the fight with
+Allegro's engine the sequencing exists to avoid. Re-running the pair next tick is
+idempotent. Both commands count as one offer against the change cap.
+
+The price itself is the variant's own default price in Medusa, in the offer's own
+currency, with two fail-closed rules. **Price-list rows are ignored**, because a
+price carrying a `price_list_id` is a sale or a customer-group override with its
+own validity window and conditions, none of which this plugin evaluates - pushing
+one would leave a sale price on Allegro long after the sale ended. And **there is
+no currency conversion**.
+
+## The safety machinery
+
+**Fail-loud rule resolution.** Both rule names are resolved against the live rules
+list every run. Missing, renamed or ambiguous aborts the whole run with nothing
+written. The plugin never guesses which rule you meant and never creates one.
+
+**A change cap.** A bug that mislabels the whole catalogue as drifting can reprice
+at most that many offers before a human sees the run and can flip the switch. The
+remainder waits for the next tick.
+
+**Per-offer quarantine** after five consecutive failures, so one permanently bad
+offer cannot burn the run's budget every tick. Never silent: named in `last_error`
+and in the admin, with a manual push as the remedy.
+
+**A circuit breaker.** A tick where every command failed, or where any command hit
+429, 5xx, an auth error or a 403, is systemic: nothing is quarantined, the run
+holds, the next tick retries. Quarantine is only safe on the evidence that the
+rest of the pipeline works - without that gate, a five-minute outage would
+quarantine the whole working set at once. Stuck and self-healing beats skipped.
+
+**Write-scope detection.** A 403 on a command is the signature of a token granted
+without the write scope. It is one systemic condition, not a hundred bad offers,
+so it sets `write_scope_missing`, raises a persistent admin banner, and no-ops
+safely. The first run that reaches the endpoint without a 403 clears it.
+
+**A single-flight claim** on the provider row, so a scheduled run and an
+operator's manual push cannot interleave on the same offer. A `running` claim
+older than six minutes is taken over as crashed, so one killed process cannot
+wedge the loop.
+
+### Choosing a change cap
+
+`changeCap` ships as `1`, and that is a placeholder rather than a
+recommendation. A blast radius is a risk decision belonging to the store that
+bears the risk, so this plugin does not publish anyone else's risk appetite as a
+starting point. It ships the most cautious value that is still a working
+configuration and expects you to raise it deliberately.
+
+Erring low is safe and, importantly, not silent: every run that hits the cap logs
+`change cap (N) hit; M offer(s) wait for the next tick`, so a store still on `1`
+can see exactly why the catalogue is converging one offer per tick. Erring high is
+the direction the cap exists to prevent.
+
+The cap also bounds manual pushes over a rolling hour, so leaving it at `1` makes
+manual pushes correspondingly rare. Pick a number that matches how big a mistaken
+run you are willing to absorb between two ticks.
+
+## The audit trail
+
+Every mode writes to the same append-only `allegro_price_push` table, but they
+fill different columns, and the difference is load-bearing.
+
+Automation-rule rows carry `bound_floor` and `bound_ceiling` plus the rule ids.
+Those two columns are the **only** memory of the price range attached to a rule,
+because Allegro accepts a range and never returns one. It is write-only on their
+side, so this table is the only place that can answer "what floor is this offer
+pinned to, and who set it".
+
+Fixed-price rows carry `price_amount` and `price_currency`, leave the bounds
+columns null, and add `rule_id_old` / `rule_name_old` for the rule that was
+removed. Writing the guard rails into the bounds columns would make a later
+automation-rule run read back a price range that was never attached, and skip an
+offer it should have re-attached.
+
+The scan that reads bounds back has two rules: rows newest-first with the **first
+success per offer winning** (a newer success carrying no bounds deliberately
+claims the slot, so it reads as "no bounds on record" and triggers a re-push
+rather than letting an older row's stale range look current), and only
+`result: "success"` counts - an `observed` row is the monitor recording state it
+did not write, and a `failed` row's bounds never landed. An offer with no recorded
+bounds is re-pushed, which is idempotent.
+
+Never update or delete a row. Correct a mistake by appending.
+
+## Monitor mode and the price-write toggle
+
+Monitor mode runs even while the **Price writes** toggle is off, because it has no
+command path to reach. The two writing modes honour the toggle as they always
+have, re-reading it before every single command. An explicit per-offer push from a
+product page is refused in monitor mode rather than quietly performed.
+
+## Category rates are filled in by hand
+
+`allegro_category_rate` holds the sale commission per Allegro category, plain and
+promoted, and an operator enters them from Allegro's published fee table under
+**Settings -> Allegro -> Category rates**.
+
+That is on purpose. Allegro does publish a fee calculator, but in production it
+rejects the offer bodies you can build from a seller's own live offers, so
+sweeping a real catalogue returns errors rather than rates.
+
+Both rate columns are nullable so "unknown" stays distinguishable from "zero
+commission". A margin calculation that reads a missing rate as 0% quietly turns a
+loss-making price into an acceptable one. Until a category has both rates, every
+offer in it is skipped with `missing-break-even`.

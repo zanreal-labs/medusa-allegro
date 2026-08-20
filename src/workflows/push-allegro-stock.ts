@@ -40,9 +40,9 @@ import { warnOnUnscopedCatalogue } from "./lib/scope-warnings";
  * plugin's job
  *
  * This loop reads `retrieveAvailableQuantity` (stocked minus reserved) and pushes
- * it. It does NOT decide whether that number is trustworthy. In this stack the
- * `@zanreal/medusa-marken` plugin owns the supplier snapshot and the `stockArmed`
- * gate that refuses to propagate an untrustworthy one into Medusa inventory - so
+ * it. It does NOT decide whether that number is trustworthy. In this stack a
+ * separate inventory plugin owns the supplier snapshot and the arming gate that
+ * refuses to propagate an untrustworthy one into Medusa inventory - so
  * the guard against "publish stale stock after a supplier outage" lives THERE, one
  * layer up, where the supplier response is actually visible.
  *

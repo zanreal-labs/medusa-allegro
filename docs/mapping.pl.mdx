@@ -1,0 +1,166 @@
+---
+title: Oferty, SKU i stany magazynowe
+description: Umowa o sygnaturze łącząca wariant w Medusie z ofertą na Allegro, pięć konfliktów mapowania zapisywanych zamiast rozstrzyganych, i powód, dla którego pętla stanów odmawia całego planu zamiast wysłać jego połowę.
+---
+
+## Dlaczego SKU, a nie identyfikator oferty
+
+Kolumna `allegro_offer.sku` ma ograniczenie unikalności, bo to ona jest
+tożsamością wiersza. `allegro_offer.offer_id` to **rozwiązana pamięć podręczna**,
+nigdy tożsamość.
+
+Identyfikatory ofert na Allegro nie są stałe przez całe życie towaru. Ponowne
+wystawienie zakończonej oferty daje nowy identyfikator, a jedno SKU z pełnym
+prawem wędruje między ofertami w czasie. Mapowanie po identyfikatorze oferty
+zamienia każde ponowne wystawienie w cichą sierotę: wiersz nadal wygląda zdrowo,
+a po prostu przestaje dostawać aktualizacje stanów i cen. Mapowanie po SKU
+zamienia to samo zdarzenie w wiersz, któremu trzeba na nowo ustalić `offer_id`, co
+najbliższe wykrywanie robi samo, bez niczyjego udziału.
+
+Praktyczne zalecenie jest więc krótkie: **uzupełnij sygnaturę na każdej ofercie
+Allegro, którą chcesz zarządzać**, i zostaw ją pustą na każdej, której nie chcesz.
+
+## Co robi wykrywanie
+
+Godzinny przebieg czyta pełną listę ofert sprzedawcy i dla każdej z nich dopasowuje
+`external.id` do SKU wariantów w skonfigurowanym kanale sprzedaży. W tym samym
+uruchomieniu jednym stronicowanym przejściem zbiera stan promocji i zakłada wiersz
+prowizji dla każdej napotkanej kategorii.
+
+Bezpieczeństwo tego przebiegu opiera się na dwóch zabezpieczeniach.
+
+**Lista jest fail-closed.** Skrócona strona to błąd, a nie krótsza tablica, bo
+każdy odbiorca tych danych wyciąga wniosek z nieobecności oferty.
+
+**Odpięcie wymaga wiarygodnej listy.** Wykrywanie odpina zapisane mapowanie,
+którego oferty już nie ma, a to jest uzasadnione tylko wtedy, gdy lista jest
+zarazem niepusta i potwierdzona jako kompletna względem `totalCount` zwracanego
+przez Allegro. Przejściowa awaria dająca zero ofert wyczyściłaby inaczej wszystkie
+mapowania sklepu i nie zostawiła następnemu uruchomieniu niczego do odbudowy.
+
+## Konflikty są zapisywane, nigdy rozstrzygane
+
+Wiersz w konflikcie traci `offer_id` i flagę `promoted`, więc żadna ścieżka zapisu
+nie może na nim zadziałać. Konfliktów jest pięć:
+
+| Konflikt | Znaczenie | Co zrobić |
+| --- | --- | --- |
+| `duplicate-sku` | Dwie żywe oferty roszczą sobie jedno SKU albo dwa warianty dzielą jedno | Zdecyduj, która je zatrzymuje. Komunikat wymienia rywalizujące identyfikatory. |
+| `missing-external-id` | Wcześniej zmapowana oferta nie ma już sygnatury | Wpisz sygnaturę z powrotem na Allegro. |
+| `no-variant` | Sygnatura nie pasuje do żadnego wariantu w kanale sprzedaży Allegro | Popraw sygnaturę albo opublikuj produkt w kanale. |
+| `no-offer` | Oferty z zapisanego mapowania nie ma na liście | Zwykle nic. Powiązanie zostało wyczyszczone, a wykrywanie odtworzy je po ponownym wystawieniu. |
+| `sku-mismatch` | Żywa oferta przeczy swojemu wierszowi mapowania | Popraw sygnaturę na Allegro albo pozwól wykrywaniu zmapować ją na nowo. |
+
+Wskazanie zwycięzcy spornego SKU wysłałoby cenę albo ilość na niewłaściwą ofertę,
+czyli dałoby prawdziwą pomyłkę cenową albo prawdziwą nadsprzedaż. Wtyczka więc
+odmawia, nazywa obie strony i czeka na człowieka.
+
+Dwa z tych konfliktów warto obejrzeć z bliska.
+
+**`duplicate-sku` obejmuje przypadek, który z każdej strony wygląda niewinnie.**
+Dwie oferty potrafią trafić w ten sam wariant *różnymi* kluczami: jedna sygnaturą,
+druga kodem EAN zgodnym z kodem kreskowym wariantu. Żadna z nich, oglądana osobno,
+nie wygląda na sporną. Obie są wstrzymane.
+
+**`sku-mismatch` zapisuje pętla stanów magazynowych, a nie wykrywanie**, bo
+wysyłka stanów to jedyne miejsce, w którym wiersz mapowania i żywa oferta są
+porównywane w chwili zapisu. Sprzedawca, który poprawi sygnaturę między
+wykrywaniem a wysyłką, doprowadza do rozjazdu, a przeparowanie po żywej wartości
+to dokładnie ten mechanizm, przez który ilość jednego produktu ląduje na aukcji
+innego. Pomijana jest wyłącznie ta jedna oferta, reszta katalogu synchronizuje się
+normalnie.
+
+Po usunięciu przyczyny naciśnij **Wykryj oferty ponownie** na stronie ofert.
+Konfliktu nie trzeba czyścić ręcznie.
+
+## Stany magazynowe: prawdę mówi Medusa
+
+Do Allegro trafia `retrieveAvailableQuantity`, czyli stan pomniejszony o rezerwacje,
+żeby sztuki już obiecane niezrealizowanym zamówieniom w Medusie nie były
+reklamowane po raz drugi.
+
+**Pilnowanie, żeby stany w Medusie były prawdziwe, nie jest zadaniem tej wtyczki.**
+To należy do warstwy wyżej, tam gdzie odpowiedź dostawcy jest w ogóle widoczna.
+Drugie zabezpieczenie tutaj byłoby zgadywaniem o danych, do których ta wtyczka nie
+ma źródła.
+
+Pętla odmawia natomiast na własnej niepewności, a granicę stawia przy
+**niewiadomych**, nie przy brakach.
+
+Niejednoznaczne dopasowanie SKU albo ilość, której nie dało się *odczytać* po
+którejś ze stron, powoduje odmowę **całego planu**. Częściowa wysyłka w takim
+stanie zostawia część ofert świeżych, część nieaktualnych i nic nie zapisuje,
+które są które, więc następne uruchomienie też tego nie rozstrzygnie.
+
+Znane, ograniczone wykluczenie nie powoduje odmowy niczego. Każde jest policzone,
+raportowane w `last_error` i zostawia w spokoju dokładnie jedną ofertę:
+
+- oferta nieaktywna
+- wariant, który nie prowadzi magazynu, więc Medusa nie ma czego opublikować
+  (na przykład produkt cyfrowy)
+- oferta, która przeczy swojemu wierszowi mapowania
+- zmapowana oferta nieobecna na liście
+- oferta, której własna aukcja nie podała użytecznego `stock.available`
+- kwalifikujący się wariant, do którego nie rości sobie prawa żadna zmapowana oferta
+
+To rozróżnienie nie jest akademickie. Potraktowanie „ten wariant nie prowadzi
+magazynu” jako niewiadomej pozwoliło kiedyś jednemu produktowi cyfrowemu z ofertą
+na Allegro blokować synchronizację stanów całego katalogu w nieskończoność.
+
+### Dwie drogi, którymi pusta odpowiedź staje się katastrofą
+
+Obie dają ten sam kształt nieszczęścia: każdy wariant odczytuje się jako zero, plan
+wygląda całkowicie bezpiecznie, a uruchomienie wycofuje ze sprzedaży cały katalog i
+melduje się jako zakończone poprawnie. Dlatego obie przerywają uruchomienie.
+
+**Sklep bez lokalizacji magazynowych.** `retrieveAvailableQuantity` w Medusie
+odpowiada `0` dla pustej listy lokalizacji, zamiast zgłosić błąd. Załóż lokalizację
+albo ustaw `stockLocationIds`.
+
+**`stockLocationIds` wskazujące lokalizację, która nie istnieje.** Medusa raportuje
+zerową dostępność dla nieznanej lokalizacji, zamiast zgłosić błąd, więc jedna
+literówka odtwarza dokładnie przypadek pustej listy. Identyfikatory są sprawdzane
+względem istniejących lokalizacji, a nieznany przerywa uruchomienie.
+
+### Kolejność wewnątrz uruchomienia
+
+Lista ofert jest czytana **przed** ilościami. Przewertowanie pełnego katalogu to
+najwolniejszy krok, więc odczyt ilości na początku zostawiał każdą liczbę
+starzejącą się przez całe okno stronicowania, zanim doszło do porównania i zapisu.
+
+## Gdzie to wszystko widać
+
+**Na produkcie.** Widget na karcie produktu jest miarodajnym widokiem
+per-produkt: dla każdego SKU wariantu pokazuje powiązaną ofertę z odnośnikiem do
+żywej aukcji, krótki status, zaobserwowany tryb ceny i dryf, stan promocji, czasy
+ostatniej synchronizacji ceny i stanu oraz przełącznik wyłączenia tej oferty z
+synchronizacji cen. Historia wysyłek otwiera się w szufladzie.
+
+**W katalogu.** Wtyczka rejestruje dwie kolumny w trasie Catalog z
+[`@zanreal/medusa-admin-kit`](https://github.com/zanreal-labs/medusa-admin-kit),
+gdzie jeden wiersz to jeden wariant. `Allegro` to żywa cena oferty, postawiona
+obok ceny sklepowej i SRP, żeby trzy kwoty ustawiły się w jednej linii jako kolumny
+pieniężne; cena oferty wstrzymanej albo zakończonej jest wyszarzona, bo liczba jest
+prawdziwa, ale nikt po niej nie kupi. `Allegro status` nazywa, co jest nie tak z tym
+jednym SKU: kod konfliktu na czerwono, `drift` na pomarańczowo, własny status oferty
+Allegro na zielono, gdy jest wystawiona i zdrowa, `unlinked` na szaro, a wyszarzone
+„nie wystawiono”, gdy SKU nie ma mapowania w ogóle.
+
+Obie kolumny dzielą jedno zapytanie na stronę. `loadData` wykonuje się per wiersz,
+więc dwie kolumny na stu wierszach dałyby inaczej dwieście zapytań o pojedyncze SKU
+dla jednej tabeli; wtyczka scala wszystkie SKU zamówione w obrębie jednego taktu w
+jedno wywołanie i odsiewa SKU, którego chcą obie kolumny. Celowo nie trzyma pamięci
+podręcznej między paczkami, bo cena to dokładnie ta rzecz, którą synchronizacja
+zmienia operatorowi pod ręką.
+
+Bez zainstalowanego admin-kita nadal dostajesz zwięzłe podsumowanie nad standardową
+tabelą produktów - N powiązanych, N niepowiązanych, N z dryfem, N konfliktów - gdzie
+każda liczba prowadzi do przefiltrowanej strony ofert. Medusa 2.18 nie pozwala
+wstrzyknąć własnej kolumny do rdzeniowej tabeli produktów i nie udostępnia strefy
+widgetu na wiersz listy, więc na tej stronie podsumowanie to jedyne, co wtyczka może
+zaoferować.
+
+**Do pracy operacyjnej.** **Ustawienia -> Allegro -> Oferty** to tabela przez cały
+katalog, z filtrami konfliktów i dryfu, masowym ponownym wykrywaniem i ręczną
+wysyłką. To powierzchnia do pracy w rodzaju „które oferty się nie synchronizują i
+jak to naprawić”, której widget na karcie produktu nie obsłuży.

@@ -1,0 +1,288 @@
+---
+title: Zamówienia i faktury
+description: Drenaż dziennika zdarzeń zamówień Allegro do zamówień w Medusie, drabina statusów pochodnych, zwrotny zapis realizacji i dołączanie wystawionej faktury PDF do zamówienia Allegro.
+---
+
+## Dlaczego dziennik zdarzeń, a nie cokolwiek innego
+
+`GET /order/events` to jedyne zaplanowane wejście. Odpytywanie formularzy
+zakupowych przez `updatedAt.gte=` go nie zastąpi, bo Allegro nie podbija
+niezawodnie pola `updatedAt` formularza, gdy zmienił się wyłącznie jego status
+realizacji. Przejście po oknie czasowym nie zobaczy więc najczęstszej zmiany
+statusu, jaka w ogóle występuje.
+
+Drenaż chodzi co 20 sekund, a nie na wyrażeniu cron, bo cron w Medusie ma
+rozdzielczość minutową, a świeże zamówienie powinno zostać zaciągnięte szybciej niż
+w minutę. `ALLEGRO_ORDERS_SYNC_CRON` przestawia go z powrotem na cron, jeśli tak
+wolisz; w harmonogramie Medusy te dwa sposoby wykluczają się, a gdy ustawione są
+oba, wygrywa cron.
+
+## Dyscyplina kursora
+
+Zdarzenia są konsumowane po kolei, a kursor przesuwa się wyłącznie po **wiodącej
+serii zdarzeń, których zamówienia się powiodły**. Pierwsze zdarzenie należące do
+zamówienia nieudanego albo odłożonego zatrzymuje przesuwanie, więc ono i wszystko
+po nim powtórzy się w następnym takcie.
+
+Dwukrotne zastosowanie zamówienia jest nieszkodliwe, bo zapis jest idempotentny.
+Zgubienie zmiany statusu przez przejściową awarię nie jest, i dlatego kursor jest
+zachowawczy właśnie w tę stronę.
+
+Trzy tryby awarii, na które synchronizacja z jednym wejściem musi mieć odpowiedź:
+
+**Jedno zepsute zamówienie nie może zakleszczyć taktu.** Po pięciu kolejnych
+niepowodzeniach formularz trafia do kwarantanny, a kursor dostaje prawo go minąć.
+Bez tego wyjścia jedno trwale zepsute zamówienie przypina kursor na zawsze i w
+końcu nic się nie importuje.
+
+**Awarii nie wolno pomylić ze stoma zepsutymi zamówieniami.** Takt, w którym każde
+odświeżenie zawiodło i żadne się nie udało, jest systemowy: żadna seria nie rośnie,
+nic nie idzie do kwarantanny, kursor stoi.
+
+**Zaległości nie mogą zagłodzić nowych zamówień.** Limit na uruchomienie wydawany
+jest od najstarszych, bo tylko w tej kolejności zaległości maleją - ale 20 ze 100
+jest zarezerwowane dla najnowszych kandydatów, stosowanych poza kolejnością
+kursora. Czyste „od najnowszych” zostało odrzucone, bo się zakleszcza: odłożenie
+najstarszego blokuje kursor na pierwszym zdarzeniu, więc ta sama strona powtarza
+się w nieskończoność.
+
+### Pierwsze uruchomienie
+
+Bez kursora zapisywany jest identyfikator najnowszego zdarzenia i **nic nie jest
+konsumowane**. Odtworzenie sześćdziesięciu dni, które Allegro przechowuje, to
+tysiące wywołań, więc świeża instalacja zaczyna śledzić od „teraz”, a wciągnięcie
+historii jest świadomą decyzją operatora.
+
+## Drabina statusów
+
+Allegro raportuje status zakupowy i zarządzany przez sprzedawcę status realizacji.
+Ich iloczynem jest `allegro_order.derived_status`:
+
+| Allegro | Pochodny |
+| --- | --- |
+| zakupowy `CANCELLED` (wygrywa ze wszystkim) | `cancelled` |
+| realizacja `NEW` + zakupowy `BOUGHT` | `pending` |
+| realizacja `NEW` + `READY_FOR_PROCESSING` | `new` |
+| `PROCESSING`, `SUSPENDED` | `processing` |
+| `READY_FOR_SHIPMENT`, `READY_FOR_PICKUP` | `ready_for_shipment` |
+| `SENT` | `sent` |
+| `PICKED_UP` | `delivered` |
+| `RETURNED` | `returned` |
+| niezamodelowany status realizacji | nic nie jest zapisywane |
+
+Wyliczenie `order.status` w Medusie nie ma ani `sent`, ani `ready_for_shipment`,
+więc na zamówienie trafiają tylko te dwa krańce, które Medusa naprawdę modeluje, i
+to przez własne workflowy: `cancelled` anuluje zamówienie, `delivered` je zamyka.
+Zapis wprost do kolumny biłby się z panelem i z procesami edycji zamówienia.
+
+**Podstawą porównania jest `derived_status`, a nie surowe kolumny statusów.**
+Surowe kolumny są nadpisywane przy każdym przejściu, więc wyprowadzanie z nich na
+nowo czyniło jeden zdławiony zapis statusu trwałym: zabezpieczenie widziało już
+zawsze „brak przejścia”, a zamówienie zamarzało na tym statusie, który akurat
+niosło. `derived_status` jest zapisywany w tej samej operacji co dowolna akcja, więc
+zgubiony zapis po prostu się ponawia, a edycja pracownika przeżywa, bo pracownik
+zmienia zamówienie i zostawia status pochodny tam, gdzie postawiło go Allegro.
+
+**Kolejność odporna na awarię.** Najpierw wchodzi wiersz księgowy bez `synced_at`,
+potem zamówienie w Medusie, potem akcja statusu, a znacznik na końcu. Awaria
+gdziekolwiek wcześniej zostawia wiersz niedokończony, więc następne przejście go
+naprawia.
+
+## Czego wtyczka zamówieniu nie zrobi
+
+**Niedopasowane pozycje nie gubią sprzedaży.** Pozycja, której sygnatura nie pasuje
+do żadnego wariantu w Medusie, jest przenoszona jako pozycja własna z samym tytułem
+i zapisywana w `line_conflicts`. Sprzedaż wydarzyła się na Allegro niezależnie od
+tego, co mówi katalog Medusy, a zamówienie, którego nikt nie widzi, nie jest
+bezpieczniejsze od takiego, które jest widocznie zmapowane w połowie.
+
+**Sumy i ceny pozycji pochodzą z Allegro dosłownie**, nigdy nie są przeliczane
+ponownie. Pieniądz jest ciągiem dziesiętnym od początku do końca, bo przepuszczenie
+go przez liczbę zmiennoprzecinkową to sposób, w jaki synchronizacja zaczyna wysyłać
+`233.20999999999998`.
+
+**Sporna suma jest zapisywana, a nie poprawiana.** Suma każdego zamówienia w
+Medusie jest porównywana z `totalToPay` zapisanym przez Allegro dla formularza, co
+do grosza i w tej samej walucie. Rozbieżność ląduje na `allegro_order.conflict` jako
+`total-mismatch`, z obiema kwotami w `conflict_detail`, a strona zamówień pokazuje
+ją obok sumy. Nigdy nie blokuje ani nie wycofuje zamówienia i sama znika przy
+kolejnym przejściu, gdy sumy się zgodzą. Zwykłą, niegroźną przyczyną jest pozycja
+własna z samym tytułem, która ma pełne prawo ruszyć sumę - szczegół podaje, ile
+takich pozycji ma zamówienie, właśnie po to, więc sprawdź tę liczbę, zanim zaczniesz
+badać arytmetykę.
+
+Zwróć też uwagę, że zaimportowane zamówienia nie mają **wyliczonych linii
+podatkowych**. Branie cen pozycji z Allegro dosłownie jest właściwe dla uzgadniania,
+ale oznacza, że rozbicie podatkowe zamówienia z Allegro jest w Medusie puste.
+
+## Zwrotny zapis realizacji
+
+Subskrybent na zdarzeniach `order.fulfillment_created` i `shipment.created` ustawia
+zarządzany przez sprzedawcę status Allegro - odpowiednio `READY_FOR_SHIPMENT` i
+`SENT` - dla zamówień pochodzących z Allegro. Dla każdego innego zamówienia nic nie
+robi.
+
+To jedyny fragment tej wtyczki sterowany zdarzeniem, a nie uzgadnianiem, i wynika to
+ze struktury, a nie z wygody: realizacja jest aktem w punkcie czasu, a nie stanem,
+który da się uzgodnić. W Medusie nie ma „bieżącego statusu realizacji”, który
+przejście mogłoby porównać z tym w Allegro, więc zdarzenie to jedyny dostępny sygnał.
+
+**Nigdy nie rzuca wyjątkiem.** Realizacja w Medusie w chwili jego uruchomienia już
+istnieje, więc wywrócenie subskrybenta jej nie cofnie, a pogrzebie powód. Błąd trafia
+zamiast tego do `allegro_order.last_error`, a operator może ustawić status ręcznie na
+Allegro.
+
+**Ma własny przełącznik**, `fulfillment_writeback_enabled`, i celowo *nie* czyta
+`ordersSyncDisabled`. Tamten wyłącznik zatrzymuje konsumowanie dziennika przez
+drenaż, a wstrzymanie importu to inna decyzja niż odmowa poinformowania kupującego,
+że przesyłka wyszła. Jeśli więc mapowanie budzi wątpliwości i boisz się oznaczyć
+niewłaściwe zamówienie Allegro jako wysłane, wyłącz ten jeden zapis, popraw mapowanie
+i włącz go z powrotem - import zamówień pozostaje nietknięty i nie trzeba łączyć konta
+na nowo.
+
+Jedna znana rysa: sklep, który tworzy realizację i przesyłkę jednym ruchem, wysyła dwie
+aktualizacje. Wygrywa druga, co jest poprawne, choć rozrzutne.
+
+## Łańcuch fakturowy
+
+Allegro oczekuje, że fakturę do zamówienia da się pobrać z widoku zamówienia. Ta
+wtyczka nie wystawia faktur, więc łańcuch wygląda tak:
+
+```text
+zamówienie opłacone  ->  moduł fakturowy wystawia fakturę
+                     ->  emituje `infakt.invoice.issued`
+                     ->  medusa-allegro rejestruje dokument na formularzu zakupowym
+                     ->  wysyła plik PDF
+                     ->  stempluje allegro_order.invoice_attached_at
+```
+
+**Żadna z wtyczek nie importuje drugiej.** Całą umową jest nazwa zdarzenia, jego
+zawartość i klucz kontenera (`invoiceModuleKey`), który ta wtyczka rozwiązuje leniwie.
+Sklep może fakturować, nie sprzedając na Allegro, i sprzedawać na Allegro, nie
+fakturując, więc twarda zależność w którąkolwiek stronę czyniłaby każdą z wtyczek
+bezużyteczną bez drugiej. Bez zarejestrowanego modułu fakturowego łańcuch jest po
+prostu bezczynny: nic nie jest logowane, nic ponawiane, a każda inna pętla zachowuje
+się identycznie.
+
+Zawartość zdarzenia jest czytana defensywnie, bo przekracza granicę wersji. `order_id`
+i `invoice_uuid` są wymagane, cała reszta opcjonalna, nieznane pola są ignorowane, a
+zniekształcona zawartość jest **zalogowana i porzucona, a nie rzucona wyjątkiem** -
+rzucający subskrybent byłby ponawiany z tą samą zniekształconą zawartością aż do
+wyczerpania budżetu, a powód nigdy by do nikogo nie dotarł.
+
+### Dlaczego odczyt odsiewający nie jest opcjonalny
+
+`POST /order/checkout-forms/{id}/invoices` **nie ma klucza idempotencji**. Drugie
+wywołanie z tym samym numerem faktury rejestruje drugi dokument, zamiast zwrócić
+pierwszy, a Allegro przyjmuje najwyżej dziesięć dokumentów na zamówienie. Przed każdym
+utworzeniem dzieją się więc dwie rzeczy:
+
+1. Jeśli `allegro_order.allegro_invoice_id` jest ustawione, ten dokument jest używany
+   wprost.
+2. W przeciwnym razie czytany jest `GET .../invoices` i dopasowywany po numerze
+   faktury. Trafienie zostaje użyte ponownie.
+
+Identyfikator jest zapisywany w chwili, gdy utworzenie zwróci wynik, **przed** próbą
+wysłania pliku. Ten zapis jest całym powodem istnienia tej kolumny: awaria między
+udanym utworzeniem a wysyłką zarejestrowałaby przy ponowieniu drugi dokument dla tej
+samej faktury.
+
+Sprawdzenie rozmiaru też następuje przed jakąkolwiek rejestracją. Allegro odrzuca plik
+większy niż 3 MB, a zarejestrowany dokument bez pliku i tak liczy się do dziesięciu,
+więc rejestrowanie na początku mogłoby z czasem doprowadzić do zamówienia niezdolnego
+przyjąć fakturę, która *by* się zmieściła. Plik za duży albo pusty jest odnotowywany na
+wierszu i nigdy nie jest wysyłany.
+
+Dwa dalsze szczegóły warto znać. Plik jest wysyłany jako **surowa treść żądania** z
+nagłówkiem `Content-Type: application/pdf`, nie jako JSON i nie jako multipart -
+przepuszczenie `Uint8Array` przez `JSON.stringify` daje `{}`, co Allegro *przyjmuje*,
+zostawiając zamówienie z dokumentem faktury o dwubajtowym pliku i bez żadnego sygnału
+błędu. A pobranie PDF-a przestawia fakturę na `printed` po stronie modułu fakturowego,
+co jest zapisem tamtego systemu, że dokument go opuścił, a nie pomyłką - dlatego ta
+wtyczka rozwiązuje klienta Allegro *przed* pobraniem: płacenie tym skutkiem ubocznym za
+wysyłkę, która i tak nie może dojść do skutku, nic nie daje.
+
+### Przejście ponawiające
+
+Zdarzenie nie jest jedyną ścieżką. Na końcu każdego drenażu zamówień, w obrębie tego
+samego zajęcia na wyłączność, bo pisze do tych samych wierszy, ograniczone przejście
+pyta moduł fakturowy o 50 ostatnio ruszanych faktur i dołącza te, których zamówienie
+Allegro nie ma `invoice_attached_at`, do 10 na takt. Pokrywa obie połowy nieudanego
+dołączenia: tę, która nic nie zarejestrowała, i tę, która zarejestrowała, ale nigdy nie
+wysłała pliku.
+
+Kandydaci pochodzą z modułu fakturowego, a nie ze znacznika własnego tej wtyczki, i to
+celowo. Niepowodzenia dołączania są zapisywane w `allegro_order.last_error`, dzielonym z
+drenażem i czyszczonym przy jego następnym czystym przejściu po tym samym formularzu,
+więc przejście oparte na tym ciągu po cichu gubiłoby dokładnie te zamówienia, które poza
+tym są zdrowe. Porównania „co zostało wystawione” z `invoice_attached_at` nie da się w
+ten sposób unieważnić.
+
+Dwa ograniczenia, wypisane zamiast zostawione do odkrycia:
+
+- **Przejście działa tylko wtedy, gdy działa drenaż**, więc `ordersSyncDisabled`
+  wstrzymuje także ponawianie. Ścieżka zdarzeniowa pozostaje nietknięta, więc świeżo
+  wystawiona faktura i tak dojdzie.
+- **Niepowodzenie dołączenia może zostać nadpisane w `last_error`** przez późniejsze
+  zdrowe przejście drenażu po tym samym formularzu. Samego przejścia to nie dotyka, ale
+  panel może przestać pokazywać powód; liczbę podaje wtedy linia błędu uruchomienia na
+  wierszu stanu zamówień.
+
+### Własny wyłącznik
+
+Dołączanie faktur ma własny przełącznik, `invoice_attach_enabled`, i jest to jedyny
+zapis, który wychodzi z pudełka **włączony** - bo zanim ta wtyczka usłyszy o fakturze,
+dokument już istnieje jako zapis prawny, więc dostarczenie go jest bezpiecznym
+domyślnym zachowaniem. Jest włączony, ale bezczynny, dopóki moduł fakturowy nie emituje
+zdarzeń.
+
+Celowo nie jest odczytem `ordersSyncDisabled`. Tamten wyłącznik zatrzymuje konsumowanie
+dziennika przez drenaż i operator sięga po niego, żeby zatrzymać rozpędzony import;
+dostarczenie faktury, której wymaga zamówienie na marketplace, to inna decyzja o innych
+konsekwencjach. Jeden wyłącznik na oba oznaczałby, że wstrzymanie importu po cichu
+zatrzymuje docieranie wystawionych faktur do kupujących.
+
+Gdy zapis jest wyłączony, powód trafia na wiersz zamówienia, a nie tylko do logu. „Nie
+ma faktury przy zamówieniu” wygląda z zewnątrz identycznie jak zepsuta integracja, a
+wyłączony zapis to jedyne wyjaśnienie, którego nikt nie zgaduje.
+
+## Narzędzia operatora
+
+**Zamówienie w kwarantannie.** Lista kwarantanny na stronie zamówień niesie przy każdym
+wpisie jego błąd i to, jak długo się nie udaje. Usuń przyczynę i naciśnij **Napraw**.
+Sukces czyści obie mapy niepowodzeń i oddaje formularz drenażowi. Nieudana naprawa
+*nie* powiększa serii, więc ponawianie w trakcie pracy nad problemem nie może pogorszyć
+sprawy. Jeśli zamówienie jest starsze niż okres przechowywania zdarzeń przez Allegro,
+naprawa i tak działa - pobiera formularz bezpośrednio, z pominięciem dziennika.
+
+**Import zamówień, których dziennik nigdy nie wymienił.** **Okno importu** na stronie
+zamówień pokrywa przypadki, których drenaż strukturalnie nie obsłuży: drenaż był
+wyłączony dłużej niż okres przechowywania, baza została odtworzona z kopii, kursor
+przepadł albo chcesz mieć historię na nowej instalacji. Nigdy nie rusza kursora zdarzeń,
+bo import wypełnia lukę za nim, i trzyma zajęcie zamówień przez cały czas działania, więc
+drenaż nie zaimportuje w tym czasie niczego nowego. Jedno uruchomienie obejmuje najwyżej
+3000 zamówień; przy większym uzupełnianiu uruchom kilka okien z przesuwanym `since`.
+
+## Osobliwości zamówień Allegro warte poznania
+
+**Formularz zakupowy niesie nawet trzy różne osoby.** `buyer` to dane rejestracyjne
+posiadacza konta, których żaden sprzedawca Allegro nie widzi we własnym interfejsie;
+`delivery.address` to wpisany przez kupującego odbiorca przesyłki i to *jego* sprzedawca
+widzi przy zamówieniu; `invoice.address` to odbiorca faktury, którym z pełnym prawem może
+być jeszcze kto inny. Czytanie wyłącznie pierwszego to sposób, w jaki integracja zaczyna
+wyświetlać nazwisko, któremu przeczy panel sprzedawcy Allegro. Ta wtyczka wstawia
+`delivery.address` w adres dostawy Medusy, a `invoice.address` w adres rozliczeniowy, z
+odwrotem do adresu dostawy, a nie do posiadacza konta.
+
+**Blok `buyer` nazywa kod pocztowy `postCode`**, a nie `zipCode`, jako jedyny spośród
+adresów w formularzu zakupowym. Otypowanie go wspólnym kształtem adresu po cichu go gubi.
+
+**NIP firmy z faktury mieszka dziś w otypowanej tablicy.** Bieżącym źródłem jest
+`company.ids` z wpisem `PL_NIP`; płaskie `company.taxId` jest przestarzałe, ale wciąż
+wypełniane, więc zostaje jako odwrót. Pozostałe typy identyfikatorów, które Allegro
+potrafi zwrócić, to zagraniczne numery rejestracyjne o długości podobnej do NIP-u, więc
+ta wtyczka celowo *ich nie czyta* - złe sparowanie jest gorsze niż brak sparowania.
+
+**`RETURNED` jest zarządzany przez Allegro.** Pojawia się, gdy każda sztuka wróci i
+zostanie zwrócona płatność, a endpoint realizacji go odrzuca, więc jest odczytywalny, ale
+nigdy ustawialny.

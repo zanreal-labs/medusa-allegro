@@ -1,0 +1,309 @@
+---
+title: Configuration and control
+description: Every plugin option and environment variable, the persisted runtime toggles that arm each writer, the precedence rules between the three layers, and the runbook for turning the writers on.
+---
+
+Configuration lives in three layers, and knowing which one wins is the difference
+between a switch you can flip in an incident and a redeploy.
+
+```text
+  environment variable   ->  hard override, and for a writer it can only force OFF
+  persisted admin value  ->  what an operator edits under Settings -> Allegro
+  medusa-config.ts       ->  the default the plugin was installed with
+```
+
+## Options
+
+Five are required. Everything else has a default.
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `clientId` | `string` | yes | - | Allegro application client id. |
+| `clientSecret` | `string` | yes | - | Allegro application client secret. |
+| `appName` | `string` | yes | - | Must match the registered app name. No whitespace or HTTP separators. |
+| `appVersion` | `string` | yes | - | Your integration version, e.g. `"1.0.0"`. |
+| `docsUrl` | `string` | yes | - | Public http(s) URL documenting or contacting the integration. |
+| `encryptionKey` | `string` | yes | - | Base64-encoded 32 bytes. Seals the stored tokens. Rotating it makes existing tokens unreadable. |
+| `environment` | `"production" \| "sandbox"` | no | `"production"` | Sandbox talks to `api.allegro.pl.allegrosandbox.pl`. |
+| `redirectPath` | `string` | no | `"/admin/allegro/oauth/callback"` | A rooted path on this backend, matching the registered redirect URI character for character. `//host/...` is rejected: that is a protocol-relative URL, not a path. |
+| `scopes` | `string` | no | offers read + write, orders read | Space-separated. Drop `:write` for read-only; the plugin then reports the missing write scope in the UI. |
+| `backendUrl` | `string` | no | derived | Absolute base URL of this backend. Set it when a proxy rewrites `Host`. Falls back to `MEDUSA_BACKEND_URL`, then the request. |
+
+### Sync options
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `pricingMode` | `"monitor" \| "automation_rule" \| "fixed_price"` | `"automation_rule"` | See [Pricing](./pricing.en.mdx). This is the default; the persisted admin choice wins over it. |
+| `automationRules` | `{ promoted: string; standard: string }` | - | Names of two rules that must **already exist** on the Allegro account. Resolved by name every run. **Omit it and price sync is inert.** |
+| `changeCap` | `number` | `1` | Price-automation commands per run. Positive integer; `0` is rejected. A deliberately minimal placeholder, not a recommendation. |
+| `salesChannelId` | `string` | - | Scopes which products are sync-eligible. With neither this nor `salesChannelName`, the whole catalogue is eligible. **Wiring-critical.** |
+| `salesChannelName` | `string` | - | Resolved by name at run time. A name that does not exist is an **error**, not a fallback to the whole catalogue. |
+| `stockLocationIds` | `string[]` | every location | Locations whose available quantity is summed for the push. Validated against existing locations. |
+| `srpMetadataKey` | `string` | - | Reads the SRP from that key in the variant's metadata, falling back to the product's. Mutually exclusive with `srpPriceListId`. |
+| `srpPriceListId` | `string` | - | Reads the SRP from the variant's price in that price list. |
+| `marketplaceId` | `string` | `"allegro-pl"` | Marketplace the rule assignment targets. **Wiring-critical.** |
+| `regionId` | `string` | derived | Region Allegro orders are created in. Falls back to the first region matching the order currency, then the first region at all, with a warning. |
+| `costsModuleKey` | `string` | `"productCosts"` | Container key of the optional product costs module ([`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs)), resolved lazily. Without it every offer is skipped with `missing-break-even`. There is never a default floor. |
+| `invoiceModuleKey` | `string` | `"infakt"` | Container key of the optional invoicing module, resolved lazily. Without it the invoice chain is inert. |
+
+### Force-disable options
+
+Each of these can only force a writer **off**. None of them arms anything.
+
+| Option | Writer |
+| --- | --- |
+| `priceSyncDisabled` | Price writes |
+| `stockSyncDisabled` | Quantity writes |
+| `ordersSyncDisabled` | The order drain |
+| `fulfillmentWritebackDisabled` | The seller-status push on a Medusa fulfillment or shipment |
+| `invoiceAttachDisabled` | Attaching invoice PDFs |
+
+### What fails at boot, and why
+
+Every option is validated in a module loader, so a misconfiguration fails at boot
+with a specific message instead of surfacing as an opaque Allegro error later.
+Three validations are worth knowing about, because each catches a mistake that
+would otherwise present as a silently inert loop.
+
+**A boolean-looking string on any kill switch throws.**
+`priceSyncDisabled: process.env.X` yields `"true"`, which a truthiness test
+honours and a `=== true` test ignores - the switch would read as enabled while you
+believed it was off.
+
+**One rule name used for both promotion states throws.** A promotion flip would
+then be a no-op switch, so the promoted commission rate would never reach the
+price floor, and price sync would look healthy while systematically under-flooring
+every promoted offer.
+
+**Both SRP sources set at once throws.** The ceiling is what stops an automation
+rule ratcheting a price down; two sources means an ambiguous ceiling.
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `ALLEGRO_PRICE_SYNC_DISABLED` | `1`, `true` or `yes` force-disables price writes, beating a persisted toggle that is armed. |
+| `ALLEGRO_STOCK_SYNC_DISABLED` | The same, for quantity writes. **`ALLEGRO_PRICE_SYNC_DISABLED` alone does not stop all writes.** |
+| `ALLEGRO_ORDERS_SYNC_DISABLED` | The same, for the order drain. |
+| `ALLEGRO_FULFILLMENT_WRITEBACK_DISABLED` | The same, for the fulfillment write-back. |
+| `ALLEGRO_INVOICE_ATTACH_DISABLED` | The same, for attaching invoice PDFs. |
+| `ALLEGRO_OFFER_SYNC_CRON` | Schedule for the hourly catalogue pass. Default `"15 * * * *"`. |
+| `ALLEGRO_STOCK_SYNC_CRON` | Schedule for the quantity push. Default `"*/15 * * * *"`. |
+| `ALLEGRO_ORDERS_SYNC_INTERVAL_MS` | Interval for the order drain. Default `20000`. |
+| `ALLEGRO_ORDERS_SYNC_CRON` | Switches the drain back to a cron expression. The two are mutually exclusive; the cron wins when both are set. |
+| `ALLEGRO_STOCK_LOCATION_IDS` | Comma-separated stock location ids, overriding `stockLocationIds`. |
+| `ALLEGRO_PRICING_MODE` | **Locks** the pricing mode. Ignored unless it names a real mode. |
+| `ALLEGRO_AUTOMATION_RULE_STANDARD` | **Locks** the standard-offer rule name. |
+| `ALLEGRO_AUTOMATION_RULE_PROMOTED` | **Locks** the promoted-offer rule name. |
+| `ALLEGRO_SRP_METADATA_KEY` | **Locks** the SRP metadata key. |
+| `ALLEGRO_SRP_PRICE_LIST_ID` | **Locks** the SRP price list id. |
+| `ALLEGRO_CHANGE_CAP` | **Locks** the change cap. Ignored unless it is a positive integer. |
+| `ALLEGRO_MARKETPLACE_ID` | **Locks** the marketplace id. **Wiring-critical.** |
+| `ALLEGRO_SALES_CHANNEL_ID` | **Locks** the sales-channel id. **Wiring-critical.** |
+| `ALLEGRO_SALES_CHANNEL_NAME` | **Locks** the sales-channel name. |
+| `MEDUSA_BACKEND_URL` | Fallback for `backendUrl` when deriving the OAuth redirect URI. |
+
+The schedules and force-disable overrides are environment variables rather than
+plugin options for a structural reason: Medusa evaluates a scheduled job's
+`schedule` at plugin-load time, before the DI container - and therefore this
+plugin's `options` - exists. There is no way to read a module's resolved options
+from that static export.
+
+**The schedules start firing as soon as the plugin loads, but the writers are
+armed by the persisted toggles, which ship off.** Installing or upgrading runs the
+loops on their cadence; every writer stays disarmed until you arm it. The read
+paths are harmless, because discovery and the monitor write nothing to Allegro.
+
+## Runtime toggles
+
+Every writer that reaches Allegro is governed by a persisted, operator-flippable
+toggle, stored as a one-row `allegro_settings` singleton. Flip a switch and it
+takes effect on the next tick or event, with no redeploy, because every runtime
+path resolves its effective state from the persisted row at the top of each run
+rather than from a value captured at boot.
+
+| Toggle | Column | Fresh install | Env force-disable |
+| --- | --- | --- | --- |
+| Price writes | `price_sync_enabled` | **off** | `ALLEGRO_PRICE_SYNC_DISABLED` |
+| Quantity writes | `stock_sync_enabled` | **off** | `ALLEGRO_STOCK_SYNC_DISABLED` |
+| Order drain | `orders_sync_enabled` | **off** | `ALLEGRO_ORDERS_SYNC_DISABLED` |
+| Fulfillment write-back | `fulfillment_writeback_enabled` | **off** | `ALLEGRO_FULFILLMENT_WRITEBACK_DISABLED` |
+| Invoice attach | `invoice_attach_enabled` | **on** (inert) | `ALLEGRO_INVOICE_ATTACH_DISABLED` |
+
+### Precedence
+
+The environment, and the boot-time plugin option, is a hard override that can only
+force a writer **off**. It never arms one:
+
+```text
+effectiveEnabled = persistedEnabled && !forceDisabled
+```
+
+- persisted **on** + env unset -> **on**
+- persisted **on** + env force-disable -> **off**, because an operator responding
+  to an incident is not undone by a stale armed toggle
+- persisted **off** + env unset -> **off**; nothing arms a writer but the toggle
+
+The admin shows a switch that the environment forces off as **locked** and "forced
+off by environment", with the variable to clear. It never renders an
+armed-looking switch for a writer the environment is holding down. A write to a
+forced-off toggle is still accepted and stored, so the intent is preserved for
+when the override is lifted.
+
+Invoice attach is the one writer that ships **on**, because by the time this
+plugin hears about an invoice the document already exists as a legal record, so
+delivering it is the safe default. It is inert until an invoicing module is wired
+and emitting events.
+
+## Sync configuration fields
+
+Nine settings are editable from **Settings -> Allegro** on the same singleton: the
+pricing mode, the two automation rule names, the two SRP sources, the change cap,
+the marketplace id and the sales-channel scope. An edit persists and takes effect
+on the next run, no redeploy.
+
+A store that never touches these fields behaves exactly as before: every persisted
+column starts `null`, and `null` falls through to the `medusa-config.ts` option.
+
+### Precedence for a value, not a boolean
+
+There is no "off" for a string or a number, so a set environment lock wins
+outright:
+
+```text
+effectiveValue = envLock ?? persistedValue ?? medusaConfigDefault
+```
+
+An env lock, when set, is authoritative - it beats both a persisted admin edit and
+the `medusa-config.ts` option, and the admin shows the field locked, the same
+treatment a forced-off toggle gets. Clearing a field in the admin writes `null`,
+which falls back to the `medusa-config.ts` option rather than to an empty value.
+
+### Two fields are wiring-critical
+
+Editing `marketplaceId` or `salesChannelId` **re-scopes which Medusa products this
+plugin matches against Allegro offers**. A wrong value breaks the mapping silently
+rather than producing an obviously bad result. Both stay editable, with the env
+lock as the escape hatch: set `ALLEGRO_MARKETPLACE_ID` or
+`ALLEGRO_SALES_CHANNEL_ID` to pin the correct value against an admin mistake
+during a cutover. The admin renders an explicit warning on both inputs.
+
+### Two invariants are enforced on every write
+
+The standard and promoted rule names must differ, and at most one SRP source may
+be set. Both already existed as boot-time checks, and both are now also enforced
+on every admin write, because persisting one field independently of the other can
+newly create a collision the boot-time check never saw. The write is rejected
+rather than silently accepted.
+
+## Turning the writers on
+
+Every writer ships disarmed, so the loops run read-only until you arm each one.
+The safe order, and why each step comes where it does:
+
+1. **Connect** the account with the write scope. Without it every command answers
+   403 and the admin raises the reconnect banner.
+2. **Leave the writers disarmed** while you prepare. That is the fresh-install
+   default, so there is nothing to do unless you upgraded with writers already
+   armed. If you are cutting over from another system that currently writes to
+   Allegro, set the force-disable variables so no toggle flip can arm a writer
+   until the old system is retired. Two systems writing to one catalogue is the
+   worst possible state, and each writer is separate.
+3. **Let discovery and the monitor run.** Both are read-only. Resolve every
+   conflict on the Offers page, and look at what the price mode and drift actually
+   say about the catalogue. This is the step that turns arming the writers into a
+   decision rather than a leap.
+4. **Fill in the category rates.** Until a category has both, every offer in it is
+   skipped with `missing-break-even`.
+5. **Configure the SRP source**, and check that variants actually carry a value.
+   Without it every offer is skipped with `missing-srp`.
+6. **Create the two price-automation rules** on the Allegro account and set
+   `automationRules` to their names. Until then price sync is inert by
+   construction.
+7. **Arm the writers - stock first, then prices.** A wrong quantity is recoverable
+   in one run; a wrong price may already have sold something. Raise `changeCap`
+   only once you have watched the push history and believe the run. Arm the order
+   drain, fulfillment write-back and invoice attach when you are ready for each.
+
+## Stopping the writers, now
+
+Set the relevant variable and redeploy the process environment:
+
+```bash
+ALLEGRO_PRICE_SYNC_DISABLED=1      # price-automation commands
+ALLEGRO_STOCK_SYNC_DISABLED=1      # quantity-change commands
+ALLEGRO_ORDERS_SYNC_DISABLED=1     # the order drain
+ALLEGRO_INVOICE_ATTACH_DISABLED=1  # attaching invoice PDFs
+```
+
+A disabled loop **records** that it was disabled on its state row, so "disabled"
+stays distinguishable from "broken" - both look like "nothing happened" from
+outside.
+
+**The variable can only ever disable, never enable.** The resolution is
+`option === true || envIsTruthy`, so `ALLEGRO_PRICE_SYNC_DISABLED=0` does not
+re-arm a loop whose option is `true`. What re-arming takes therefore depends on
+how your config was written, and it is worth settling before you need it under
+pressure:
+
+```ts
+// Pattern A - option pinned. Re-arming means editing config and redeploying.
+priceSyncDisabled: true,
+
+// Pattern B - option derived from the same variable. Re-arming is one env change,
+// and the incident switch still wins, because =1 also yields option true:
+//   unset -> true (disabled)    =1 -> true (disabled)    =0 -> false (armed)
+priceSyncDisabled: process.env.ALLEGRO_PRICE_SYNC_DISABLED !== "0",
+```
+
+Pattern B is the better default for a staged cutover: one variable is both the
+pre-cutover hold and the arming switch, so no config edit stands between an
+operator and a working sync. Pattern A is right when you want arming to require a
+code review. Pattern B must compare against `"0"` explicitly rather than coercing,
+because `Boolean(process.env.X)` is `true` for the string `"0"`, which would pin
+it disabled forever.
+
+Note that `ordersSyncDisabled` does not stop the fulfillment write-back and does
+not stop the invoice attach - each has its own switch. It does stop the invoice
+retry sweep, which runs at the end of the drain. To stop every write to Allegro,
+disconnect the account.
+
+## Reading a loop that looks stuck
+
+Check the state row's `status` on the settings page:
+
+- **`running` and not moving.** A crashed run holds the claim for up to six
+  minutes, after which the next tick takes it over as stale and logs that it did.
+  Staleness is measured from `claim_heartbeat_at`, which a live run bumps at least
+  once a minute, so a long but healthy run keeps its claim instead of being taken
+  over mid-flight.
+- **`running`, with a log line about losing the claim.** A run discovered it had
+  been taken over and stopped without writing anything further, including its own
+  outcome. Nothing is lost; the abandoned work replays.
+- **`idle` or `error` with a kill-switch message while a run is in flight.** A
+  skip arriving while another run holds the claim deliberately does not touch the
+  state row, and logs that it declined to. Writing it would have released that
+  run's claim and let the next tick start a second concurrent run.
+- **`error` with `SYSTEMIC` in the message.** The loop is waiting on Allegro.
+  Nothing was skipped and nothing quarantined; it retries on its own.
+- **`ok` with zero counters.** Nothing to do, which is different from broken. The
+  counters are on the health table precisely so those two are distinguishable.
+- **`idle` with a kill-switch message.** Working as configured.
+
+## The manual push budget
+
+`POST /admin/allegro/offers/:sku/push` shares the scheduled loop's blast radius.
+Manual pushes are counted over a rolling hour, and once that count reaches
+`changeCap` further pushes are refused with HTTP 429 and a `Retry-After` of one
+hour.
+
+This exists for scripts rather than for people. Each call takes the sync claim, so
+calls serialise - but serialising is not bounding, and a loop over this route would
+otherwise reprice the entire catalogue, walking straight around the cap that exists
+to stop a bad plan doing exactly that. The count comes from `pushed_by` on the
+audit table, so the plugin's own loops never consume an operator's budget and the
+cap survives a restart.
+
+If you legitimately need to push more than that in an hour, raise `changeCap` -
+which raises it for the scheduled loop too, deliberately, because that is the same
+decision.
