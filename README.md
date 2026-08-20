@@ -231,9 +231,9 @@ existed. Upgrading changes nothing about what your store writes.
 
 The break-even floor (from
 [`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs),
-grossed for VAT and for the
-category commission) and the SRP ceiling (from variant metadata or a price list) are the
-safety story of this whole plugin, so no mode is allowed to skip them:
+grossed for VAT and for the category commission) and the SRP ceiling (from variant
+metadata or a price list) are the safety story of this whole plugin, so no mode is
+allowed to skip them:
 
 - `monitor` computes both and reports how many offers are priced outside them. That
   report is what you read **before** choosing a mode that writes.
@@ -745,9 +745,8 @@ again.
 **Keeping Medusa inventory honest is explicitly not this plugin's job.** In this
 stack that belongs to a separate inventory plugin, which owns the supplier snapshot
 and the arming gate that refuses to propagate an untrustworthy one into Medusa
-inventory. That guard lives one layer up, where the
-supplier response is actually visible; a second one here would be a guess about data
-this plugin has no source for.
+inventory. That guard lives one layer up, where the supplier response is actually
+visible; a second one here would be a guess about data this plugin has no source for.
 
 What this loop does refuse on is its own uncertainty, and the line is drawn at UNKNOWNS
 rather than at gaps. An ambiguous SKU match, or a quantity that could not be READ on
@@ -828,10 +827,9 @@ range a pushed price has to sit inside in `fixed_price`, and as the report in `m
 - **The floor** is `grossCost / (1 - commissionRate)`, the smallest gross price at
   which net income reaches zero. `grossCost` comes from
   [`@zanreal/medusa-product-costs`](https://github.com/zanreal-labs/medusa-product-costs)
-  (a **soft** dependency, resolved lazily), and the
-  commission rate from `allegro_category_rate` selected by the offer's category
-  **and its promotion state**. Ceiled to a whole unit, because the managed rules
-  require it.
+  (a **soft** dependency, resolved lazily), and the commission rate from
+  `allegro_category_rate` selected by the offer's category **and its promotion
+  state**. Ceiled to a whole unit, because the managed rules require it.
 - **The ceiling** is the SRP, from `srpMetadataKey` or `srpPriceListId`. A price-list SRP
   is matched to the offer's **own currency**, and there is deliberately no conversion: a
   converted ceiling would depend on a rate this plugin does not have and cannot audit, so
