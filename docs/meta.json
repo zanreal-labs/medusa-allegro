@@ -1,5 +1,5 @@
 {
-  "title": "@zanreal/medusa-allegro",
-  "description": "Allegro marketplace sync for Medusa v2: offers keyed by SKU, bounded price writes, stock, and the order event drain.",
+  "title": "Allegro",
+  "description": "@zanreal/medusa-allegro is Allegro marketplace sync for Medusa v2: offers keyed by SKU, bounded price writes, stock, and the order event drain.",
   "pages": ["index", "connecting", "mapping", "pricing", "orders", "configuration"]
 }
