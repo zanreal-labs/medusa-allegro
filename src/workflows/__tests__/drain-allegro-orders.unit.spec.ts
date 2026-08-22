@@ -24,6 +24,14 @@ import type { StateRowFixture } from "./fixtures";
 
 const RECENT = new Date(Date.now() - 60_000).toISOString();
 
+/** A Medusa customer as the order query returns it. */
+interface CustomerFixture {
+  id: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  company_name?: string | null;
+}
+
 /**
  * Recorder for the three core order workflows the upsert reaches for.
  *
@@ -66,10 +74,35 @@ var coreFlows: {
   markedPaid: { order_id: string; payment_collection_id: string }[];
   /** Makes the mark-as-paid workflow reject, e.g. no system provider registered. */
   markPaidError?: Error;
+  /**
+   * Customer updates, in order: `{ selector, update }`.
+   *
+   * The only place a customer name can be written from here: `createOrderWorkflow`
+   * takes an email and nothing else about the person, so a spec that only watched the
+   * order workflow could never see whether the customer got named.
+   */
+  customerUpdates: { id: string[]; update: Record<string, unknown> }[];
+  /** Makes the customer update reject, so the never-fatal path is exercised. */
+  customerUpdateError?: Error;
+  /**
+   * The customer behind each Medusa order, keyed by order id.
+   *
+   * Modelled rather than stubbed, because the incident IS this table: Medusa's
+   * `findOrCreateCustomerStep` calls `createCustomers({ email })` and nothing else, so
+   * an order created with an email gets a customer whose every name column is NULL.
+   * The fake reproduces that, and `updateCustomersWorkflow` writes back into it - which
+   * is what lets one spec assert that a second pass over an already-named customer
+   * writes nothing.
+   */
+  customerByOrderId: Record<string, CustomerFixture | undefined>;
+  customerSequence: number;
 } = {
   cancelled: [],
   completed: [],
   created: [],
+  customerByOrderId: {},
+  customerSequence: 0,
+  customerUpdates: [],
   failCreateForForms: new Set(),
   markedPaid: [],
   paymentCollections: [],
@@ -118,6 +151,29 @@ jest.mock("@medusajs/medusa/core-flows", () => ({
       return Promise.resolve({ result: { id: "pay_1" } });
     },
   }),
+  updateCustomersWorkflow: () => ({
+    run: ({
+      input,
+    }: {
+      input: { selector: { id: string[] }; update: Record<string, unknown> };
+    }) => {
+      if (coreFlows.customerUpdateError) {
+        return Promise.reject(coreFlows.customerUpdateError);
+      }
+      coreFlows.customerUpdates.push({
+        id: input.selector.id,
+        update: input.update,
+      });
+      // Written back, so a later pass reads what this one set. A recorder that only
+      // appended calls could not tell "already named" from "named twice".
+      for (const row of Object.values(coreFlows.customerByOrderId)) {
+        if (row && input.selector.id.includes(row.id)) {
+          Object.assign(row, input.update);
+        }
+      }
+      return Promise.resolve({ result: [] });
+    },
+  }),
   createOrderWorkflow: () => ({
     run: ({ input }: { input: Record<string, unknown> }) => {
       if (coreFlows.createError) {
@@ -138,6 +194,16 @@ jest.mock("@medusajs/medusa/core-flows", () => ({
       // is already "canceled", which is exactly why cancelling it afterwards can never work.
       coreFlows.statusById[id] =
         (input.status as string | undefined) ?? "pending";
+      if (input.email) {
+        // The email and NOTHING else, exactly as `findOrCreateCustomerStep` does it.
+        coreFlows.customerSequence += 1;
+        coreFlows.customerByOrderId[id] = {
+          company_name: null,
+          first_name: null,
+          id: `cus_${coreFlows.customerSequence}`,
+          last_name: null,
+        };
+      }
       return Promise.resolve({ result: { id } });
     },
   }),
@@ -351,6 +417,13 @@ const setup = (input: {
   /** Live `order.status` for orders that already existed before this run. */
   medusaOrderStatuses?: Record<string, string>;
   /**
+   * Customers behind orders that already existed, by Medusa order id.
+   *
+   * This is how an order created before the pipeline wrote customer names is expressed:
+   * a customer row with every name column NULL, which is what the live table held.
+   */
+  medusaOrderCustomers?: Record<string, CustomerFixture>;
+  /**
    * Payment collections already linked to a Medusa order, by order id.
    *
    * An order with none is what every Allegro order looked like before the payment step
@@ -376,6 +449,9 @@ const setup = (input: {
     invoice_number?: string;
   }[];
 }) => {
+  for (const [orderId, seeded] of Object.entries(input.medusaOrderCustomers ?? {})) {
+    coreFlows.customerByOrderId[orderId] = { ...seeded };
+  }
   const client = fakeClient(input);
   const table = orderTable(input.orders ?? []);
   const allegro = fakeAllegroService({
@@ -476,12 +552,22 @@ const setup = (input: {
                 const status =
                   coreFlows.statusById[byId] ??
                   input.medusaOrderStatuses?.[byId];
-                if (seeded === undefined && status === undefined) {
+                const customer = coreFlows.customerByOrderId[byId];
+                if (
+                  seeded === undefined &&
+                  status === undefined &&
+                  customer === undefined
+                ) {
                   return Promise.resolve({ data: [] });
                 }
                 return Promise.resolve({
                   data: [
-                    { id: byId, ...(status ? { status } : {}), ...seeded },
+                    {
+                      id: byId,
+                      ...(status ? { status } : {}),
+                      ...(customer ? { customer } : {}),
+                      ...seeded,
+                    },
                   ],
                 });
               }
@@ -534,6 +620,10 @@ beforeEach(() => {
   coreFlows.paymentCollections.length = 0;
   coreFlows.markedPaid.length = 0;
   coreFlows.markPaidError = undefined;
+  coreFlows.customerUpdates.length = 0;
+  coreFlows.customerUpdateError = undefined;
+  coreFlows.customerByOrderId = {};
+  coreFlows.customerSequence = 0;
 });
 
 describe("drainAllegroOrders: bootstrap", () => {
@@ -2186,6 +2276,215 @@ describe("drainAllegroOrders: recording the buyer's payment", () => {
     expect(context.allegro.states.get("orders")?.cursor).toBe("e1");
     expect(
       context.logs.some((line) => line.includes("FAILED to register the buyer's payment")),
+    ).toBe(true);
+  });
+});
+
+describe("drainAllegroOrders: the customer gets their name", () => {
+  /**
+   * Fixture names only, and three deliberately different people.
+   *
+   * The whole mapping decision is that these do not have to be the same person, so a
+   * spec written with one name could not tell a correct fill from the wrong one.
+   */
+  const ACCOUNT = { firstName: "Anna", lastName: "Testowa" };
+  const RECIPIENT = { firstName: "Barbara", lastName: "Odbiorcza" };
+
+  const withCursor = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+      ...input,
+    });
+
+  /** A form whose account holder and delivery recipient are different people. */
+  const namedForm = (id: string, buyer: Record<string, unknown> = ACCOUNT) =>
+    form({
+      buyer: { email: "relay-1@allegromail.example", login: "test-account", ...buyer },
+      delivery: {
+        address: {
+          city: "Warszawa",
+          countryCode: "PL",
+          street: "Ulica 1",
+          zipCode: "00-001",
+          ...RECIPIENT,
+        },
+        cost: { amount: "12.99", currency: "PLN" },
+        method: { name: "Kurier" },
+      },
+      id,
+    });
+
+  it("names the customer on the pass that creates the order", async () => {
+    // The production shape, from the other side: `createOrderWorkflow` creates the
+    // customer from the relay email alone, so unless this pass writes the name nothing
+    // ever will.
+    const context = withCursor({
+      forms: [namedForm("f1")],
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.customerUpdates).toEqual([
+      { id: ["cus_1"], update: { first_name: "Anna", last_name: "Testowa" } },
+    ]);
+  });
+
+  it("takes the account holder's name, not the delivery recipient's", async () => {
+    // The order's shipping address is Barbara's and stays Barbara's; the customer entity
+    // is the account the order was placed from, which is Anna's. Conflating the two is
+    // the identity error this mapping exists to avoid.
+    const context = withCursor({
+      forms: [namedForm("f1")],
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.customerUpdates[0]?.update).not.toMatchObject({
+      first_name: "Barbara",
+    });
+    expect(coreFlows.created[0]).toMatchObject({
+      shipping_address: { first_name: "Barbara", last_name: "Odbiorcza" },
+    });
+  });
+
+  it("sets the company for a company account", async () => {
+    const context = withCursor({
+      forms: [namedForm("f1", { ...ACCOUNT, companyName: "Testowa Sp. z o.o." })],
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.customerUpdates[0]?.update).toEqual({
+      company_name: "Testowa Sp. z o.o.",
+      first_name: "Anna",
+      last_name: "Testowa",
+    });
+  });
+
+  it("writes nothing when Allegro sent no name for the account holder", async () => {
+    // Rather than reaching for the delivery recipient, who is somebody else. An unnamed
+    // customer beside a correctly named address is honest; a wrong name is not.
+    const context = withCursor({
+      forms: [namedForm("f1", {})],
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.customerUpdates).toEqual([]);
+  });
+
+  it("heals a customer created before the pipeline wrote names, without touching anything else", async () => {
+    // The backfill, through the reconciliation sweep: the order already exists, its
+    // customer has NULL names, and nobody has to run anything by hand.
+    const context = setup({
+      forms: [namedForm("f1")],
+      medusaOrderCustomers: {
+        order_9: { company_name: null, first_name: null, id: "cus_9", last_name: null },
+      },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "new",
+          id: "algorder_1",
+          medusa_order_id: "order_9",
+        },
+      ],
+      pages: [[]],
+      paymentCollections: { order_9: [{ captured_amount: 412.97 }] },
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.customerUpdates).toEqual([
+      { id: ["cus_9"], update: { first_name: "Anna", last_name: "Testowa" } },
+    ]);
+    expect(result.reconcileCustomersNamed).toBe(1);
+    // NOT a repair, and so not in the run's error line: a name backfill says nothing
+    // about whether the event journal is losing events, which is what `reconcileRepaired`
+    // and that line mean.
+    expect(result.reconcileRepaired).toBe(0);
+    expect(result.error ?? null).toBeNull();
+  });
+
+  it("never overwrites a name a human already set", async () => {
+    // Including the emergency hand-patch that named the one live customer this bug
+    // produced from its order address. The fix has to make that patch redundant, not
+    // fight it.
+    const context = setup({
+      forms: [namedForm("f1")],
+      medusaOrderCustomers: {
+        order_9: {
+          company_name: null,
+          first_name: "Barbara",
+          id: "cus_9",
+          last_name: "Odbiorcza",
+        },
+      },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "new",
+          id: "algorder_1",
+          medusa_order_id: "order_9",
+        },
+      ],
+      pages: [[]],
+      paymentCollections: { order_9: [{ captured_amount: 412.97 }] },
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.customerUpdates).toEqual([]);
+    expect(result.reconcileCustomersNamed).toBe(0);
+  });
+
+  it("fills only the column that is empty, leaving the corrected one alone", async () => {
+    const context = setup({
+      forms: [namedForm("f1")],
+      medusaOrderCustomers: {
+        order_9: { company_name: null, first_name: "Ania", id: "cus_9", last_name: null },
+      },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "new",
+          id: "algorder_1",
+          medusa_order_id: "order_9",
+        },
+      ],
+      pages: [[]],
+      paymentCollections: { order_9: [{ captured_amount: 412.97 }] },
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.customerUpdates).toEqual([
+      { id: ["cus_9"], update: { last_name: "Testowa" } },
+    ]);
+  });
+
+  it("does not hold the event cursor when the customer write fails", async () => {
+    // An unnamed customer must never stall every LATER order behind it. The order itself
+    // is correct, and the next pass tries the name again.
+    coreFlows.customerUpdateError = new Error("customer module is unavailable");
+    const context = withCursor({
+      forms: [namedForm("f1")],
+      pages: [[event("e1", "f1")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.failed).toBe(0);
+    expect(context.allegro.states.get("orders")).toMatchObject({ cursor: "e1" });
+    expect(
+      context.logs.some((line) => line.includes("could not fill first_name, last_name")),
     ).toBe(true);
   });
 });

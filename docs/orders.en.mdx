@@ -265,6 +265,18 @@ plugin puts `delivery.address` on the Medusa shipping address and
 `invoice.address` on the billing address, falling back to shipping rather than to
 the account holder.
 
+**The Medusa customer is the account holder**, and only ever the account holder.
+That is what a customer entity is: the identity behind the account the order came
+from, which is also whose relay address `customer.email` already holds. So
+`buyer.firstName` / `buyer.lastName` - plus `buyer.companyName` for a company
+account - are written onto the customer, and the delivery recipient is never
+borrowed to fill an empty one. The two are routinely different people (a gift, an
+office delivery), and a wrong name is worse than a missing one. Names are filled
+only where the customer's own field is empty: anything a staff member set by hand
+is left exactly as it is, so the fill is safe to repeat. Orders created before this
+existed have customers with no name at all; the reconciliation sweep fills them in
+as it re-reads each open order, with nothing to run by hand.
+
 **The buyer block spells the postal code `postCode`**, not `zipCode`, alone among
 the addresses in a checkout form. Typing it as the common address shape silently
 drops it.

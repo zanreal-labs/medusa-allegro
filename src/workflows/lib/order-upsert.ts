@@ -14,9 +14,12 @@ import {
 import type { DerivedOrderStatus, MedusaOrderAction } from "../../lib/sync/order-status";
 import type { AllegroSyncOptions } from "../../modules/allegro/service";
 import type AllegroModuleService from "../../modules/allegro/service";
+import { planCustomerName, readBuyerIdentity } from "../../lib/sync/customer-identity";
+import type { CustomerNameRow } from "../../lib/sync/customer-identity";
 import { parseAmount } from "../../lib/sync/money";
 import type { AmountInput } from "../../lib/sync/money";
 import { planOrderPayment, readPaymentFacts } from "../../lib/sync/order-reconcile";
+import { nameOrderCustomer } from "./order-customer";
 import { readOrderPaymentState, registerOrderPayment } from "./order-payment";
 import { readCheckoutForm } from "./checkout-form";
 import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
@@ -44,6 +47,14 @@ import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
  * custom line item and recorded in `line_conflicts`. Refusing the order would be
  * worse: the sale happened on Allegro whatever Medusa's catalogue says, and an order
  * nobody can see is not a safer outcome than one that is visibly half-mapped.
+ *
+ * ## The customer is the Allegro ACCOUNT HOLDER
+ *
+ * A checkout form names up to three different people, and they end up in three
+ * different places: the delivery recipient on the shipping address, the invoice
+ * recipient on the billing address, and the account holder on the Medusa CUSTOMER.
+ * `lib/sync/customer-identity` argues that mapping in full, including why the delivery
+ * name is never borrowed to fill an empty customer.
  *
  * ## Totals come from Allegro, never recomputed
  *
@@ -196,6 +207,14 @@ export interface ApplyFormResult {
   paymentRegistered?: boolean;
   /** Set when a payment was due but could not be recorded. Never fatal - see step 3c. */
   paymentError?: string;
+  /**
+   * True when this pass filled a name that was missing on the order's customer.
+   *
+   * Reported separately from `statusChanged` and never folded into it: a name backfill
+   * is this plugin catching up with its own past, not evidence that an Allegro event
+   * was lost, and the sweep's repair counter means the latter.
+   */
+  customerNamed?: boolean;
 }
 
 /**
@@ -523,6 +542,15 @@ interface MedusaOrderSnapshot {
   status?: string;
   total?: number;
   currency?: string;
+  /**
+   * The customer the order is linked to, for the name fill.
+   *
+   * Read here rather than in its own round trip. The fill has to know which of the
+   * name columns are already populated before it can decide to write any of them, and
+   * this read was already happening - so carrying four more fields on it is free,
+   * whereas a second `query.graph` per form would not be.
+   */
+  customer?: CustomerNameRow;
 }
 
 const readMedusaOrder = async (
@@ -534,15 +562,26 @@ const readMedusaOrder = async (
     const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
     const { data } = await query.graph({
       entity: "order",
-      fields: ["id", "status", "total", "currency_code"],
+      fields: [
+        "id",
+        "status",
+        "total",
+        "currency_code",
+        "customer.id",
+        "customer.first_name",
+        "customer.last_name",
+        "customer.company_name",
+      ],
       filters: { id: medusaOrderId },
     });
     const order = data[0];
     if (!order) {
       return undefined;
     }
+    const customer = order.customer as CustomerNameRow | null | undefined;
     return {
       currency: (order.currency_code as string | null)?.trim().toLowerCase() || undefined,
+      ...(customer?.id ? { customer } : {}),
       status: (order.status as string | null) ?? undefined,
       // NOT cast to a scalar: `order.total` is a Medusa `BigNumber` instance, and the
       // scalar cast is what hid that. `parseAmount` reads the object directly.
@@ -552,7 +591,7 @@ const readMedusaOrder = async (
     logger.warn(
       `[allegro-orders] could not read Medusa order ${medusaOrderId}: ${
         error instanceof Error ? error.message : String(error)
-      }. The status action falls back to attempting the workflow, and no total conflict is recorded - an unreadable total is not evidence of a mismatch.`,
+      }. The status action falls back to attempting the workflow, no total conflict is recorded - an unreadable total is not evidence of a mismatch - and the customer name is left alone, because an unread customer cannot be shown to be missing one.`,
     );
     return undefined;
   }
@@ -788,6 +827,29 @@ export const applyCheckoutForm = async (
     paymentError = outcome.error;
   }
 
+  // Step 3d: the customer's name.
+  //
+  // After the order exists, because there is no other moment: `createOrderWorkflow`
+  // takes an email and creates the customer from that alone, with every name column
+  // NULL. Running it on EVERY pass rather than only on the pass that created the order
+  // is what makes the sweep heal the customers created before this existed - the plan
+  // is recomputed from what the row currently holds, so an already-named customer costs
+  // nothing and a null-named one is filled wherever it next gets swept.
+  //
+  // Like the payment above, a failure here deliberately does NOT set `lastError`: an
+  // unnamed customer is not a reason to hold the event cursor and stall every later
+  // order behind it.
+  let customerNamed = false;
+  if (medusaOrderId) {
+    const outcome = await nameOrderCustomer(
+      container,
+      logger,
+      medusaOrderId,
+      planCustomerName(readBuyerIdentity(form), snapshot?.customer),
+    );
+    customerNamed = outcome.named;
+  }
+
   // Step 3b: reconcile the money. Read-only, and never a reason to withhold the order.
   // `undefined` clears any conflict a previous pass recorded, so a repaired order stops being
   // reported without needing its own action.
@@ -845,6 +907,7 @@ export const applyCheckoutForm = async (
   return {
     conflicts,
     created,
+    customerNamed,
     medusaOrderId,
     ...(paymentError ? { paymentError } : {}),
     paymentRegistered,

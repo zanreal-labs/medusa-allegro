@@ -27,6 +27,11 @@ import { applyCheckoutForm } from "./order-upsert";
  * the same `applyCheckoutForm` the event drain calls, so anything the drain can fix
  * the sweep can fix, and a form that is already consistent writes nothing.
  *
+ * That is also what makes it the backfill for the customer-name gap: `applyCheckoutForm`
+ * fills an empty `first_name` / `last_name` / `company_name` on the order's customer on
+ * every pass, so the customers created before it did heal the next time their order is
+ * swept, with no separate migration and no manual patching.
+ *
  * Runs inside the drain's claim, immediately after it, for the same reason the
  * invoice sweep does: it writes the rows the drain writes, so it must not run
  * concurrently with it. Sharing the claim rather than taking a second one is what
@@ -45,6 +50,15 @@ export interface ReconcileSweepResult {
   repaired: number;
   /** Payments recorded this sweep. Each one is an event the drain lost. */
   paymentsRegistered: number;
+  /**
+   * Customers given a name they were missing.
+   *
+   * Counted apart from `repaired`, and deliberately so. Every other repair this sweep
+   * makes means an Allegro event was lost; a missing customer name means the order was
+   * created before this plugin knew how to write one, so folding it in would report a
+   * healthy event journal as broken for as long as the backfill runs.
+   */
+  customersNamed: number;
   /** Rows whose re-read threw. */
   failed: number;
   /** Marks to persist, so the slow tier's clock survives a restart. */
@@ -53,6 +67,7 @@ export interface ReconcileSweepResult {
 
 const emptySweep = (marks: ReconcileMarks): ReconcileSweepResult => ({
   checked: 0,
+  customersNamed: 0,
   failed: 0,
   marks,
   paymentsRegistered: 0,
@@ -138,6 +153,17 @@ export const sweepOpenAllegroOrders = async (
       result.checked += 1;
       if (applied.paymentRegistered) {
         result.paymentsRegistered += 1;
+      }
+      if (applied.customerNamed) {
+        // INFO, not WARN, and not counted as a repair. See `customersNamed`: this is the
+        // backfill of a field the create path used to leave NULL, so it says nothing
+        // about whether the event journal is working.
+        result.customersNamed += 1;
+        logger.info(
+          `[allegro-orders] reconciliation named the customer behind checkout form ${row.checkout_form_id} (Medusa order ${
+            applied.medusaOrderId ?? "none"
+          }), which was created before the order pipeline wrote customer names. No manual repair is needed for the rest.`,
+        );
       }
       if (applied.created || applied.paymentRegistered || applied.statusChanged) {
         result.repaired += 1;
