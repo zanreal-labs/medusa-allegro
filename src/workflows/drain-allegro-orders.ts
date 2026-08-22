@@ -51,6 +51,13 @@ export interface OrdersSyncResult extends OrdersSyncSummary {
   reconcileRepaired: number;
   /** Payments the reconciliation recorded that the event path had missed. */
   reconcilePayments: number;
+  /**
+   * Customers the sweep gave a name they were missing.
+   *
+   * Not a failure and not counted as a repair: these are the orders created before the
+   * pipeline wrote customer names at all, healing on their next sweep.
+   */
+  reconcileCustomersNamed: number;
 }
 
 export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
@@ -59,6 +66,7 @@ export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
   invoiceAttachFailures: 0,
   invoicesAttached: 0,
   reconciled: 0,
+  reconcileCustomersNamed: 0,
   reconcilePayments: 0,
   reconcileRepaired: 0,
   withLineConflicts: 0,
@@ -220,6 +228,7 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
         mayContinue,
       );
       result.reconciled = reconciled.checked;
+      result.reconcileCustomersNamed = reconciled.customersNamed;
       result.reconcilePayments = reconciled.paymentsRegistered;
       result.reconcileRepaired = reconciled.repaired;
 

@@ -274,6 +274,18 @@ wyświetlać nazwisko, któremu przeczy panel sprzedawcy Allegro. Ta wtyczka wst
 `delivery.address` w adres dostawy Medusy, a `invoice.address` w adres rozliczeniowy, z
 odwrotem do adresu dostawy, a nie do posiadacza konta.
 
+**Klientem Medusy jest posiadacz konta** i wyłącznie posiadacz konta. Tym właśnie jest
+encja klienta: tożsamością stojącą za kontem, z którego przyszło zamówienie, i to jego
+adres pośredniczący trzyma już `customer.email`. Dlatego `buyer.firstName` /
+`buyer.lastName` - a przy koncie firmowym również `buyer.companyName` - trafiają na
+klienta, a odbiorca przesyłki nigdy nie jest pożyczany do wypełnienia pustego pola. To
+regularnie dwie różne osoby (prezent, dostawa do biura), a błędne nazwisko jest gorsze
+niż jego brak. Pola uzupełniane są tylko tam, gdzie u klienta są puste: cokolwiek
+ustawił ręcznie pracownik, zostaje nietknięte, więc uzupełnianie można bezpiecznie
+powtarzać. Zamówienia utworzone wcześniej mają klientów zupełnie bez nazwiska; przebieg
+uzgadniający uzupełnia je, gdy kolejno odczytuje otwarte zamówienia, i nie trzeba
+uruchamiać niczego ręcznie.
+
 **Blok `buyer` nazywa kod pocztowy `postCode`**, a nie `zipCode`, jako jedyny spośród
 adresów w formularzu zakupowym. Otypowanie go wspólnym kształtem adresu po cichu go gubi.
 
