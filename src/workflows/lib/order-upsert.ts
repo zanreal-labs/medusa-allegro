@@ -15,6 +15,7 @@ import type { DerivedOrderStatus, MedusaOrderAction } from "../../lib/sync/order
 import type { AllegroSyncOptions } from "../../modules/allegro/service";
 import type AllegroModuleService from "../../modules/allegro/service";
 import { parseAmount } from "../../lib/sync/money";
+import type { AmountInput } from "../../lib/sync/money";
 import { readCheckoutForm } from "./checkout-form";
 import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
 
@@ -537,7 +538,9 @@ const readMedusaOrder = async (
     return {
       currency: (order.currency_code as string | null)?.trim().toLowerCase() || undefined,
       status: (order.status as string | null) ?? undefined,
-      total: parseAmount(order.total as string | number | null | undefined),
+      // NOT cast to a scalar: `order.total` is a Medusa `BigNumber` instance, and the
+      // scalar cast is what hid that. `parseAmount` reads the object directly.
+      total: parseAmount(order.total as AmountInput),
     };
   } catch (error) {
     logger.warn(

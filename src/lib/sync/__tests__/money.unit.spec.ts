@@ -79,3 +79,68 @@ describe("parseAmount strictness", () => {
     expect(parseAmount(Number.POSITIVE_INFINITY)).toBeUndefined();
   });
 });
+
+describe("parseAmount on Medusa big numbers", () => {
+  /**
+   * The shape `query.graph` actually returns for `order.total`: a `BigNumber` instance,
+   * not a string and not a number. Reconstructed here rather than imported so the test
+   * pins the CONTRACT (raw decimal + numeric + coercions) instead of a Medusa version.
+   */
+  class FakeBigNumber {
+    constructor(private readonly decimal: string) {}
+    get numeric(): number {
+      return Number.parseFloat(this.decimal);
+    }
+    get raw(): { value: string; precision: number } {
+      return { precision: 20, value: this.decimal };
+    }
+    toJSON(): number {
+      return this.numeric;
+    }
+    valueOf(): number {
+      return this.numeric;
+    }
+    toString(): string {
+      return this.decimal;
+    }
+  }
+
+  it("reads a BigNumber instance instead of throwing `value.trim is not a function`", () => {
+    // The production failure: an order totalling 206.00 PLN read back as unreadable,
+    // because the object fell through to the string branch.
+    expect(parseAmount(new FakeBigNumber("206.00") as never)).toBe(206);
+  });
+
+  it("reads the bare raw shape a serialized big number arrives as", () => {
+    expect(parseAmount({ precision: 20, value: "206.00" } as never)).toBe(206);
+    expect(parseAmount({ precision: 20, value: 206 } as never)).toBe(206);
+  });
+
+  it("prefers the exact raw decimal over the derived float", () => {
+    // `raw.value` is the stored decimal; `numeric` is a float derived from it. When they
+    // disagree the stored decimal is the money.
+    expect(parseAmount({ numeric: 205.99, raw: { value: "206.00" } } as never)).toBe(206);
+  });
+
+  it("falls back to `numeric` when there is no raw decimal", () => {
+    expect(parseAmount({ numeric: 206 } as never)).toBe(206);
+  });
+
+  it("falls back to string coercion for a bignumber.js-style object", () => {
+    expect(parseAmount({ toString: () => "206.00" } as never)).toBe(206);
+  });
+
+  it("reads a genuine zero total as zero rather than unknown", () => {
+    expect(parseAmount(new FakeBigNumber("0.00") as never)).toBe(0);
+  });
+
+  it("still refuses an object that is not money", () => {
+    // The default `toString` yields "[object Object]", and the default `valueOf` yields the
+    // object itself. Neither may be coerced into a number nobody meant.
+    expect(parseAmount({} as never)).toBeUndefined();
+    expect(parseAmount({ some: "thing" } as never)).toBeUndefined();
+    expect(parseAmount({ raw: { value: "not money" } } as never)).toBeUndefined();
+    expect(parseAmount({ numeric: Number.NaN } as never)).toBeUndefined();
+    expect(parseAmount([] as never)).toBeUndefined();
+  });
+});
