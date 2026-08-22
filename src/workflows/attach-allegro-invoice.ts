@@ -1,13 +1,15 @@
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import type { AllegroClient } from "../lib/allegro/client";
-import { AllegroApiError } from "../lib/allegro/errors";
 import {
   attachErrorLine,
+  describeAttachFailure,
   findRegisteredInvoice,
   invoiceFileName,
   rejectInvoicePdf,
+  shouldRetryWithoutInvoiceNumber,
 } from "../lib/sync/invoice-attach";
+import type { AttachRequestFacts, AttachStage } from "../lib/sync/invoice-attach";
 import { ALLEGRO_MODULE } from "../modules/allegro";
 import type AllegroModuleService from "../modules/allegro/service";
 import { resolveInvoiceSource } from "./lib/invoicing";
@@ -105,13 +107,46 @@ const recordFailure = async (
   );
 };
 
-/** Allegro's own message when it has one, so the row records what Allegro said. */
-const describeError = (error: unknown): string =>
-  error instanceof AllegroApiError
-    ? `Allegro rejected the invoice attachment (HTTP ${error.httpStatus}): ${error.message}`
-    : (error instanceof Error
-      ? error.message
-      : String(error));
+/**
+ * An error tagged with the call it came from.
+ *
+ * The attach makes four remote calls inside one `try`, and until this existed the catch
+ * could only say "the invoice attachment failed" - which is why a production HTTP 400
+ * was unactionable for an hour: nothing in the log said whether Allegro had rejected the
+ * JSON metadata, the raw PDF upload, or neither. Tagging at the call site cannot drift
+ * the way a mutable `stage` variable would.
+ */
+class StagedError extends Error {
+  constructor(
+    readonly stage: AttachStage,
+    readonly reason: unknown,
+  ) {
+    super(reason instanceof Error ? reason.message : String(reason));
+    this.name = "StagedError";
+  }
+}
+
+/** Run one remote call, tagging anything it throws with the stage it was. */
+const atStage = async <T>(stage: AttachStage, run: () => Promise<T>): Promise<T> => {
+  try {
+    return await run();
+  } catch (error) {
+    throw new StagedError(stage, error);
+  }
+};
+
+/**
+ * Everything known about a failure, in one line the `allegro_order` row can carry.
+ *
+ * `AllegroApiError.message` alone is not enough and that is not a hypothetical: Allegro
+ * answers a rejected invoice create with the generic "Bad Request" in `errors[0].message`
+ * while the `code` and `path` naming the offending field sit in the rest of `errors[]`,
+ * which the old one-line format threw away. See `describeAttachFailure`.
+ */
+const describeError = (error: unknown, sent: AttachRequestFacts): string =>
+  error instanceof StagedError
+    ? describeAttachFailure(error.stage, error.reason, sent)
+    : describeAttachFailure(undefined, error, sent);
 
 /**
  * The registered document to upload against: the stored one, an existing match, or a
@@ -125,6 +160,7 @@ const describeError = (error: unknown): string =>
 const ensureRegisteredDocument = async (
   allegro: AllegroModuleService,
   client: Pick<AllegroClient, "createCheckoutFormInvoice" | "getCheckoutFormInvoices">,
+  logger: Logger,
   row: AllegroOrderRow,
   invoiceNumber: string,
 ): Promise<{ invoiceId: string; reused: boolean }> => {
@@ -135,16 +171,44 @@ const ensureRegisteredDocument = async (
   // The dedupe read, ALWAYS before a create. Allegro has no idempotency key here, so a
   // redelivered event or a resumed run would otherwise put a second invoice document on
   // a real order - the guard the previous pipeline ran in production.
-  const existing = await client.getCheckoutFormInvoices(row.checkout_form_id);
+  const existing = await atStage("list", () =>
+    client.getCheckoutFormInvoices(row.checkout_form_id),
+  );
   const already = findRegisteredInvoice(existing.invoices, invoiceNumber);
   if (already) {
     await allegro.updateAllegroOrders([{ allegro_invoice_id: already.id, id: row.id }] as never);
     return { invoiceId: already.id, reused: true };
   }
 
-  const created = await client.createCheckoutFormInvoice(row.checkout_form_id, {
-    file: { name: invoiceFileName(invoiceNumber) },
-    invoiceNumber,
+  const fileName = invoiceFileName(invoiceNumber);
+  const created = await atStage("create", async () => {
+    try {
+      return await client.createCheckoutFormInvoice(row.checkout_form_id, {
+        file: { name: fileName },
+        invoiceNumber,
+      });
+    } catch (error) {
+      if (!shouldRetryWithoutInvoiceNumber(error, invoiceNumber)) {
+        throw error;
+      }
+      // ONE retry, with the minimum body Allegro's schema calls legal: `file` is the only
+      // required field and `invoiceNumber` the only optional one, so this isolates the
+      // number as the cause. It runs only for a 400 - the status Allegro does not
+      // document for this endpoint at all, and therefore the one that means "the gateway
+      // would not take this request" rather than "this order will not take this invoice"
+      // (422), "it already has one" (409) or "too fast" (429). None of those retry here,
+      // so this can never turn a duplicate or a scope gap into a second document.
+      logger.warn(
+        `[allegro-invoice] checkout form ${row.checkout_form_id}: Allegro rejected the invoice metadata (HTTP 400) with \`invoiceNumber\` set to "${invoiceNumber}"; retrying once with the number omitted, which is the only optional field in the body. ${describeError(error, { fileName, invoiceNumber })}`,
+      );
+      const withoutNumber = await client.createCheckoutFormInvoice(row.checkout_form_id, {
+        file: { name: fileName },
+      });
+      logger.warn(
+        `[allegro-invoice] checkout form ${row.checkout_form_id}: Allegro ACCEPTED the same invoice metadata once \`invoiceNumber\` was omitted, so it is the invoice number "${invoiceNumber}" that it rejects. The document is registered as ${withoutNumber.id} without a number, which is legal but weakens the dedupe read (\`findRegisteredInvoice\` matches on the number); \`allegro_invoice_id\` is persisted immediately below, so only a crash in the next few milliseconds could still duplicate it. Report the rejected number to Allegro with the x-request-id above.`,
+      );
+      return withoutNumber;
+    }
   });
   await allegro.updateAllegroOrders([{ allegro_invoice_id: created.id, id: row.id }] as never);
   return { invoiceId: created.id, reused: false };
@@ -209,8 +273,21 @@ export const attachAllegroInvoiceWithSource = async (
   // under none cannot.
   const invoiceNumber = input.invoiceNumber?.trim() || input.invoiceUuid;
 
+  // Captured before the closure below: narrowing `source?.fetchPdf` above does not survive
+  // into a callback, and re-asserting it with `!` would be a lie waiting to become a crash.
+  const { fetchPdf } = source;
+
+  // Echoed back into every failure line. These two values are the whole of what this
+  // plugin chooses about the request, so a rejection that does not name them cannot be
+  // acted on - and neither is buyer data, so logging them is safe.
+  const sent: AttachRequestFacts = {
+    fileName: invoiceFileName(invoiceNumber),
+    invoiceNumber,
+  };
+
   try {
-    const pdf = await source.fetchPdf(input.invoiceUuid);
+    const pdf = await atStage("pdf", () => fetchPdf(input.invoiceUuid));
+    sent.pdfBytes = pdf.byteLength;
 
     // Before anything is registered. A rejected upload leaves the document behind and it
     // still counts against the ten an order allows.
@@ -220,8 +297,10 @@ export const attachAllegroInvoiceWithSource = async (
       return { attempted: true, error: tooBig };
     }
 
-    const document = await ensureRegisteredDocument(allegro, client, row, invoiceNumber);
-    await client.uploadCheckoutFormInvoiceFile(row.checkout_form_id, document.invoiceId, pdf);
+    const document = await ensureRegisteredDocument(allegro, client, logger, row, invoiceNumber);
+    await atStage("upload", () =>
+      client.uploadCheckoutFormInvoiceFile(row.checkout_form_id, document.invoiceId, pdf),
+    );
 
     // The watermark, LAST, so a row that reads attached carries a file the buyer can
     // actually download. `last_error` is cleared in the same write: the attach succeeded,
@@ -239,7 +318,7 @@ export const attachAllegroInvoiceWithSource = async (
     );
     return { attached: true, attempted: true, reusedDocument: document.reused };
   } catch (error) {
-    const message = describeError(error);
+    const message = describeError(error, sent);
     await recordFailure(allegro, logger, row, message);
     return { attempted: true, error: message };
   }

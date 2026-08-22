@@ -155,6 +155,35 @@ jako zepsuty przez cały czas trwania uzupełniania.
 Zamówienie anulowane jest pomijane - trzymanie towaru pod sprzedaż, która się nie
 odbędzie, kosztuje sklep realne pieniądze przy każdym innym zamówieniu.
 
+## `order.placed` dla sprzedaży z marketplace'u
+
+Medusa nie emituje `order.placed` dla zamówienia utworzonego przez
+`createOrderWorkflow` - a to jego woła ten drenaż. W Medusie 2.18 zdarzenie to
+emitują `completeCartWorkflow` (zakup w sklepie) oraz `convertDraftOrderWorkflow`,
+każdy *obok* swojego tworzenia, a nie w jego środku. Dopóki wtyczka go nie
+emitowała, sprzedaż z Allegro nie zgłaszała się nikomu. Cokolwiek nasłuchiwało
+`order.placed` (powiadomienie na Slacku, wypchnięcie do ERP, mailing) było
+strukturalnie głuche na zamówienia z marketplace'u i jednocześnie wyglądało zdrowo:
+subskrybent zarejestrowany, zamówienie istnieje, nigdzie żadnego błędu.
+
+Dlatego drenaż emituje je sam, z ładunkiem rdzenia dosłownie - `{ id }`, z
+`EventPriority.CRITICAL` - bo subskrybent nigdy nie powinien musieć wiedzieć,
+którym kanałem przyszło zamówienie.
+
+**Dokładnie raz na zamówienie.** Emituje je wyłącznie przebieg, który to zamówienie
+faktycznie utworzył. Ponowione zdarzenie Allegro, wymuszone odświeżenie, przejście
+rekoncyliacyjne i ścieżka adopcji podnosząca zamówienie po przerwanym przebiegu -
+wszystkie idą gałęzią „ta forma ma już zamówienie" i żadna nie ogłasza. Zamówienie
+*zaadoptowane* nie jest ogłaszane celowo: adopcja uruchamia się także dla
+zamówienia utworzonego minuty wcześniej przez przerwany przebieg, a zdublowanego
+„nowego zamówienia" nie da się cofnąć.
+
+**Nigdy nie jest powodem do zatrzymania kursora zdarzeń.** Gdy szyna zdarzeń jest
+niedostępna, awaria trafia do ostrzeżenia przy zamówieniu, a drenaż idzie dalej -
+wstrzymanie każdego kolejnego zamówienia z powodu niedoręczonego powiadomienia
+byłoby dużo gorsze, a ponowienie i tak zastałoby zamówienie już utworzone i
+słusznie by go nie ogłosiło.
+
 ## Zwrotny zapis realizacji
 
 Subskrybent na zdarzeniach `order.fulfillment_created` i `shipment.created` ustawia
@@ -267,6 +296,33 @@ Dwa ograniczenia, wypisane zamiast zostawione do odkrycia:
   zdrowe przejście drenażu po tym samym formularzu. Samego przejścia to nie dotyka, ale
   panel może przestać pokazywać powód; liczbę podaje wtedy linia błędu uruchomienia na
   wierszu stanu zamówień.
+
+### Jak czytać odrzucone podpięcie
+
+Linia awarii nazywa **które z czterech wywołań padło** - pobranie PDF z modułu
+fakturowego, odczyt odsiewający, założenie metadanych czy wysyłkę pliku - a do tego
+wszystko z `errors[]` Allegro (`code`, `path`, `message`, `userMessage`),
+`x-request-id` do zacytowania wsparciu Allegro oraz dwie wartości, które wybiera ta
+wtyczka: `file.name` i `invoiceNumber`. Tylko o te dwie może chodzić przy odrzuconym
+założeniu, i żadna z nich nie jest daną kupującego - zasoby fakturowe przyjmują
+nazwę pliku i numer faktury, nic więcej. Wywołania proszą też o `Accept-Language:
+en-US`, więc `userMessage` przychodzi w tym samym języku co reszta dziennika.
+
+Ma to znaczenie, bo samo `AllegroApiError.message` to tylko *pierwszy*
+`userMessage`, jaki zwróciło Allegro - a przy HTTP 400 to zwykle ogólnikowe „Bad
+Request", podczas gdy `code` i `path` wskazujące winne pole zostają nieprzeczytane.
+Czterysta bez powodu to nic, na czym operator może się oprzeć.
+
+**Jeden świadomy eksperyment przy 400.** Allegro w ogóle nie dokumentuje 400 dla
+`POST .../invoices` - udokumentowane odmowy to 403 (uprawnienia), 404, 409
+(zamówienie ma już fakturę), 422 (zamówienie jej nie przyjmie) i 429 (za szybko) -
+a jego schemat wymaga dokładnie jednego pola, `file`. Zatem `invoiceNumber` to
+jedyne pole, którego *wartość* może unieważnić skądinąd poprawne ciało żądania. Gdy
+założenie z numerem dostaje 400, i tylko wtedy, podpięcie ponawia raz z pominiętym
+numerem. Jeśli Allegro to przyjmie, kupujący dostaje fakturę, a przyczyna jest
+dowiedziona - jedno i drugie wprost w dzienniku; jeśli odrzuci i to, ciało żądania
+jest oczyszczone z zarzutów, a obie odmowy są zapisane. Żaden inny status nie jest
+tak ponawiany, bo każdy z nich znaczy coś, co ślepe ponowienie tylko pogorszy.
 
 ### Własny wyłącznik
 

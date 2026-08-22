@@ -20,6 +20,7 @@ import { parseAmount } from "../../lib/sync/money";
 import type { AmountInput } from "../../lib/sync/money";
 import { planOrderPayment, readPaymentFacts } from "../../lib/sync/order-reconcile";
 import { nameOrderCustomer } from "./order-customer";
+import { emitOrderPlaced } from "./order-placed-event";
 import { readOrderPaymentState, registerOrderPayment } from "./order-payment";
 import { ensureOrderReservations } from "./order-reservations";
 import { readCheckoutForm } from "./checkout-form";
@@ -39,10 +40,20 @@ import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
  * 3. Act on the status (cancel / complete), writing `derived_status` in the SAME
  *    operation.
  * 4. Stamp `synced_at` LAST.
+ * 5. Emit `order.placed`, but only for an order this pass actually created.
  *
  * A crash anywhere before step 4 leaves the row looking unfinished, so the next
  * pass repairs it. Stamping earlier would let a half-applied form read as done -
  * and the event cursor would then be free to move past it.
+ *
+ * ## Medusa does not announce an order it did not get from a cart
+ *
+ * `createOrderWorkflow` emits nothing at all. `order.placed` comes from
+ * `completeCartWorkflow` and `convertDraftOrderWorkflow`, each emitting it BESIDE their
+ * create rather than inside it - so an order created here was never announced to
+ * anything, and every `order.placed` consumer in the store was structurally deaf to
+ * marketplace sales while looking perfectly healthy. Step 5 emits the event core would
+ * have emitted, with core's payload. See `lib/order-placed-event`.
  *
  * ## Unmatched lines do not lose the sale
  *
@@ -226,6 +237,14 @@ export interface ApplyFormResult {
    * was lost, and the sweep's repair counter means the latter.
    */
   customerNamed?: boolean;
+  /**
+   * True when this pass emitted `order.placed` for a newly created order.
+   *
+   * Reported separately so "no order was created" can be told apart from "an order was
+   * created but nothing was announced" - the same silence from outside. See
+   * `emitOrderPlaced`.
+   */
+  orderPlacedEmitted?: boolean;
 }
 
 /**
@@ -674,7 +693,7 @@ const upsertBookkeeping = async (
 };
 
 /**
- * Apply one checkout form: bookkeeping row, Medusa order, status, watermark.
+ * Apply one checkout form: bookkeeping row, Medusa order, status, watermark, event.
  *
  * THROWS when the form did not land, and that throw is load-bearing: it is the only
  * thing that holds the event cursor. See `drainOrderEvents`.
@@ -927,6 +946,32 @@ export const applyCheckoutForm = async (
     },
   ] as never);
 
+  // Step 5: `order.placed`, the event core does NOT emit for an order created through
+  // `createOrderWorkflow`. See `emitOrderPlaced` for why it is emitted here at all and
+  // why the payload is core's verbatim.
+  //
+  // Gated on `created` alone, and that gate is the whole idempotency argument: `created`
+  // is set only by the pass that actually ran `createOrderWorkflow`. Every way a form
+  // gets re-applied - a redelivered Allegro event, a forced refresh, the reconciliation
+  // sweep, the adoption path that picks up an order a crashed pass left behind - takes
+  // the `medusaOrderId` branch instead and leaves `created` false, so none of them can
+  // announce the same sale twice.
+  //
+  // BEFORE the throw below rather than after it, deliberately. `lastError` is about the
+  // Allegro-side status ladder, not about whether the order exists - and the retry that
+  // eventually lands finds `medusa_order_id` already set, so `created` is false there and
+  // the announcement would never happen at all. Emitting here makes it exactly once per
+  // created order, whatever else the pass could not finish.
+  //
+  // The one gap left is a crash between `linkMedusaOrder` and this line: the next pass
+  // adopts the order rather than creating it, so it does not emit. Announcing on adoption
+  // would close that gap and open a worse one - adoption also runs for an order a crashed
+  // pass created minutes ago, and a duplicate announcement cannot be taken back.
+  let orderPlacedEmitted = false;
+  if (created && medusaOrderId) {
+    orderPlacedEmitted = await emitOrderPlaced(container, logger, medusaOrderId);
+  }
+
   if (lastError) {
     // Thrown so the cursor holds and the form is retried. A form whose order could
     // not be created is exactly the case the quarantine machinery exists for: it
@@ -942,6 +987,7 @@ export const applyCheckoutForm = async (
     created,
     customerNamed,
     medusaOrderId,
+    orderPlacedEmitted,
     ...(paymentError ? { paymentError } : {}),
     paymentRegistered,
     reservationsCreated,
