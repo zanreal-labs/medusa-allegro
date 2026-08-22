@@ -59,6 +59,16 @@ export interface ReconcileSweepResult {
    * healthy event journal as broken for as long as the backfill runs.
    */
   customersNamed: number;
+  /**
+   * Inventory reservations created this sweep.
+   *
+   * Counted apart from `repaired` for the same reason `customersNamed` is: an Allegro
+   * order has NEVER had a reservation, because `createOrderWorkflow` does not create one,
+   * so every order predating this code needs one and that says nothing about the event
+   * journal. Each one is an order that core's fulfillment - the admin's button included -
+   * would have refused with "No stock reservation found", and now will not.
+   */
+  reservationsCreated: number;
   /** Rows whose re-read threw. */
   failed: number;
   /** Marks to persist, so the slow tier's clock survives a restart. */
@@ -72,6 +82,7 @@ const emptySweep = (marks: ReconcileMarks): ReconcileSweepResult => ({
   marks,
   paymentsRegistered: 0,
   repaired: 0,
+  reservationsCreated: 0,
   tiers: [],
 });
 
@@ -163,6 +174,18 @@ export const sweepOpenAllegroOrders = async (
           `[allegro-orders] reconciliation named the customer behind checkout form ${row.checkout_form_id} (Medusa order ${
             applied.medusaOrderId ?? "none"
           }), which was created before the order pipeline wrote customer names. No manual repair is needed for the rest.`,
+        );
+      }
+      if ((applied.reservationsCreated ?? 0) > 0) {
+        // INFO, not WARN, and not counted as a repair - see `reservationsCreated`. The
+        // order is now fulfillable by the admin's Fulfill button and by every plugin that
+        // calls `createOrderFulfillmentWorkflow`; nothing about the event journal is
+        // implicated.
+        result.reservationsCreated += applied.reservationsCreated ?? 0;
+        logger.info(
+          `[allegro-orders] reconciliation reserved inventory for ${applied.reservationsCreated} line item(s) behind checkout form ${row.checkout_form_id} (Medusa order ${
+            applied.medusaOrderId ?? "none"
+          }), which was created before the order pipeline reserved stock. It can now be fulfilled; no manual repair is needed for the rest.`,
         );
       }
       if (applied.created || applied.paymentRegistered || applied.statusChanged) {

@@ -44,6 +44,10 @@ export default async function allegroOrdersSyncJob(container: MedusaContainer): 
       result.reconcileRepaired > 0 ? `, reconcileRepaired: ${result.reconcileRepaired}` : ""
     }${
       result.reconcilePayments > 0 ? `, paymentsRecorded: ${result.reconcilePayments}` : ""
+    }${
+      result.reconcileReservations > 0
+        ? `, reservationsCreated: ${result.reconcileReservations}`
+        : ""
     }`,
   );
   if (result.error) {

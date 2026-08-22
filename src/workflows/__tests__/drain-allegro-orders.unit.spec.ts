@@ -96,6 +96,25 @@ var coreFlows: {
    */
   customerByOrderId: Record<string, CustomerFixture | undefined>;
   customerSequence: number;
+  /**
+   * Reservation batches created, one array per `createReservationsWorkflow` run.
+   *
+   * The incident is the ABSENCE of these rows: `createOrderWorkflow` creates none, so
+   * every Allegro order this store ever took failed core's fulfillment with
+   * "No stock reservation found for item ordli_...". A recorder is the only way to assert
+   * they now exist.
+   */
+  reservations: Record<string, unknown>[][];
+  /** Makes `createReservationsWorkflow` reject, e.g. an oversold location. */
+  reserveError?: Error;
+  /**
+   * The order the core workflows were called in, by name.
+   *
+   * Ordering is load-bearing between two of them: `markPaymentCollectionAsPaid` emits
+   * `payment.captured`, which is the head of the chain that ends in a fulfillment, so the
+   * reservation has to exist BEFORE it. Two independent recorders cannot express that.
+   */
+  callOrder: string[];
 } = {
   cancelled: [],
   completed: [],
@@ -105,12 +124,32 @@ var coreFlows: {
   customerUpdates: [],
   failCreateForForms: new Set(),
   markedPaid: [],
+  callOrder: [],
   paymentCollections: [],
+  reservations: [],
   sequence: 0,
   statusById: {},
 };
 
 jest.mock("@medusajs/medusa/core-flows", () => ({
+  createReservationsWorkflow: () => ({
+    run: ({
+      input,
+    }: {
+      input: { reservations: Record<string, unknown>[] };
+    }) => {
+      if (coreFlows.reserveError) {
+        return Promise.reject(coreFlows.reserveError);
+      }
+      coreFlows.reservations.push(input.reservations);
+      coreFlows.callOrder.push("reserve");
+      return Promise.resolve({
+        result: input.reservations.map((_, index) => ({
+          id: `res_${coreFlows.reservations.length}_${index}`,
+        })),
+      });
+    },
+  }),
   cancelOrderWorkflow: () => ({
     run: ({ input }: { input: { order_id: string } }) => {
       if (coreFlows.cancelError) {
@@ -148,6 +187,7 @@ jest.mock("@medusajs/medusa/core-flows", () => ({
         return Promise.reject(coreFlows.markPaidError);
       }
       coreFlows.markedPaid.push(input);
+      coreFlows.callOrder.push("markPaid");
       return Promise.resolve({ result: { id: "pay_1" } });
     },
   }),
@@ -433,6 +473,16 @@ const setup = (input: {
     string,
     { captured_amount?: number | string; refunded_amount?: number | string }[]
   >;
+  /**
+   * Line items - with their variant's inventory - behind a Medusa order, by order id.
+   *
+   * Seeded rather than derived, because the reservation read is the only thing that looks
+   * at them: it needs the inventory item, its stock levels and the location's sales
+   * channels to decide where to hold the stock.
+   */
+  medusaOrderItems?: Record<string, Record<string, unknown>[]>;
+  /** Reservations already held, by line item id. Absent is the incident's own shape. */
+  existingReservations?: Record<string, unknown>[];
   /** Unregister the payment module, as a store with no `STRIPE_API_KEY` has it. */
   noPaymentModule?: boolean;
   /**
@@ -524,6 +574,14 @@ const setup = (input: {
             if (entity === "region") {
               return Promise.resolve({ data: regions });
             }
+            if (entity === "reservations") {
+              const wanted = (filters?.line_item_id as string[] | undefined) ?? [];
+              return Promise.resolve({
+                data: (input.existingReservations ?? []).filter((row) =>
+                  wanted.includes(row.line_item_id as string),
+                ),
+              });
+            }
             if (entity === "order") {
               const all = input.existingOrders ?? [];
               // The batched payment-state read. Only ids the test seeded answer: an order
@@ -556,7 +614,8 @@ const setup = (input: {
                 if (
                   seeded === undefined &&
                   status === undefined &&
-                  customer === undefined
+                  customer === undefined &&
+                  input.medusaOrderItems?.[byId] === undefined
                 ) {
                   return Promise.resolve({ data: [] });
                 }
@@ -564,8 +623,12 @@ const setup = (input: {
                   data: [
                     {
                       id: byId,
+                      sales_channel_id: "sc_allegro",
                       ...(status ? { status } : {}),
                       ...(customer ? { customer } : {}),
+                      ...(input.medusaOrderItems?.[byId]
+                        ? { items: input.medusaOrderItems[byId] }
+                        : {}),
                       ...seeded,
                     },
                   ],
@@ -624,6 +687,9 @@ beforeEach(() => {
   coreFlows.customerUpdateError = undefined;
   coreFlows.customerByOrderId = {};
   coreFlows.customerSequence = 0;
+  coreFlows.reservations.length = 0;
+  coreFlows.reserveError = undefined;
+  coreFlows.callOrder.length = 0;
 });
 
 describe("drainAllegroOrders: bootstrap", () => {
@@ -2600,5 +2666,240 @@ describe("drainAllegroOrders: the reconciliation sweep", () => {
     expect(result.reconciled).toBe(0);
     // The payment was still recorded - by the drain's own pass, which is the point.
     expect(coreFlows.markedPaid).toHaveLength(1);
+  });
+});
+
+describe("drainAllegroOrders: the order can actually be fulfilled", () => {
+  /**
+   * The production incident of 2026-08-22, order_01M0NB3YPCXGDJDRYPARQ56V9Y.
+   *
+   * Every Allegro order is created with `createOrderWorkflow`, which validates stock and
+   * then deliberately creates NO reservation. Core's `createOrderFulfillmentWorkflow`
+   * refuses any line whose variant manages inventory and has none - so the admin's Fulfill
+   * button AND every plugin that fulfils digitally failed with
+   * `No stock reservation found for item ordli_...`, leaving paid, delivered orders
+   * reading as unfulfilled and stalling the Allegro ship-status write-back behind them.
+   */
+  const managedLine = (over: Record<string, unknown> = {}) => ({
+    detail: { fulfilled_quantity: 0, quantity: 2 },
+    id: "ordli_1",
+    title: "A product",
+    variant: {
+      allow_backorder: false,
+      inventory_items: [
+        {
+          inventory: {
+            location_levels: [
+              {
+                location_id: "sloc_1",
+                reserved_quantity: 0,
+                stock_locations: {
+                  id: "sloc_1",
+                  sales_channels: [{ id: "sc_allegro" }],
+                },
+                stocked_quantity: 9,
+              },
+            ],
+          },
+          inventory_item_id: "iitem_1",
+          required_quantity: 1,
+        },
+      ],
+      manage_inventory: true,
+    },
+    ...over,
+  });
+
+  const openRow = {
+    checkout_form_id: "f1",
+    derived_status: "new" as const,
+    id: "algorder_1",
+    medusa_order_id: "order_9",
+  };
+
+  const swept = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      forms: [form({ id: "f1" })],
+      medusaOrderTotals: { order_9: { currency_code: "pln", total: 412.97 } },
+      orders: [openRow],
+      pages: [[]],
+      paymentCollections: { order_9: [{ captured_amount: 412.97 }] },
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+      ...input,
+    });
+
+  it("reserves the order's inventory on the pass that creates it", async () => {
+    const context = setup({
+      forms: [form({ id: "f1" })],
+      medusaOrderItems: { order_1: [managedLine()] },
+      pages: [[event("e1", "f1")]],
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.reservations).toEqual([
+      [
+        {
+          allow_backorder: false,
+          description: "Allegro order order_1",
+          inventory_item_id: "iitem_1",
+          line_item_id: "ordli_1",
+          location_id: "sloc_1",
+          quantity: 2,
+        },
+      ],
+    ]);
+  });
+
+  it("reserves BEFORE the payment is recorded", async () => {
+    // `markPaymentCollectionAsPaid` emits `payment.captured`, which is the head of the
+    // invoicing and digital-delivery chain that ends in a fulfillment. An order whose
+    // reservation lands after that emission can still lose the race and fail its first
+    // fulfillment, which is the exact failure this whole change exists to remove.
+    const context = setup({
+      forms: [
+        form({
+          id: "f1",
+          payment: {
+            finishedAt: "2026-08-19T18:18:40.000Z",
+            paidAmount: { amount: "412.97", currency: "PLN" },
+            type: "ONLINE",
+          },
+        }),
+      ],
+      medusaOrderItems: { order_1: [managedLine()] },
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      pages: [[event("e1", "f1")]],
+      paymentCollections: { order_1: [] },
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.callOrder).toEqual(["reserve", "markPaid"]);
+  });
+
+  it("heals an order created before reservations existed, on the next sweep", async () => {
+    // The live order, healed with no backfill script and no second code path: the sweep
+    // re-applies the form, the plan is recomputed from what exists, and the missing
+    // reservation is created. The order becomes fulfillable by the admin's own button.
+    const context = swept({ medusaOrderItems: { order_9: [managedLine()] } });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.reservations).toEqual([
+      [
+        {
+          allow_backorder: false,
+          description: "Allegro order order_9",
+          inventory_item_id: "iitem_1",
+          line_item_id: "ordli_1",
+          location_id: "sloc_1",
+          quantity: 2,
+        },
+      ],
+    ]);
+    expect(result.reconcileReservations).toBe(1);
+    // NOT a repair: `createOrderWorkflow` has never created a reservation, so every order
+    // predating this needs one. Counting it as a repair would report a healthy event
+    // journal as broken for as long as the backfill runs.
+    expect(result.reconcileRepaired).toBe(0);
+    expect(result.error ?? null).toBeNull();
+  });
+
+  it("writes nothing on the next sweep over an order it already reserved", async () => {
+    const context = swept({
+      existingReservations: [
+        { inventory_item_id: "iitem_1", line_item_id: "ordli_1", quantity: 2 },
+      ],
+      medusaOrderItems: { order_9: [managedLine()] },
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.reservations).toEqual([]);
+    expect(result.reconcileReservations).toBe(0);
+  });
+
+  it("never reserves more than the order still owes", async () => {
+    // Half the line has shipped, so half its reservation is gone. Reserving the full
+    // ordered quantity again would hold stock that has left the building.
+    const context = swept({
+      medusaOrderItems: {
+        order_9: [managedLine({ detail: { fulfilled_quantity: 1, quantity: 3 } })],
+      },
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.reservations[0]?.[0]?.quantity).toBe(2);
+  });
+
+  it("does not reserve for an order Allegro has cancelled", async () => {
+    // Holding stock for a sale that is not happening is the one direction that costs the
+    // store real money on every other order.
+    const context = swept({
+      forms: [form({ id: "f1", status: "CANCELLED" })],
+      medusaOrderItems: { order_9: [managedLine()] },
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.reservations).toEqual([]);
+  });
+
+  it("keeps the order and advances the cursor when the reservation cannot be written", async () => {
+    // Never fatal. The sale stands, the licence work is untouched, and the next sweep
+    // retries - whereas a throw here would hold the event cursor and stall every later
+    // order behind one oversold location.
+    coreFlows.reserveError = new Error("Not enough stock");
+    const context = setup({
+      forms: [form({ id: "f1" })],
+      medusaOrderItems: { order_1: [managedLine()] },
+      pages: [[event("e1", "f1")]],
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.failed).toBe(0);
+    expect(context.allegro.states.get("orders")).toMatchObject({ cursor: "e1" });
+    expect(
+      context.logs.some((line) => line.includes("No stock reservation found")),
+    ).toBe(true);
+  });
+
+  it("warns rather than failing the order when a line is stocked nowhere", async () => {
+    const context = setup({
+      forms: [form({ id: "f1" })],
+      medusaOrderItems: {
+        order_1: [
+          managedLine({
+            variant: {
+              allow_backorder: false,
+              inventory_items: [
+                {
+                  inventory: { location_levels: [] },
+                  inventory_item_id: "iitem_1",
+                  required_quantity: 1,
+                },
+              ],
+              manage_inventory: true,
+            },
+          }),
+        ],
+      },
+      pages: [[event("e1", "f1")]],
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.failed).toBe(0);
+    expect(coreFlows.reservations).toEqual([]);
+    expect(
+      context.logs.some((line) => line.includes("no stock level at any location")),
+    ).toBe(true);
   });
 });

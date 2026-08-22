@@ -21,6 +21,7 @@ import type { AmountInput } from "../../lib/sync/money";
 import { planOrderPayment, readPaymentFacts } from "../../lib/sync/order-reconcile";
 import { nameOrderCustomer } from "./order-customer";
 import { readOrderPaymentState, registerOrderPayment } from "./order-payment";
+import { ensureOrderReservations } from "./order-reservations";
 import { readCheckoutForm } from "./checkout-form";
 import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
 
@@ -33,6 +34,8 @@ import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
  *
  * 1. Upsert the `allegro_order` bookkeeping row WITHOUT `synced_at`.
  * 2. Create the Medusa order, if this form has none yet.
+ * 2b. Create any inventory reservations the order is missing, so it can actually be
+ *    fulfilled. `createOrderWorkflow` does not reserve; see `ensureOrderReservations`.
  * 3. Act on the status (cancel / complete), writing `derived_status` in the SAME
  *    operation.
  * 4. Stamp `synced_at` LAST.
@@ -205,6 +208,14 @@ export interface ApplyFormResult {
   totalMismatch?: boolean;
   /** True when this pass recorded the buyer's payment on the Medusa order. */
   paymentRegistered?: boolean;
+  /**
+   * Inventory reservations created on this pass.
+   *
+   * Non-zero from the reconciliation sweep means an order that could NOT have been
+   * fulfilled just became fulfillable - which is every order this plugin created before
+   * reservations existed. See `ensureOrderReservations`.
+   */
+  reservationsCreated?: number;
   /** Set when a payment was due but could not be recorded. Never fatal - see step 3c. */
   paymentError?: string;
   /**
@@ -773,6 +784,28 @@ export const applyCheckoutForm = async (
     ? await readMedusaOrder(container, logger, medusaOrderId)
     : undefined;
 
+  // Step 2b: the inventory reservations.
+  //
+  // BEFORE the payment (3c) on purpose. Registering the payment emits `payment.captured`,
+  // which is the head of the invoicing and digital-delivery chain that ends in a
+  // fulfillment - so an order whose reservation lands afterwards is an order whose first
+  // fulfillment attempt can still fail. Reserving first costs nothing and closes that race.
+  //
+  // Run on EVERY pass, not only the creating one: that is what heals the orders created
+  // before this existed, through the reconciliation sweep, with no backfill script. It is
+  // free on a healthy order - the plan subtracts the reservations that already exist and
+  // comes back empty.
+  //
+  // Never gated on `lastError` and never a reason to set it. A line that cannot be reserved
+  // is a catalogue problem no retry of THIS form fixes, and holding the event cursor on it
+  // would stall every later order behind it.
+  let reservationsCreated = 0;
+  const orderIsCancelled = derived === "cancelled" || snapshot?.status === "canceled";
+  if (medusaOrderId && !orderIsCancelled) {
+    const reserved = await ensureOrderReservations(container, logger, medusaOrderId);
+    reservationsCreated = reserved.created;
+  }
+
   // Step 3: the status action.
   if (medusaOrderId && write.status) {
     const outcome = await applyMedusaAction(
@@ -911,6 +944,7 @@ export const applyCheckoutForm = async (
     medusaOrderId,
     ...(paymentError ? { paymentError } : {}),
     paymentRegistered,
+    reservationsCreated,
     totalMismatch: Boolean(totalConflict),
     // A brand-new order always counts as a status change; an existing one only when
     // the derived status actually moved. That distinction is what makes the summary's

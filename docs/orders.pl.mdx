@@ -115,6 +115,46 @@ Zwróć też uwagę, że zaimportowane zamówienia nie mają **wyliczonych linii
 podatkowych**. Branie cen pozycji z Allegro dosłownie jest właściwe dla uzgadniania,
 ale oznacza, że rozbicie podatkowe zamówienia z Allegro jest w Medusie puste.
 
+## Rezerwacje, żeby zamówienie dało się zrealizować
+
+`createOrderWorkflow` w Medusie - przepływ, którym tworzone jest każde zamówienie z
+Allegro - sprawdza, że stan magazynowy istnieje, a potem celowo **nie tworzy żadnej
+rezerwacji**. Rezerwuje wyłącznie realizacja koszyka, a żadne zamówienie z Allegro
+przez koszyk nie przechodzi. Rdzeń Medusy odmawia realizacji każdej pozycji, której
+wariant zarządza stanem magazynowym i nie ma rezerwacji - więc bez tego zarówno
+przycisk **Zrealizuj** w panelu, jak i każda wtyczka realizująca zamówienie
+kończyły się błędem `No stock reservation found for item ordli_...`, a opłacone i
+dostarczone zamówienia wyglądały na niezrealizowane, blokując za sobą zwrotny zapis
+realizacji opisany niżej.
+
+Dlatego drenaż tworzy rezerwacje sam, przez firmowy `createReservationsWorkflow`,
+zaraz po tym, jak zamówienie zaistnieje, i **przed** zapisaniem płatności - płatność
+emituje `payment.captured`, czyli początek łańcucha kończącego się realizacją, więc
+rezerwacja lądująca po niej mogłaby przegrać wyścig.
+
+Trzy własności sprawiają, że można to bezpiecznie uruchamiać przy każdym przejściu -
+i tak właśnie się dzieje:
+
+- **Idempotencja.** Istniejące już rezerwacje są odejmowane od potrzeby, osobno dla
+  każdej pozycji i każdej pozycji magazynowej. Zamówienie zarezerwowane kosztuje dwa
+  odczyty i nie zapisuje nic.
+- **Nigdy nie rezerwuje za dużo.** Ilość to `required_quantity x (zamówione -
+  już zrealizowane)`. Zrealizowane sztuki swoją rezerwację już zużyły.
+- **Nigdy nie wywraca zamówienia.** Pozycja, której pozycja magazynowa nie ma stanu
+  w żadnej lokalizacji, trafia do ostrzeżenia i jest pomijana. To problem katalogu
+  dla człowieka; utrata sprzedaży z tego powodu byłaby gorsza.
+
+Ponieważ działa przy każdym przejściu, przebieg uzgadniający **leczy zamówienia
+utworzone, zanim to powstało**: kolejne przejście, które takie zamówienie napotka,
+tworzy jego rezerwację i zamówienie da się zrealizować - bez uruchamiania
+jakiegokolwiek skryptu. Linia zadania raportuje wtedy `reservationsCreated`. Celowo
+nie jest to liczone jako `reconcileRepaired`: rezerwacji potrzebuje każde
+wcześniejsze zamówienie, więc wliczenie tego zgłaszałoby zdrowy dziennik zdarzeń
+jako zepsuty przez cały czas trwania uzupełniania.
+
+Zamówienie anulowane jest pomijane - trzymanie towaru pod sprzedaż, która się nie
+odbędzie, kosztuje sklep realne pieniądze przy każdym innym zamówieniu.
+
 ## Zwrotny zapis realizacji
 
 Subskrybent na zdarzeniach `order.fulfillment_created` i `shipment.created` ustawia
