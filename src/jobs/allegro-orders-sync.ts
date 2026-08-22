@@ -34,6 +34,16 @@ export default async function allegroOrdersSyncJob(container: MedusaContainer): 
       // through a module never sweeps anything, and a permanent ", invoicesAttached: 0"
       // would be noise on all 1440 ticks of the day.
       result.invoicesAttached > 0 ? `, invoicesAttached: ${result.invoicesAttached}` : ""
+    }${
+      // The reconciliation's own counters, conditional for the same reason: a healthy
+      // store sweeps a handful of open orders and repairs none of them, and a permanent
+      // ", reconcileRepaired: 0" on all 4320 ticks of the day is noise. A NON-zero one is
+      // the signal that the event journal lost something.
+      result.reconciled > 0 ? `, reconciled: ${result.reconciled}` : ""
+    }${
+      result.reconcileRepaired > 0 ? `, reconcileRepaired: ${result.reconcileRepaired}` : ""
+    }${
+      result.reconcilePayments > 0 ? `, paymentsRecorded: ${result.reconcilePayments}` : ""
     }`,
   );
   if (result.error) {

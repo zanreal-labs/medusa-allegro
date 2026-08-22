@@ -16,6 +16,8 @@ import type { AllegroSyncOptions } from "../../modules/allegro/service";
 import type AllegroModuleService from "../../modules/allegro/service";
 import { parseAmount } from "../../lib/sync/money";
 import type { AmountInput } from "../../lib/sync/money";
+import { planOrderPayment, readPaymentFacts } from "../../lib/sync/order-reconcile";
+import { readOrderPaymentState, registerOrderPayment } from "./order-payment";
 import { readCheckoutForm } from "./checkout-form";
 import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
 
@@ -190,6 +192,10 @@ export interface ApplyFormResult {
   conflicts: LineConflict[];
   /** Set when the order's total disagrees with the money Allegro says the buyer paid. */
   totalMismatch?: boolean;
+  /** True when this pass recorded the buyer's payment on the Medusa order. */
+  paymentRegistered?: boolean;
+  /** Set when a payment was due but could not be recorded. Never fatal - see step 3c. */
+  paymentError?: string;
 }
 
 /**
@@ -752,6 +758,36 @@ export const applyCheckoutForm = async (
     }
   }
 
+  // Step 3c: the money the buyer already paid.
+  //
+  // Here rather than only in the reconciliation sweep, because this is the path that runs
+  // seconds after the buyer pays: the `READY_FOR_PROCESSING` event arrives, the form is
+  // re-read, and the payment should be recorded in the same pass. The sweep underneath is
+  // the safety net for a lost event, not the mechanism.
+  //
+  // A failure here deliberately does NOT set `lastError`. Holding the event cursor on a
+  // payment problem would stall every LATER order behind one whose payment module is
+  // misconfigured, and it is not needed: the sweep classifies by the order's ACTUAL payment
+  // state rather than by `derived_status`, so an order that failed to record its payment
+  // stays in the fast tier and is retried within seconds regardless of what this row says.
+  let paymentRegistered = false;
+  let paymentError: string | undefined;
+  if (medusaOrderId) {
+    const paymentState = await readOrderPaymentState(container, logger, medusaOrderId);
+    const outcome = await registerOrderPayment(
+      container,
+      logger,
+      medusaOrderId,
+      planOrderPayment(
+        readPaymentFacts(form),
+        paymentState,
+        snapshot?.currency ?? view.currency.trim().toLowerCase(),
+      ),
+    );
+    paymentRegistered = outcome.registered;
+    paymentError = outcome.error;
+  }
+
   // Step 3b: reconcile the money. Read-only, and never a reason to withhold the order.
   // `undefined` clears any conflict a previous pass recorded, so a repaired order stops being
   // reported without needing its own action.
@@ -810,6 +846,8 @@ export const applyCheckoutForm = async (
     conflicts,
     created,
     medusaOrderId,
+    ...(paymentError ? { paymentError } : {}),
+    paymentRegistered,
     totalMismatch: Boolean(totalConflict),
     // A brand-new order always counts as a status change; an existing one only when
     // the derived status actually moved. That distinction is what makes the summary's

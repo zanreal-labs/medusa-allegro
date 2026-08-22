@@ -60,11 +60,19 @@ var coreFlows: {
    */
   statusById: Record<string, string>;
   sequence: number;
+  /** Payment collections created, in order: `{ order_id, amount }`. */
+  paymentCollections: { order_id: string; amount: number }[];
+  /** Collections marked paid, in order. Each one emits `payment.captured` in Medusa. */
+  markedPaid: { order_id: string; payment_collection_id: string }[];
+  /** Makes the mark-as-paid workflow reject, e.g. no system provider registered. */
+  markPaidError?: Error;
 } = {
   cancelled: [],
   completed: [],
   created: [],
   failCreateForForms: new Set(),
+  markedPaid: [],
+  paymentCollections: [],
   sequence: 0,
   statusById: {},
 };
@@ -87,6 +95,27 @@ jest.mock("@medusajs/medusa/core-flows", () => ({
         coreFlows.statusById[id] = "completed";
       }
       return Promise.resolve({ result: [] });
+    },
+  }),
+  createOrderPaymentCollectionWorkflow: () => ({
+    run: ({ input }: { input: { order_id: string; amount: number } }) => {
+      coreFlows.paymentCollections.push(input);
+      return Promise.resolve({
+        result: [{ id: `paycol_${coreFlows.paymentCollections.length}` }],
+      });
+    },
+  }),
+  markPaymentCollectionAsPaid: () => ({
+    run: ({
+      input,
+    }: {
+      input: { order_id: string; payment_collection_id: string };
+    }) => {
+      if (coreFlows.markPaidError) {
+        return Promise.reject(coreFlows.markPaidError);
+      }
+      coreFlows.markedPaid.push(input);
+      return Promise.resolve({ result: { id: "pay_1" } });
     },
   }),
   createOrderWorkflow: () => ({
@@ -322,6 +351,18 @@ const setup = (input: {
   /** Live `order.status` for orders that already existed before this run. */
   medusaOrderStatuses?: Record<string, string>;
   /**
+   * Payment collections already linked to a Medusa order, by order id.
+   *
+   * An order with none is what every Allegro order looked like before the payment step
+   * existed, so an ABSENT entry is the incident's own shape rather than an untested edge.
+   */
+  paymentCollections?: Record<
+    string,
+    { captured_amount?: number | string; refunded_amount?: number | string }[]
+  >;
+  /** Unregister the payment module, as a store with no `STRIPE_API_KEY` has it. */
+  noPaymentModule?: boolean;
+  /**
    * Issued invoices the invoicing module would report, registering the module under
    * `infakt` so the drain's post-drain sweep has something to find.
    *
@@ -374,6 +415,15 @@ const setup = (input: {
           listInfaktInvoices: () => Promise.resolve(input.issuedInvoices ?? []),
         };
       }
+      if (key === "payment") {
+        // Resolvable unless the test says otherwise. A store whose payment module is
+        // absent is a real configuration, so it gets its own switch rather than being
+        // the default that silently makes every payment assertion vacuous.
+        if (input.noPaymentModule) {
+          throw new Error("payment module is not registered");
+        }
+        return {};
+      }
       if (key === "logger") {
         return {
           error: (message: string) => logs.push(`error: ${message}`),
@@ -400,6 +450,25 @@ const setup = (input: {
             }
             if (entity === "order") {
               const all = input.existingOrders ?? [];
+              // The batched payment-state read. Only ids the test seeded answer: an order
+              // whose total cannot be read must stay "unknown" rather than default to a
+              // total of zero, which would read as already paid.
+              if (Array.isArray(filters?.id)) {
+                const ids = filters.id as string[];
+                return Promise.resolve({
+                  data: ids
+                    .filter(
+                      (id) =>
+                        input.medusaOrderTotals?.[id] !== undefined ||
+                        input.paymentCollections?.[id] !== undefined,
+                    )
+                    .map((id) => ({
+                      id,
+                      payment_collections: input.paymentCollections?.[id] ?? [],
+                      ...input.medusaOrderTotals?.[id],
+                    })),
+                });
+              }
               // The total-reconciliation read: by id, asking for `total`/`currency_code`.
               const byId = (filters?.id as string | undefined) ?? undefined;
               if (byId !== undefined) {
@@ -462,6 +531,9 @@ beforeEach(() => {
   coreFlows.statusById = {};
   coreFlows.sequence = 0;
   coreFlows.failCreateForForms.clear();
+  coreFlows.paymentCollections.length = 0;
+  coreFlows.markedPaid.length = 0;
+  coreFlows.markPaidError = undefined;
 });
 
 describe("drainAllegroOrders: bootstrap", () => {
@@ -1987,5 +2059,247 @@ describe("drainAllegroOrders: the invoice-attach sweep", () => {
     expect(context.table.rows[0]?.last_error).toContain(
       "Allegro is unreachable",
     );
+  });
+});
+
+describe("drainAllegroOrders: recording the buyer's payment", () => {
+  const withCursor = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+      ...input,
+    });
+
+  const paidForm = (id: string) =>
+    form({
+      id,
+      payment: {
+        finishedAt: "2026-08-19T18:18:40.000Z",
+        paidAmount: { amount: "412.97", currency: "PLN" },
+        type: "ONLINE",
+      },
+    });
+
+  it("records the payment on the same pass that applies a paid form", async () => {
+    // The primary path, and the one that was missing entirely: the buyer pays, the event
+    // arrives, and the money is on the Medusa order seconds later. Nothing about this
+    // should need the reconciliation sweep to notice.
+    const context = withCursor({
+      forms: [paidForm("f1")],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.paymentCollections).toEqual([
+      { amount: 412.97, order_id: "order_1" },
+    ]);
+    expect(coreFlows.markedPaid).toEqual([
+      { order_id: "order_1", payment_collection_id: "paycol_1" },
+    ]);
+  });
+
+  it("does not record a payment twice, which is what makes a re-run safe", async () => {
+    const context = withCursor({
+      forms: [paidForm("f1")],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "new",
+          id: "algorder_1",
+          medusa_order_id: "order_1",
+        },
+      ],
+      pages: [[event("e1", "f1")]],
+      paymentCollections: { order_1: [{ captured_amount: 412.97 }] },
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.paymentCollections).toEqual([]);
+    expect(coreFlows.markedPaid).toEqual([]);
+  });
+
+  it("records nothing for cash on delivery, which Allegro also calls ready for processing", async () => {
+    // The buyer pays the courier, later. A capture here would have an invoice issued for
+    // money nobody has received.
+    const context = withCursor({
+      forms: [
+        form({
+          id: "f1",
+          payment: { finishedAt: "2026-08-19T18:18:40.000Z", type: "CASH_ON_DELIVERY" },
+        }),
+      ],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.paymentCollections).toEqual([]);
+  });
+
+  it("records nothing when Allegro reports no finished payment", async () => {
+    const context = withCursor({
+      forms: [form({ id: "f1", status: "BOUGHT" })],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.paymentCollections).toEqual([]);
+  });
+
+  it("reports a store with no payment module instead of crashing the drain", async () => {
+    const context = withCursor({
+      forms: [paidForm("f1")],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      noPaymentModule: true,
+      pages: [[event("e1", "f1")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.paymentCollections).toEqual([]);
+    // The order still lands. A missing payment module is a configuration problem, not a
+    // reason to lose the sale or to hold the event cursor.
+    expect(result.created).toBe(1);
+    expect(result.error ?? null).toBeNull();
+  });
+
+  it("does not hold the event cursor when the payment write fails", async () => {
+    // Holding it would stall every LATER order behind one whose payment module is broken,
+    // and it is not needed: the sweep classifies by the order's actual payment state, so
+    // this order stays in the fast tier and is retried within seconds.
+    const context = withCursor({
+      forms: [paidForm("f1")],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      pages: [[event("e1", "f1")]],
+    });
+    coreFlows.markPaidError = new Error("no system payment provider");
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.failed).toBe(0);
+    expect(context.allegro.states.get("orders")?.cursor).toBe("e1");
+    expect(
+      context.logs.some((line) => line.includes("FAILED to register the buyer's payment")),
+    ).toBe(true);
+  });
+});
+
+describe("drainAllegroOrders: the reconciliation sweep", () => {
+  const quiet = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      pages: [[]],
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+      ...input,
+    });
+
+  const paidForm = (id: string) =>
+    form({
+      id,
+      payment: {
+        finishedAt: "2026-08-19T18:18:40.000Z",
+        paidAmount: { amount: "412.97", currency: "PLN" },
+        type: "ONLINE",
+      },
+    });
+
+  it("recovers an order whose payment event the journal never delivered", async () => {
+    // The incident, reproduced: the order exists, Allegro says it is paid, the event that
+    // said so is long past the cursor, and nothing else in this plugin would ever look at
+    // it again.
+    const context = quiet({
+      forms: [paidForm("f1")],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "new",
+          id: "algorder_1",
+          medusa_order_id: "order_1",
+        },
+      ],
+      paymentCollections: { order_1: [] },
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.markedPaid).toEqual([
+      { order_id: "order_1", payment_collection_id: "paycol_1" },
+    ]);
+    expect(result.reconcilePayments).toBe(1);
+    expect(result.reconcileRepaired).toBe(1);
+    // A repair by the safety net is a finding: the journal lost something.
+    expect(result.error).toMatch(/reconciliation sweep/);
+    expect(
+      context.logs.some((line) => line.includes("an order event was lost or never arrived")),
+    ).toBe(true);
+  });
+
+  it("leaves a fully paid, still-open order alone", async () => {
+    const context = quiet({
+      forms: [paidForm("f1")],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "new",
+          id: "algorder_1",
+          medusa_order_id: "order_1",
+        },
+      ],
+      paymentCollections: { order_1: [{ captured_amount: 412.97 }] },
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.paymentCollections).toEqual([]);
+    // Re-read - the slow tier is due on a row that has never been swept - but nothing
+    // needed repairing, so nothing is reported.
+    expect(result.reconciled).toBe(1);
+    expect(result.reconcileRepaired).toBe(0);
+    expect(result.error ?? null).toBeNull();
+  });
+
+  it("spends no Allegro request on an order that has reached the end of the ladder", async () => {
+    const context = quiet({
+      forms: [paidForm("f1")],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "delivered",
+          id: "algorder_1",
+          medusa_order_id: "order_1",
+        },
+      ],
+      paymentCollections: { order_1: [{ captured_amount: 412.97 }] },
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.reconciled).toBe(0);
+  });
+
+  it("does not re-read a form the drain applied on this same tick", async () => {
+    // One Allegro read per open order per tick is the whole budget; spending a second on
+    // the form that was just applied from the same upstream state buys nothing.
+    const context = setup({
+      forms: [paidForm("f1")],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      pages: [[event("e1", "f1")]],
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.created).toBe(1);
+    expect(result.reconciled).toBe(0);
+    // The payment was still recorded - by the drain's own pass, which is the point.
+    expect(coreFlows.markedPaid).toHaveLength(1);
   });
 });

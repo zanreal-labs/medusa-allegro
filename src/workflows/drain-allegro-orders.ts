@@ -15,8 +15,10 @@ import {
 } from "../lib/sync/failure-state";
 import { drainOrderEvents, emptyOrdersSyncSummary } from "../lib/sync/order-events";
 import type { OrdersSyncSummary } from "../lib/sync/order-events";
+import { readReconcileMarks } from "../lib/sync/order-reconcile";
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
 import { sweepUnattachedInvoices } from "./attach-allegro-invoice";
+import { sweepOpenAllegroOrders } from "./lib/order-reconcile-sweep";
 import { applyCheckoutForm } from "./lib/order-upsert";
 import { runUnderSyncClaim } from "./lib/run";
 
@@ -43,6 +45,12 @@ export interface OrdersSyncResult extends OrdersSyncSummary {
   invoicesAttached: number;
   /** Issued invoices the sweep tried and could still not attach. */
   invoiceAttachFailures: number;
+  /** Open orders the reconciliation sweep re-read from Allegro this run. */
+  reconciled: number;
+  /** Of those, the ones that needed repairing - each is an order event that was lost. */
+  reconcileRepaired: number;
+  /** Payments the reconciliation recorded that the event path had missed. */
+  reconcilePayments: number;
 }
 
 export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
@@ -50,6 +58,9 @@ export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
   created: 0,
   invoiceAttachFailures: 0,
   invoicesAttached: 0,
+  reconciled: 0,
+  reconcilePayments: 0,
+  reconcileRepaired: 0,
   withLineConflicts: 0,
   withTotalMismatch: 0,
 });
@@ -86,6 +97,18 @@ const buildOrdersError = (result: OrdersSyncResult): string | null => {
       `${result.withLineConflicts} order(s) have a line whose sygnatura matches no Medusa variant; they were created with custom line items, so those lines carry no inventory or cost linkage`,
     );
   }
+  if (result.reconcileRepaired > 0) {
+    // A finding, not a failure: the order is now correct. What needs an operator's eye is
+    // that it took the safety net to get there, because the event journal is what should
+    // have. A run of these means the drain is losing events.
+    parts.push(
+      `${result.reconcileRepaired} open order(s) were repaired by the reconciliation sweep rather than by the event journal${
+        result.reconcilePayments > 0
+          ? `, including ${result.reconcilePayments} whose payment had never been recorded`
+          : ""
+      }; each is an order event that was lost or never arrived`,
+    );
+  }
   if (result.invoiceAttachFailures > 0) {
     // Named separately from the drain's own failures because the remedy is different: the
     // order itself is fine, and what is missing is the invoice document the buyer expects
@@ -110,6 +133,7 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
       let created = 0;
       let withLineConflicts = 0;
       let withTotalMismatch = 0;
+      const appliedThisRun = new Set<string>();
 
       const drain = await drainOrderEvents(
         state.cursor,
@@ -117,6 +141,9 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
           applyForm: async (formId) => {
             const form = await client.getCheckoutForm(formId);
             const applied = await applyCheckoutForm(container, allegro, logger, options, form);
+            // Recorded so the reconciliation below does not re-read what the drain just
+            // applied from the same upstream state.
+            appliedThisRun.add(formId);
             if (applied.created) {
               created += 1;
             }
@@ -170,6 +197,32 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
         );
       }
 
+      // AFTER the drain and BEFORE the invoice sweep, in the same claim. The reconciliation
+      // re-reads open orders from Allegro and re-applies them, so it must not interleave
+      // with the drain that just ran - and running it after the drain means an order this
+      // tick imported is already in the table.
+      //
+      // Before the invoice sweep, though, and that ordering is load-bearing: re-applying a
+      // form rewrites `last_error` on its row, so running this second would wipe the
+      // attach failure the invoice sweep had just recorded there.
+      //
+      // Attached to the drain rather than given its own schedule on purpose: the unpaid
+      // tier is meant to run as often as anything runs, and the drain's ~20s tick is the
+      // fastest cadence this plugin has. See `resolveReconcileCadence`.
+      const reconciled = await sweepOpenAllegroOrders(
+        container,
+        allegro,
+        client,
+        logger,
+        options,
+        readReconcileMarks(state.counts),
+        appliedThisRun,
+        mayContinue,
+      );
+      result.reconciled = reconciled.checked;
+      result.reconcilePayments = reconciled.paymentsRegistered;
+      result.reconcileRepaired = reconciled.repaired;
+
       // AFTER the drain, in the same claim. Attaching writes to the same rows the drain
       // does, so it belongs under the same single-flight lock; running it second means a
       // form imported this tick is already in the table when the sweep looks for it.
@@ -192,7 +245,10 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
       result.error = errorLine ?? undefined;
       return {
         outcome: {
-          counts: { ...result },
+          // The sweep's marks ride along in `counts`, which is the only per-provider blob
+          // this row already persists. Without them the slow tier restarts its clock on
+          // every boot, which on a frequently deployed store is "never runs".
+          counts: { ...result, reconcile: reconciled.marks },
           // Persisted from the drain's own decision, so a held cursor stays held.
           cursor: drain.cursor,
           failures: isEmptyFailureState(drain.failures) ? null : drain.failures,
