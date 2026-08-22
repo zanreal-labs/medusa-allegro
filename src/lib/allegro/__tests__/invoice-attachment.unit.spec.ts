@@ -142,6 +142,28 @@ describe("checkout-form invoice documents", () => {
     ).rejects.toThrow("Maksymalna liczba faktur to 10.");
   });
 
+  it("asks for English error messages on all three calls", () => {
+    // `Accept-Language` is a documented parameter of every invoice endpoint and `en-US` is
+    // the only value its schema enumerates. It decides the language of
+    // `errors[].userMessage`, which is what a rejection recorded on `allegro_order` is
+    // made of - without it a 400 arrives in Polish inside an otherwise English log.
+    return Promise.all(
+      [
+        (client: AllegroClient) => client.getCheckoutFormInvoices("form-1"),
+        (client: AllegroClient) =>
+          client.createCheckoutFormInvoice("form-1", { file: { name: "x.pdf" } }),
+        (client: AllegroClient) =>
+          client.uploadCheckoutFormInvoiceFile("form-1", "inv-1", new Uint8Array([1])),
+      ].map(async (call) => {
+        const fetchImpl = stubFetch(() => apiJson(200, { invoices: [] }));
+        await call(clientWith(fetchImpl));
+        expect(
+          (fetchImpl.mock.calls[1]?.[1] as RequestInit | undefined)?.headers,
+        ).toMatchObject({ "Accept-Language": "en-US" });
+      }),
+    );
+  });
+
   it("states Allegro's documented limits as constants", () => {
     // The size guard and the per-order ceiling are decisions callers make BEFORE
     // calling, so both live with the types rather than in a caller's head.
