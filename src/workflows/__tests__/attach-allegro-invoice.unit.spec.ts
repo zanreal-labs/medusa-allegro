@@ -88,6 +88,15 @@ const fakeClient = (
   input: {
     registered?: { id: string; invoiceNumber?: string }[];
     createError?: Error;
+    /**
+     * Rejects only a create that carries an `invoiceNumber`.
+     *
+     * The production shape of the 400: Allegro refuses the body with the number in it and
+     * takes the same body without it, which is exactly what the one-shot retry is there to
+     * discover. A flat `createError` cannot express it - it fails both attempts and the
+     * retry looks untested.
+     */
+    rejectInvoiceNumber?: Error;
     uploadError?: Error;
     listError?: Error;
   } = {},
@@ -104,6 +113,9 @@ const fakeClient = (
     ) => {
       if (input.createError) {
         return Promise.reject(input.createError);
+      }
+      if (input.rejectInvoiceNumber && invoice.invoiceNumber !== undefined) {
+        return Promise.reject(input.rejectInvoiceNumber);
       }
       creates.push({
         formId,
@@ -155,6 +167,7 @@ const setup = (
     /** Omit the listing surface, so only the event path works. */
     noListing?: boolean;
     createError?: Error;
+    rejectInvoiceNumber?: Error;
     uploadError?: Error;
     listError?: Error;
     connected?: boolean;
@@ -493,13 +506,164 @@ describe("attachAllegroInvoice: failures are recorded, never thrown", () => {
       event,
     );
 
-    expect(result.error).toBe("inFakt timed out");
-    expect(context.client.creates).toEqual([]);
-    expect(context.table.rows[0]?.last_error).toBe(
-      `${ATTACH_ERROR_PREFIX}: inFakt timed out`,
+    // The upstream message survives, and the line now names the stage as well: an
+    // invoicing-module timeout and an Allegro rejection used to read identically.
+    expect(result.error).toContain("inFakt timed out");
+    expect(result.error).toContain(
+      "fetching the invoice PDF from the invoicing module",
     );
+    expect(context.client.creates).toEqual([]);
+    expect(context.table.rows[0]?.last_error).toContain(
+      `${ATTACH_ERROR_PREFIX}: `,
+    );
+    expect(context.table.rows[0]?.last_error).toContain("inFakt timed out");
   });
 
+  it("names the call that failed, and everything Allegro said about it", async () => {
+    // The production incident, verbatim: `[allegro-invoice] checkout form ...: Allegro
+    // rejected the invoice attachment (HTTP 400): Bad Request`. Every actionable fact -
+    // WHICH request, the error code, the field path, the request id to quote at Allegro,
+    // and the two values this plugin chose - was in the response and thrown away.
+    const context = setup({
+      createError: new AllegroApiError({
+        body: {
+          errors: [
+            {
+              code: "InvoiceNumberInvalid",
+              message: "Bad Request",
+              path: "invoiceNumber",
+              userMessage: "The invoice number has an unsupported format.",
+            },
+          ],
+        },
+        httpStatus: 400,
+        message: "Bad Request",
+        requestId: "req-abc",
+      }),
+      orders: [allegroOrder()],
+    });
+
+    const result = await attachAllegroInvoice(context.container as never, event);
+
+    expect(result.error).toContain("registering the invoice document");
+    expect(result.error).toContain("HTTP 400");
+    expect(result.error).toContain("code=InvoiceNumberInvalid");
+    expect(result.error).toContain("path=invoiceNumber");
+    expect(result.error).toContain("The invoice number has an unsupported format.");
+    expect(result.error).toContain("x-request-id: req-abc");
+    // What we put on the wire, so a rejection can be read against it without a redeploy.
+    expect(result.error).toContain('invoiceNumber="FV/2026/08/001"');
+    expect(result.error).toContain('file.name="FV_2026_08_001.pdf"');
+    // And it is what the row carries, not just what the log said.
+    expect(context.table.rows[0]?.last_error).toContain("code=InvoiceNumberInvalid");
+  });
+
+  it("distinguishes a rejected upload from a rejected create", async () => {
+    const context = setup({
+      orders: [allegroOrder()],
+      uploadError: new AllegroApiError({
+        body: { errors: [{ code: "FileTooLarge", message: "Bad Request" }] },
+        httpStatus: 400,
+        message: "Bad Request",
+      }),
+    });
+
+    const result = await attachAllegroInvoice(context.container as never, event);
+
+    expect(result.error).toContain("uploading the invoice file");
+    expect(result.error).not.toContain("registering the invoice document");
+  });
+
+  it("says when the request never reached Allegro at all", async () => {
+    // `httpStatus: 0` is the client's transport failure. "HTTP 0" reads as a bug in us.
+    const context = setup({
+      createError: new AllegroApiError({
+        httpStatus: 0,
+        message: "Allegro request failed: fetch failed",
+      }),
+      orders: [allegroOrder()],
+    });
+
+    const result = await attachAllegroInvoice(context.container as never, event);
+
+    expect(result.error).toContain("HTTP no response");
+    expect(result.error).not.toContain("HTTP 0");
+  });
+});
+
+describe("attachAllegroInvoice: a 400 on the metadata create", () => {
+  it("retries once without the invoice number, and attaches", async () => {
+    // Allegro documents NO 400 for this endpoint, and `file` is the only required field
+    // of the body - so a 400 with a number attached is worth one decisive experiment:
+    // send the minimum legal body. When it works the buyer gets the invoice AND the
+    // cause is proven, which is what the old one-line log could never do.
+    const context = setup({
+      orders: [allegroOrder()],
+      rejectInvoiceNumber: new AllegroApiError({
+        body: { errors: [{ code: "BadRequest", message: "Bad Request" }] },
+        httpStatus: 400,
+        message: "Bad Request",
+        requestId: "req-1",
+      }),
+    });
+
+    const result = await attachAllegroInvoice(context.container as never, event);
+
+    expect(result).toMatchObject({ attached: true, attempted: true });
+    // Two creates: the one with the number, then the one without it.
+    expect(context.client.creates).toEqual([
+      { formId: "form-1", invoiceNumber: undefined, name: "FV_2026_08_001.pdf" },
+    ]);
+    expect(context.client.uploads).toHaveLength(1);
+    expect(context.table.rows[0]?.invoice_attached_at).toBeInstanceOf(Date);
+    // And it says so, loudly, because the operator now knows something Allegro support
+    // needs to hear.
+    expect(context.logs.join("\n")).toContain("retrying once with the number omitted");
+    expect(context.logs.join("\n")).toContain("ACCEPTED");
+  });
+
+  it("does not retry a 422, a 409 or a 403 - each means something else", async () => {
+    // 422 is "this order will not take this invoice", 409 "it already has one", 403 a
+    // scope gap. Retrying any of them without the number could register a SECOND document
+    // on a real order, which is the failure this plugin's dedupe guard exists to prevent.
+    for (const httpStatus of [403, 409, 422, 429]) {
+      const context = setup({
+        orders: [allegroOrder()],
+        rejectInvoiceNumber: new AllegroApiError({
+          httpStatus,
+          message: `rejected with ${httpStatus}`,
+        }),
+      });
+
+      const result = await attachAllegroInvoice(context.container as never, event);
+
+      expect(result).toMatchObject({ attempted: true });
+      expect(result.error).toContain(`HTTP ${httpStatus}`);
+      expect(context.client.creates).toEqual([]);
+      expect(context.client.uploads).toEqual([]);
+    }
+  });
+
+  it("reports both rejections when the numberless body is refused too", async () => {
+    // The other half of the experiment: the body is exonerated, and the log carries the
+    // proof rather than leaving the next reader to run it again.
+    const context = setup({
+      createError: new AllegroApiError({
+        body: { errors: [{ code: "BadRequest", message: "Bad Request" }] },
+        httpStatus: 400,
+        message: "Bad Request",
+      }),
+      orders: [allegroOrder()],
+    });
+
+    const result = await attachAllegroInvoice(context.container as never, event);
+
+    expect(result.error).toContain("HTTP 400");
+    expect(context.table.rows[0]?.invoice_attached_at).toBeUndefined();
+  });
+});
+
+describe("attachAllegroInvoice: failures are recorded, never thrown (continued)", () => {
   it("records a disconnected Allegro before spending the PDF fetch", async () => {
     // Fetching flips the invoice to "printed" upstream, so the client is resolved first:
     // there is no point paying that side effect for an upload that cannot happen.

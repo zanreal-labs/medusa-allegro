@@ -38,6 +38,18 @@ import type {
 import { buildAllegroUserAgent } from "./user-agent";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Headers the three invoice-document calls carry beyond the client's defaults.
+ *
+ * `Accept-Language` is a documented parameter of all three (`en-US` is the only value
+ * the schema enumerates) and it is what decides the language of `errors[].userMessage`.
+ * Without it Allegro answers in Polish, so a rejection recorded on `allegro_order` and
+ * read by whoever is on call arrives in a language the rest of the log is not in. This
+ * is a diagnostics decision, not a behavioural one: nothing about which requests
+ * Allegro accepts changes.
+ */
+const INVOICE_HEADERS: Record<string, string> = { "Accept-Language": "en-US" };
 const REFRESH_LEEWAY_MS = 30_000;
 
 interface RequestOptions {
@@ -647,7 +659,9 @@ export class AllegroClient {
    * order on Allegro (plus whether one was marked as sent outside the platform).
    */
   getCheckoutFormInvoices(id: string): Promise<CheckoutFormInvoices> {
-    return this.request("GET", `/order/checkout-forms/${encodeURIComponent(id)}/invoices`);
+    return this.request("GET", `/order/checkout-forms/${encodeURIComponent(id)}/invoices`, {
+      headers: INVOICE_HEADERS,
+    });
   }
 
   /**
@@ -675,6 +689,7 @@ export class AllegroClient {
   ): Promise<CreatedCheckoutFormInvoice> {
     return this.request("POST", `/order/checkout-forms/${encodeURIComponent(id)}/invoices`, {
       body: invoice,
+      headers: INVOICE_HEADERS,
     });
   }
 
@@ -695,7 +710,7 @@ export class AllegroClient {
       `/order/checkout-forms/${encodeURIComponent(id)}/invoices/${encodeURIComponent(invoiceId)}/file`,
       // `Uint8Array<ArrayBufferLike>` narrows outside lib.dom's `BodyInit` union,
       // but fetch accepts any ArrayBufferView at runtime.
-      { contentType: "application/pdf", rawBody: pdf as BodyInit },
+      { contentType: "application/pdf", headers: INVOICE_HEADERS, rawBody: pdf as BodyInit },
     );
   }
 

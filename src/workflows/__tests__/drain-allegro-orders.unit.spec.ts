@@ -485,6 +485,8 @@ const setup = (input: {
   existingReservations?: Record<string, unknown>[];
   /** Unregister the payment module, as a store with no `STRIPE_API_KEY` has it. */
   noPaymentModule?: boolean;
+  /** Leave the event bus unregistered, so the never-fatal emit path is exercised. */
+  noEventBus?: boolean;
   /**
    * Issued invoices the invoicing module would report, registering the module under
    * `infakt` so the drain's post-drain sweep has something to find.
@@ -522,6 +524,13 @@ const setup = (input: {
   const regions = input.regions ?? [{ currency_code: "pln", id: "reg_pl" }];
 
   const invoicePdfCalls: string[] = [];
+  /**
+   * Everything handed to the event bus, in order.
+   *
+   * Recorded rather than stubbed away: `order.placed` is the whole point of the step, and
+   * "was it emitted, once, with core's payload" is not observable anywhere else.
+   */
+  const emitted: unknown[] = [];
   const container = {
     resolve: (key: string) => {
       if (key === "allegro") {
@@ -549,6 +558,17 @@ const setup = (input: {
           throw new Error("payment module is not registered");
         }
         return {};
+      }
+      if (key === "event_bus") {
+        if (input.noEventBus) {
+          throw new Error("event_bus is not registered");
+        }
+        return {
+          emit: (message: unknown) => {
+            emitted.push(message);
+            return Promise.resolve();
+          },
+        };
       }
       if (key === "logger") {
         return {
@@ -668,7 +688,7 @@ const setup = (input: {
     },
   };
 
-  return { allegro, client, container, invoicePdfCalls, logs, table };
+  return { allegro, client, container, emitted, invoicePdfCalls, logs, table };
 };
 
 beforeEach(() => {
@@ -853,6 +873,18 @@ describe("drainAllegroOrders: never duplicating a Medusa order", () => {
       ...over,
     });
 
+  it("does not announce an order it adopted rather than created", async () => {
+    // Adoption also runs for an order this pass simply did not know about, so announcing
+    // there would announce sales that were already announced. A duplicate "new order" in
+    // Slack cannot be taken back; a missing one for an order a crashed pass created is
+    // recoverable by looking at the order.
+    const context = orphaned();
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(context.emitted).toEqual([]);
+  });
+
   it("adopts the existing order instead of creating a second one", async () => {
     // The regression: `medusa_order_id` is written in a separate statement from the order
     // creation, so a crash in between leaves a real Medusa order this row does not know
@@ -921,6 +953,87 @@ describe("drainAllegroOrders: never duplicating a Medusa order", () => {
     await drainAllegroOrders(context.container as never);
 
     expect(coreFlows.created).toHaveLength(1);
+  });
+});
+
+describe("drainAllegroOrders: announcing the order", () => {
+  const withCursor = (over: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+      ...over,
+    });
+
+  it("emits core's `order.placed` for an order it created", async () => {
+    // Medusa 2.18 emits `order.placed` from `completeCartWorkflow` and
+    // `convertDraftOrderWorkflow` only - `createOrderWorkflow`, which this drain calls,
+    // emits NOTHING. So an Allegro sale never announced itself, and the store's Slack
+    // subscriber was structurally deaf to marketplace orders while looking healthy.
+    const context = withCursor({
+      forms: [form({ id: "f1" })],
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    // Core's name, core's payload, core's priority - nothing this plugin invented.
+    expect(context.emitted).toEqual([
+      { data: { id: "order_1" }, name: "order.placed", options: { priority: 10 } },
+    ]);
+  });
+
+  it("announces once, however many times the same form is re-applied", async () => {
+    // The idempotency requirement: the drain re-reads a form on every later event for it,
+    // the reconciliation sweep re-applies open orders continuously, and the bus is
+    // at-least-once. Only the pass that actually created the order may announce it.
+    const context = withCursor({
+      forms: [form({ id: "f1" })],
+      pages: [[event("e1", "f1")], [event("e2", "f1")], [event("e3", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+    await drainAllegroOrders(context.container as never);
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toHaveLength(1);
+    expect(context.emitted).toHaveLength(1);
+  });
+
+  it("announces an order whose status action failed, exactly once", async () => {
+    // `lastError` is about the Allegro-side status ladder, not about whether the order
+    // exists. Emitting after the throw meant the retry that eventually lands finds
+    // `medusa_order_id` already set, leaves `created` false, and the order is never
+    // announced at all.
+    coreFlows.cancelError = new Error("order has live fulfillments");
+    const context = withCursor({
+      forms: [form({ id: "f1", status: "CANCELLED" })],
+      medusaOrderStatuses: { order_1: "pending" },
+      pages: [[event("e1", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toHaveLength(1);
+    expect(context.emitted).toHaveLength(1);
+  });
+
+  it("creates the order anyway when the event bus is unavailable", async () => {
+    // A missed announcement must never hold the Allegro event cursor: that would stall
+    // every LATER order behind a notification, and the retry would find the order already
+    // created and correctly not emit, so the announcement is lost either way.
+    const context = withCursor({
+      forms: [form({ id: "f1" })],
+      noEventBus: true,
+      pages: [[event("e1", "f1")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toHaveLength(1);
+    expect(result.failed).toBe(0);
+    expect(context.table.rows[0]?.synced_at).toBeInstanceOf(Date);
+    expect(context.table.rows[0]?.last_error).toBeFalsy();
+    expect(context.logs.join("\n")).toContain("could not emit `order.placed`");
   });
 });
 

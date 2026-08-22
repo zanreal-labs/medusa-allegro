@@ -148,6 +148,34 @@ backfill runs.
 A cancelled order is skipped - holding stock for a sale that is not happening costs
 the store real money on every other order.
 
+## `order.placed` for a marketplace sale
+
+Medusa does not emit `order.placed` for an order created through
+`createOrderWorkflow`, which is the workflow this drain calls. In Medusa 2.18 that
+event is emitted by `completeCartWorkflow` (a storefront checkout) and by
+`convertDraftOrderWorkflow`, each *beside* their create rather than inside it - so
+until this plugin emitted it, an Allegro sale announced itself to nothing. Anything
+subscribed to `order.placed` (a Slack announcement, an ERP push, a mailing) was
+structurally deaf to marketplace orders while looking perfectly healthy: the
+subscriber was registered, the order existed, and no error was logged anywhere.
+
+So the drain emits it, with core's payload verbatim - `{ id }`, at
+`EventPriority.CRITICAL` - because a subscriber must never have to know which
+channel an order arrived through.
+
+**Exactly once per order.** It is emitted only by the pass that actually created
+the order. A redelivered Allegro event, a forced refresh, the reconciliation sweep
+and the adoption path that picks up an order a crashed pass left behind all take
+the "this form already has an order" branch, and none of them announce. An order
+that was *adopted* is never announced, on purpose: adoption also runs for an order
+a crashed pass created minutes ago, and a duplicate "new order" cannot be taken
+back.
+
+**It is never a reason to hold the event cursor.** If the event bus is unavailable,
+the failure is a warning on the order and the drain moves on - stalling every later
+order behind an undelivered notification would be a much worse outcome, and the
+retry would find the order already created and correctly not announce it anyway.
+
 ## Fulfillment write-back
 
 A subscriber on `order.fulfillment_created` and `shipment.created` sets Allegro's
@@ -256,6 +284,35 @@ Two limitations, stated rather than left to be discovered:
   drain pass of the same form. The sweep is unaffected, but the admin may stop
   showing the reason; the run's own error line on the orders state row names the
   count.
+
+### Reading a rejected attach
+
+A failure line names **which of the four calls failed** - the PDF fetch from the
+invoicing module, the dedupe read, the metadata create, or the file upload - plus
+everything in Allegro's `errors[]` (`code`, `path`, `message`, `userMessage`), the
+`x-request-id` to quote at Allegro support, and the two values this plugin chose:
+`file.name` and `invoiceNumber`. Those two are the whole of what a rejected create
+can be about, and none of it is buyer data - the invoice endpoints take a filename
+and an invoice number and nothing else. The calls also ask for `Accept-Language:
+en-US`, so Allegro's `userMessage` arrives in the same language as the rest of the
+log.
+
+This matters because `AllegroApiError.message` alone is only the *first*
+`userMessage` Allegro returned, and for an HTTP 400 that string is routinely the
+generic "Bad Request" while the `code` and `path` that name the offending field go
+unread. A 400 with no reason is not something an operator can act on.
+
+**One deliberate experiment on a 400.** Allegro documents no 400 for
+`POST .../invoices` at all - the documented rejections are 403 (scope), 404, 409
+(the order already has an invoice), 422 (the order will not take one) and 429 (too
+fast) - and its schema requires exactly one field, `file`. So `invoiceNumber` is
+the only field whose *value* can make an otherwise legal body illegal. When a
+create carrying a number is rejected with a 400, and only then, the attach retries
+once with the number omitted. If Allegro accepts that, the buyer gets the invoice
+and the cause is proven, both said plainly in the log; if it rejects that too, the
+body is exonerated and both rejections are on the record. No other status is ever
+retried this way, because each of them means something a blind retry would make
+worse.
 
 ### Its own kill switch
 
