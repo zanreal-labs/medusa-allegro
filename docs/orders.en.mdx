@@ -109,6 +109,45 @@ Note also that imported orders carry **no computed tax lines**. Taking line pric
 from Allegro verbatim is right for reconciliation, but it means an Allegro order's
 tax breakdown in Medusa is empty.
 
+## Reservations, so the order can be fulfilled
+
+Medusa's `createOrderWorkflow` - the workflow every Allegro order is created with -
+validates that stock exists and then deliberately creates **no inventory
+reservation**. Only cart checkout reserves, and no Allegro order goes through a
+cart. Core's fulfillment refuses any line whose variant manages inventory and has
+no reservation, so without this the admin's own **Fulfill** button, and every
+plugin that fulfils, failed with `No stock reservation found for item ordli_...` -
+leaving paid, delivered orders reading as unfulfilled and stalling the fulfillment
+write-back above behind them.
+
+So the drain creates the reservations itself, through core's own
+`createReservationsWorkflow`, immediately after the order exists and **before** the
+payment is recorded - the payment emits `payment.captured`, which is the head of
+the chain that ends in a fulfillment, so a reservation landing after it could still
+lose the race.
+
+Three properties make it safe to run on every pass, which is what it does:
+
+- **Idempotent.** Reservations that already exist are subtracted from what is
+  needed, per line and per inventory item. A reserved order costs two reads and
+  writes nothing.
+- **It never over-reserves.** The quantity is `required_quantity x (ordered -
+  already fulfilled)`. Fulfilled units have already consumed their reservation.
+- **It never fails the order.** A line whose inventory item is stocked at no
+  location is logged as a warning and skipped. That is a catalogue problem for a
+  human; losing the sale over it would be worse.
+
+Because it runs on every pass, the reconciliation sweep **heals the orders created
+before this existed**: the next sweep that reaches such an order creates its
+reservation and it becomes fulfillable, with no backfill script to run. The job
+line reports `reservationsCreated` when a sweep did that. It is deliberately not
+counted as a `reconcileRepaired`: every order predating this needs a reservation,
+so folding it in would report a healthy event journal as broken for as long as the
+backfill runs.
+
+A cancelled order is skipped - holding stock for a sale that is not happening costs
+the store real money on every other order.
+
 ## Fulfillment write-back
 
 A subscriber on `order.fulfillment_created` and `shipment.created` sets Allegro's

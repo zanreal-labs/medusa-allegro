@@ -58,6 +58,15 @@ export interface OrdersSyncResult extends OrdersSyncSummary {
    * pipeline wrote customer names at all, healing on their next sweep.
    */
   reconcileCustomersNamed: number;
+  /**
+   * Inventory reservations the sweep created on orders that had none.
+   *
+   * Not a failure and not counted as a repair, for the same reason as the names above:
+   * `createOrderWorkflow` has never created a reservation, so EVERY Allegro order
+   * predating this needs one. Each is an order core's fulfillment would have refused with
+   * "No stock reservation found for item ordli_..." and now accepts.
+   */
+  reconcileReservations: number;
 }
 
 export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
@@ -69,6 +78,7 @@ export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
   reconcileCustomersNamed: 0,
   reconcilePayments: 0,
   reconcileRepaired: 0,
+  reconcileReservations: 0,
   withLineConflicts: 0,
   withTotalMismatch: 0,
 });
@@ -231,6 +241,7 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
       result.reconcileCustomersNamed = reconciled.customersNamed;
       result.reconcilePayments = reconciled.paymentsRegistered;
       result.reconcileRepaired = reconciled.repaired;
+      result.reconcileReservations = reconciled.reservationsCreated;
 
       // AFTER the drain, in the same claim. Attaching writes to the same rows the drain
       // does, so it belongs under the same single-flight lock; running it second means a
