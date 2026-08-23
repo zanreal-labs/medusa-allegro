@@ -1,7 +1,67 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework";
-import type { Logger } from "@medusajs/framework/types";
+import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import { pushAllegroFulfillment } from "../workflows/push-allegro-fulfillment";
+
+/**
+ * The payload the two subscribed events carry. They deliberately disagree, and that
+ * disagreement is the whole reason SENT never used to fire:
+ *
+ * - `order.fulfillment_created` is order-scoped and carries `{ order_id, fulfillment_id }`.
+ * - `shipment.created` is fulfillment-scoped and carries `{ id }` - the FULFILLMENT id,
+ *   with no order id anywhere in the payload.
+ */
+interface FulfillmentEventData {
+  /** Present on `order.fulfillment_created`. */
+  order_id?: string;
+  /** Present on `shipment.created`: the fulfillment id, NOT an order id. */
+  id?: string;
+}
+
+interface FulfillmentEvent {
+  name: string;
+  data?: FulfillmentEventData;
+}
+
+/**
+ * Resolve the Medusa order id a fulfillment or shipment event belongs to.
+ *
+ * Medusa 2.18 core's `createOrderShipmentWorkflow` (in `@medusajs/core-flows`) emits
+ * `FulfillmentWorkflowEvents.SHIPMENT_CREATED` - the string `"shipment.created"` - with
+ * `data: { id: <fulfillmentId> }`. There is NO order id on that event, and core emits
+ * no order-scoped shipment event at all. The previous handler read `event.data.order_id`
+ * for both events, so for `shipment.created` it got `undefined`, returned early, and the
+ * Allegro order was stranded at READY_FOR_SHIPMENT and never reached SENT.
+ *
+ * So the order id is taken straight from the event when it is order-scoped
+ * (`order.fulfillment_created`), and otherwise the fulfillment id on `shipment.created`
+ * is resolved to its order through the order<->fulfillment link (`fulfillment.order.id`,
+ * the documented reverse relation). Best-effort: any failure yields `undefined` and the
+ * caller no-ops, because a fulfillment write-back must never throw.
+ */
+export const resolveFulfillmentEventOrderId = async (
+  container: MedusaContainer,
+  event: FulfillmentEvent,
+): Promise<string | undefined> => {
+  const direct = event.data?.order_id;
+  if (direct) {
+    return direct;
+  }
+
+  const fulfillmentId = event.data?.id;
+  if (!fulfillmentId) {
+    return undefined;
+  }
+
+  const query = container.resolve(ContainerRegistrationKeys.QUERY);
+  const { data } = (await query.graph({
+    entity: "fulfillment",
+    fields: ["order.id"],
+    filters: { id: fulfillmentId },
+  })) as { data: { order?: { id?: string | null } | null }[] };
+
+  return data?.[0]?.order?.id ?? undefined;
+};
 
 /**
  * Tell Allegro when a Medusa fulfillment or shipment happens for an Allegro order.
@@ -28,21 +88,21 @@ import { pushAllegroFulfillment } from "../workflows/push-allegro-fulfillment";
 export default async function allegroFulfillmentPushSubscriber({
   container,
   event,
-}: SubscriberArgs<{ order_id?: string }>): Promise<void> {
+}: SubscriberArgs<FulfillmentEventData>): Promise<void> {
   const logger = container.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
-  const orderId = event.data?.order_id;
-  if (!orderId) {
-    return;
-  }
 
   try {
+    const orderId = await resolveFulfillmentEventOrderId(container, event);
+    if (!orderId) {
+      return;
+    }
     await pushAllegroFulfillment(container, { eventName: event.name, orderId });
   } catch (error) {
     // Belt and braces: `pushAllegroFulfillment` already contains its own failures, so
     // reaching here means something unexpected (a container resolve, a database
-    // outage). Still swallowed, for the same reason.
+    // outage, the order lookup). Still swallowed, for the same reason.
     logger.error(
-      `[allegro-fulfillment] subscriber failed for order ${orderId}: ${error instanceof Error ? error.message : String(error)}`,
+      `[allegro-fulfillment] subscriber failed for ${event.name}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
