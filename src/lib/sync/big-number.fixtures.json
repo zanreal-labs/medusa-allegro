@@ -1,0 +1,24 @@
+{
+  "$comment": "CANONICAL SOURCE, vendored byte-for-byte alongside big-number.ts into medusa-allegro (src/lib/sync/), medusa-infakt (src/lib/invoicing/) and medusa-marken (src/lib/). Structural test vectors for bigNumberCandidates() - the property shapes only, since a live BigNumber instance (with real valueOf/toString methods) can't round-trip through JSON. Each repo's own test file additionally exercises a real or fake class instance for the valueOf()/toString() paths. Update all three copies together.",
+  "cases": [
+    { "name": "plain finite number passes through unchanged", "input": 133.44, "candidates": [133.44] },
+    { "name": "zero passes through unchanged", "input": 0, "candidates": [0] },
+    { "name": "negative number passes through unchanged", "input": -12.5, "candidates": [-12.5] },
+    { "name": "numeric string passes through unchanged", "input": "133.44", "candidates": ["133.44"] },
+    { "name": "garbage string still passes through - validation is the caller's job", "input": "12abc", "candidates": ["12abc"] },
+    { "name": "null yields no candidates", "input": null, "candidates": [] },
+    { "name": "bare raw shape - value string", "input": { "value": "206.00", "precision": 20 }, "candidates": ["206.00"] },
+    { "name": "bare raw shape - value number", "input": { "value": 206 }, "candidates": [206] },
+    { "name": "public raw getter shape", "input": { "raw": { "value": "206.00" } }, "candidates": ["206.00"] },
+    { "name": "raw.value takes priority over numeric when both present", "input": { "numeric": 205.99, "raw": { "value": "206.00" } }, "candidates": ["206.00", 205.99] },
+    { "name": "numeric alone, no raw", "input": { "numeric": 206 }, "candidates": [206] },
+    { "name": "detached private raw_ (spread/structuredClone survivor)", "input": { "raw_": { "value": "206.00" } }, "candidates": ["206.00"] },
+    { "name": "detached private numeric_ alone", "input": { "numeric_": 206 }, "candidates": [206] },
+    { "name": "raw_ takes priority over numeric_ when both present", "input": { "raw_": { "value": "206.00" }, "numeric_": 205.99 }, "candidates": ["206.00", 205.99] },
+    { "name": "empty object has nothing readable", "input": {}, "candidates": [] },
+    { "name": "empty array has nothing readable (Array#toString is '', filtered as blank)", "input": [], "candidates": [] },
+    { "name": "object with an unrelated key is not money", "input": { "some": "thing" }, "candidates": [] },
+    { "name": "raw.value present but not a scalar is skipped, falls through to nothing else", "input": { "raw": { "value": { "nested": true } } }, "candidates": [] },
+    { "name": "empty string passes through as a candidate unchanged - callers special-case '' as absent before validation, not this function", "input": "", "candidates": [""] }
+  ]
+}
