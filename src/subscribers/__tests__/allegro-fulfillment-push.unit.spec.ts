@@ -136,15 +136,24 @@ describe("allegroFulfillmentPushSubscriber", () => {
     });
   });
 
-  it("no-ops when the shipment's order cannot be resolved", async () => {
+  it("no-ops when the shipment's order cannot be resolved, but says so in the logs", async () => {
     const graph = jest.fn(() => Promise.resolve({ data: [] }));
+    const logs: string[] = [];
 
     await allegroFulfillmentPushSubscriber({
-      container: fakeContainer(graph),
+      container: fakeContainer(graph, logs),
       event: { data: { id: "ful_missing" }, name: "shipment.created" },
     } as never);
 
     expect(pushAllegroFulfillment).not.toHaveBeenCalled();
+    // Not just a no-op: an unresolvable shipment used to leave nothing behind at
+    // all, which is the same shape of silence that stranded orders at
+    // READY_FOR_SHIPMENT before this subscriber was rewritten. A warning here is
+    // what makes a stale or not-yet-propagated fulfillment link discoverable
+    // instead of a support ticket nobody can explain.
+    expect(logs.some((line) => line.startsWith("warn:") && line.includes("ful_missing"))).toBe(
+      true,
+    );
   });
 
   it("never throws: a lookup failure is swallowed and logged", async () => {
