@@ -94,6 +94,16 @@ export default async function allegroFulfillmentPushSubscriber({
   try {
     const orderId = await resolveFulfillmentEventOrderId(container, event);
     if (!orderId) {
+      // Not a silent no-op: for `shipment.created` this means the fulfillment id on
+      // the event does not resolve to any order through the link - a stale id, a
+      // link that has not propagated yet, or a fulfillment this store does not own.
+      // That is exactly the shape of the defect this subscriber was rewritten to
+      // fix (see `resolveFulfillmentEventOrderId`): an Allegro order stranded before
+      // SENT with nothing in the logs to say why. Logged, never thrown - the
+      // subscriber still has nothing to retry here.
+      logger.warn(
+        `[allegro-fulfillment] could not resolve an order for ${event.name} (${JSON.stringify(event.data ?? {})}); nothing was pushed to Allegro.`,
+      );
       return;
     }
     await pushAllegroFulfillment(container, { eventName: event.name, orderId });
