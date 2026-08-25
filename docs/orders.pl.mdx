@@ -224,10 +224,8 @@ Cztery odmowy pilnują, żeby to zostało zabezpieczeniem, a nie drugim piszący
   doszedł, nie kosztuje ani jednego zapisu do marketplace'u przy kolejnych przejściach.
 - **Przesyłka jest młodsza niż okno karencji** (`ALLEGRO_ORDERS_RECONCILE_SENT_GRACE_MS`,
   domyślnie 10 minut). Pierwszeństwo ma subskrybent. Bez tego przejście ścigałoby się
-  z nim: widok formularza zakupowego w Allegro jest opóźniony wobec własnych zapisów
-  o dziesiątki sekund, więc odczyt chwilę po *udanym* wysłaniu wciąż pokazuje
-  `READY_FOR_SHIPMENT` - a przejście „naprawiłoby” zamówienie, które nigdy nie było
-  zepsute, i zaraportowało zdrowy zapis zwrotny jako awarię.
+  z nim - patrz opóźnienie odczytu opisane niżej, bo to właśnie dla niego to okno
+  w ogóle istnieje.
 - **Zamówienie jest `delivered`, `returned` albo `cancelled`,** albo niesie status
   realizacji, którego ta wtyczka nie modeluje. `SENT` zostanie tam albo odrzucone,
   albo cofnie zakończone zamówienie o krok wstecz.
@@ -242,6 +240,13 @@ różnica wobec stanu sprzed, gdzie nieudany zapis zwrotny nie zostawiał żadne
 Oba przejścia rządzi ten sam przełącznik, więc wyłączenie `fulfillment_writeback_enabled`
 zatrzymuje wysyłanie zarówno z przejścia, jak i z subskrybenta.
 
+Jedna rysa, znana i świadomie zaakceptowana: `last_error` to jedna kolumna, do której
+pisze trzech autorów. Udane podpięcie faktury na tym samym takcie czyści więc błąd
+nieudanego wysłania `SENT`, zapisany chwilę wcześniej w tym samym przebiegu. Nic przez
+to nie ginie na stałe - kolejne przejście po otwartych zamówieniach ponawia wysłanie
+i zapisuje powód od nowa, a linia błędu całego przebiegu raportuje niepowodzenie tak
+czy inaczej.
+
 **Ma własny przełącznik**, `fulfillment_writeback_enabled`, i celowo *nie* czyta
 `ordersSyncDisabled`. Tamten wyłącznik zatrzymuje konsumowanie dziennika przez
 drenaż, a wstrzymanie importu to inna decyzja niż odmowa poinformowania kupującego,
@@ -252,6 +257,25 @@ na nowo.
 
 Jedna znana rysa: sklep, który tworzy realizację i przesyłkę jednym ruchem, wysyła dwie
 aktualizacje. Wygrywa druga, co jest poprawne, choć rozrzutne.
+
+### Allegro czyta z opóźnieniem to, co samo zapisało - około 45 sekund
+
+Warto o tym wiedzieć, zanim zacznie się tu cokolwiek diagnozować, bo wygląda to
+dokładnie jak awaria, a nią nie jest.
+
+Zmierzone, nie założone: przy ręcznej naprawie zablokowanego zamówienia 25 sierpnia
+2026 `PUT /order/checkout-forms/{id}/fulfillment` zwrócił 2xx, a następny w kolejności
+`GET /order/checkout-forms/{id}` wciąż raportował `READY_FOR_SHIPMENT`. Dopiero odczyt
+jakieś 45 sekund później pokazał `SENT`.
+
+**Status odczytany zaraz po wysłaniu jest przeterminowany, a nie odrzucony.** Nie
+ponawiaj na podstawie takiego odczytu i nie wyciągaj z niego wniosku, że zapis się nie
+udał - odczekaj i przeczytaj ponownie.
+
+To także jedyny powód, dla którego istnieje opisane wyżej okno karencji. Bez niego
+przejście odczytywałoby formularz chwilę po *udanym* wysłaniu przez subskrybenta,
+widziało `READY_FOR_SHIPMENT` i „naprawiało” zamówienie, które nigdy nie było zepsute -
+raportując zdrowy zapis zwrotny jako awarię.
 
 ## Łańcuch fakturowy
 

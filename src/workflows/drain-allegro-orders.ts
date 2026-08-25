@@ -250,6 +250,17 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
       // form rewrites `last_error` on its row, so running this second would wipe the
       // attach failure the invoice sweep had just recorded there.
       //
+      // KNOWN AND ACCEPTED, in the other direction: `last_error` is one column shared by
+      // three writers, so an invoice attach that SUCCEEDS on this tick clears it - and
+      // with it a failed `SENT` push the reconciliation sweep recorded moments earlier in
+      // the same run. It is bounded rather than lossy: the fulfillment push is retried on
+      // the next open-tier sweep and re-writes the reason, so a persistent failure is
+      // still visible on the order and still reported in the run's error line. Widening
+      // this to a per-writer error column is the real fix and is deliberately NOT done
+      // here, because it is a schema change in service of a cosmetic window, and the
+      // window only opens for an order that both failed a push and gained an invoice on
+      // the same tick.
+      //
       // Attached to the drain rather than given its own schedule on purpose: the unpaid
       // tier is meant to run as often as anything runs, and the drain's ~20s tick is the
       // fastest cadence this plugin has. See `resolveReconcileCadence`.
