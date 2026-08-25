@@ -214,10 +214,8 @@ Four refusals keep it from becoming a second writer rather than a backstop:
   landed costs zero marketplace writes on every sweep after it.
 - **The shipment is younger than the grace window** (`ALLEGRO_ORDERS_RECONCILE_SENT_GRACE_MS`,
   10 min by default). The subscriber gets first refusal. Without this the sweep
-  would race it: Allegro's checkout-form view lags its own writes by tens of
-  seconds, so a re-read moments after a *successful* push still reports
-  `READY_FOR_SHIPMENT`, and the sweep would "repair" an order that was never broken
-  and report a healthy write-back as failing.
+  would race it - see the read-model lag below, which is the reason the window
+  exists at all.
 - **The order is `delivered`, `returned` or `cancelled`,** or carries a fulfillment
   status this plugin does not model. `SENT` is either rejected there or walks a
   finished order backwards.
@@ -232,6 +230,12 @@ difference from what came before, where a failed write-back left no trace at all
 The same toggle governs both paths, so disarming `fulfillment_writeback_enabled`
 stops the sweep pushing as well as the subscriber.
 
+One known, accepted wrinkle: `last_error` is a single column shared by three
+writers, so an invoice attach that succeeds on the same tick clears a `SENT` push
+failure recorded moments earlier in the same run. It is bounded rather than lossy
+- the next open-tier sweep retries the push and re-writes the reason - and the
+run's own error line reports the failure either way.
+
 **It has its own toggle**, `fulfillment_writeback_enabled`, and deliberately does
 *not* read `ordersSyncDisabled`. That switch stops the drain from consuming the
 journal, and pausing an import is a different decision from refusing to tell a
@@ -241,6 +245,24 @@ mapping, and re-arm - order import is unaffected, and there is no reconnect.
 
 One known wrinkle: a store that creates a fulfillment and a shipment in one action
 sends two updates. The second wins, which is correct but wasteful.
+
+### Allegro's read model lags its own writes, by about 45 seconds
+
+Worth knowing before you debug anything in this area, because it looks exactly
+like a failure and is not one.
+
+Measured rather than assumed: while repairing a stranded order by hand on
+2026-08-25, a `PUT /order/checkout-forms/{id}/fulfillment` returned 2xx and the
+very next `GET /order/checkout-forms/{id}` still reported `READY_FOR_SHIPMENT`.
+Only a re-read roughly 45 seconds later reported `SENT`.
+
+**A status you read back immediately after pushing it is stale, not rejected.** Do
+not retry on that reading and do not conclude the write failed - wait and re-read.
+
+It is also the whole reason the grace window above exists. Without it the sweep
+would re-read moments after a *successful* subscriber push, see
+`READY_FOR_SHIPMENT`, and "repair" an order that was never broken - reporting a
+healthy write-back as failing.
 
 ## The invoice chain
 

@@ -175,6 +175,15 @@ export const DEFAULT_RECONCILE_CADENCE: ReconcileCadence = {
   // Comfortably inside the open tier's own 15-minute gap, so the FIRST sweep that
   // sees a shipment the subscriber lost is already past the grace window rather than
   // deferring the repair by another whole interval.
+  //
+  // The floor it has to clear is Allegro's own read-model lag, and that figure is
+  // MEASURED, not guessed: repairing order 48 by hand on 2026-08-25, a
+  // `PUT /order/checkout-forms/{id}/fulfillment` that returned 2xx was followed by a
+  // `GET` of the same form that still reported `READY_FOR_SHIPMENT`. It took roughly
+  // **45 seconds** for the GET to report `SENT`. Ten minutes is that with two orders
+  // of magnitude of headroom, because the cost of being wrong is asymmetric: too long
+  // only delays a status label, while too short makes the sweep re-push every shipment
+  // the subscriber already handled.
   sentGraceMs: 600_000,
   unpaidIntervalMs: 0,
 };
@@ -432,11 +441,18 @@ export type SentPushDecision = { push: true } | { push: false; reason: string };
  *   does not model is a write it cannot reason about.
  * - **The shipment is younger than the grace window.** The subscriber gets first
  *   refusal on every shipment, and it is still the fast path. Without this the sweep
- *   would race it: Allegro's checkout-form read model lags its own writes by tens of
- *   seconds, so a form re-read moments after a successful subscriber push still
- *   reports `READY_FOR_SHIPMENT`, and the sweep would "repair" an order that was
- *   never broken. The window is what makes the sweep a retry path rather than a
- *   second writer.
+ *   would race it, because of a property of Allegro's API that is worth stating
+ *   plainly rather than leaving to be rediscovered: **`GET /order/checkout-forms/{id}`
+ *   lags the `PUT .../fulfillment` that changed it - about 45 seconds, measured while
+ *   repairing order 48 on 2026-08-25.** The PUT returned 2xx and the very next GET
+ *   still reported `READY_FOR_SHIPMENT`; only a re-read some 45s later reported
+ *   `SENT`.
+ *
+ *   Two consequences, and the second is the one that bites. A form re-read moments
+ *   after a SUCCESSFUL subscriber push still looks unsent, so without this window the
+ *   sweep would "repair" an order that was never broken and report a healthy
+ *   write-back as failing. And anyone verifying a push by reading the form straight
+ *   back will conclude it failed when it did not - do not retry on that reading.
  */
 export const decideSentPush = (input: {
   derived: DerivedOrderStatus | undefined;
