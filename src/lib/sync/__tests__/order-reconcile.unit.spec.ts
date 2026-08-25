@@ -2,6 +2,7 @@ import type { AllegroCheckoutForm } from "../../allegro/types";
 import {
   advanceReconcileMarks,
   classifyReconcileTier,
+  decideSentPush,
   DEFAULT_RECONCILE_CADENCE,
   dueReconcileTiers,
   isFullyPaid,
@@ -129,7 +130,15 @@ describe("resolveReconcileCadence", () => {
       ALLEGRO_ORDERS_RECONCILE_OPEN_INTERVAL_MS: "600000",
       ALLEGRO_ORDERS_RECONCILE_UNPAID_INTERVAL_MS: "60000",
     });
-    expect(cadence).toEqual({ batchLimit: 10, openIntervalMs: 600_000, unpaidIntervalMs: 60_000 });
+    expect(cadence).toEqual({
+      batchLimit: 10,
+      openIntervalMs: 600_000,
+      sentGraceMs: DEFAULT_RECONCILE_CADENCE.sentGraceMs,
+      unpaidIntervalMs: 60_000,
+    });
+    expect(
+      resolveReconcileCadence({ ALLEGRO_ORDERS_RECONCILE_SENT_GRACE_MS: "0" }).sentGraceMs,
+    ).toBe(0);
   });
 
   it("falls back rather than scheduling something nonsensical", () => {
@@ -146,7 +155,12 @@ describe("resolveReconcileCadence", () => {
 });
 
 describe("reconcile marks", () => {
-  const cadence = { batchLimit: 50, openIntervalMs: 900_000, unpaidIntervalMs: 0 };
+  const cadence = {
+    batchLimit: 50,
+    openIntervalMs: 900_000,
+    sentGraceMs: 600_000,
+    unpaidIntervalMs: 0,
+  };
 
   it("treats a tier that has never been swept as due", () => {
     expect([...dueReconcileTiers(1_000, {}, cadence)].sort()).toEqual(["open", "unpaid"]);
@@ -266,5 +280,90 @@ describe("planOrderPayment", () => {
     const plan = planOrderPayment({ ...facts, amount: undefined }, unpaid(), "pln");
     expect(plan).toMatchObject({ amount: 206, kind: "register" });
     expect(plan.kind === "register" && plan.shortfall).toBeUndefined();
+  });
+});
+
+describe("decideSentPush", () => {
+  const HOUR = 3_600_000;
+  const now = 1_800_000_000_000;
+  const shipped = (agoMs: number) => ({ shippedAt: new Date(now - agoMs) });
+  const grace = DEFAULT_RECONCILE_CADENCE.sentGraceMs;
+
+  it("pushes a shipped order Allegro still reports as ready for shipment", () => {
+    expect(
+      decideSentPush({ derived: "ready_for_shipment", graceMs: grace, now, shipment: shipped(HOUR) }),
+    ).toEqual({ push: true });
+  });
+
+  it("is a no-op once Allegro reports the order as sent, which is what makes a re-run free", () => {
+    // The idempotency gate. Without it every open shipped order would cost one
+    // marketplace write per sweep, forever.
+    expect(
+      decideSentPush({ derived: "sent", graceMs: grace, now, shipment: shipped(HOUR) }),
+    ).toEqual({ push: false, reason: "Allegro already reports this order as sent" });
+  });
+
+  it("pushes nothing for an order with no shipped fulfillment", () => {
+    expect(
+      decideSentPush({ derived: "ready_for_shipment", graceMs: grace, now, shipment: {} }).push,
+    ).toBe(false);
+    expect(
+      decideSentPush({
+        derived: "ready_for_shipment",
+        graceMs: grace,
+        now,
+        shipment: undefined,
+      }).push,
+    ).toBe(false);
+  });
+
+  it("leaves the subscriber the first crack at a fresh shipment", () => {
+    // The anti-race guard. Allegro's checkout-form read model lags its own writes, so a
+    // sweep moments after a SUCCESSFUL subscriber push still sees READY_FOR_SHIPMENT and
+    // would "repair" an order that was never broken.
+    const decision = decideSentPush({
+      derived: "ready_for_shipment",
+      graceMs: grace,
+      now,
+      shipment: shipped(30_000),
+    });
+    expect(decision.push).toBe(false);
+    expect(decision.push === false && decision.reason).toContain("subscriber owns the first");
+  });
+
+  it("takes over once the grace window has passed", () => {
+    expect(
+      decideSentPush({
+        derived: "ready_for_shipment",
+        graceMs: grace,
+        now,
+        shipment: shipped(grace),
+      }),
+    ).toEqual({ push: true });
+  });
+
+  it("never walks a finished order backwards", () => {
+    for (const status of TERMINAL_DERIVED_STATUSES) {
+      expect(
+        decideSentPush({ derived: status, graceMs: grace, now, shipment: shipped(HOUR) }).push,
+      ).toBe(false);
+    }
+  });
+
+  it("refuses a fulfillment status this plugin does not model rather than guessing", () => {
+    // `mapCheckoutFormStatus` returns undefined for a status Allegro added after this
+    // code was written. Writing SENT on top of a state we cannot reason about is exactly
+    // the guess the mapper refuses to make.
+    expect(
+      decideSentPush({ derived: undefined, graceMs: grace, now, shipment: shipped(HOUR) }).push,
+    ).toBe(false);
+  });
+
+  it("pushes an order still earlier on the ladder, because the shipment is the fact", () => {
+    // A store that ships before Allegro has moved the order along. Medusa says a parcel
+    // left; that is the truth to report, and it is what the subscriber would have said.
+    expect(
+      decideSentPush({ derived: "processing", graceMs: grace, now, shipment: shipped(HOUR) }),
+    ).toEqual({ push: true });
   });
 });

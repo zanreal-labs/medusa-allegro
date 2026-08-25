@@ -48,6 +48,14 @@ export default async function allegroOrdersSyncJob(container: MedusaContainer): 
       result.reconcileReservations > 0
         ? `, reservationsCreated: ${result.reconcileReservations}`
         : ""
+    }${
+      // Conditional for the same reason, and non-zero for a sharper one: a `SENT` the
+      // sweep had to push is a `shipment.created` the subscriber failed to deliver.
+      result.fulfillmentsPushed > 0 ? `, fulfillmentsPushed: ${result.fulfillmentsPushed}` : ""
+    }${
+      result.fulfillmentPushFailures > 0
+        ? `, fulfillmentPushFailures: ${result.fulfillmentPushFailures}`
+        : ""
     }`,
   );
   if (result.error) {

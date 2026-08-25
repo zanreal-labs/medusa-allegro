@@ -67,11 +67,23 @@ export interface OrdersSyncResult extends OrdersSyncSummary {
    * "No stock reservation found for item ordli_..." and now accepts.
    */
   reconcileReservations: number;
+  /**
+   * Shipped orders the sweep told Allegro about, because the subscriber had not.
+   *
+   * Not counted as a `reconcileRepaired`: a repair there means an ALLEGRO event was
+   * lost, and this means one of OUR writes to Allegro was. Different fault, different
+   * place to look.
+   */
+  fulfillmentsPushed: number;
+  /** Shipped orders whose `SENT` push was attempted this run and failed. */
+  fulfillmentPushFailures: number;
 }
 
 export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
   ...emptyOrdersSyncSummary(),
   created: 0,
+  fulfillmentPushFailures: 0,
+  fulfillmentsPushed: 0,
   invoiceAttachFailures: 0,
   invoicesAttached: 0,
   reconciled: 0,
@@ -125,6 +137,20 @@ const buildOrdersError = (result: OrdersSyncResult): string | null => {
           ? `, including ${result.reconcilePayments} whose payment had never been recorded`
           : ""
       }; each is an order event that was lost or never arrived`,
+    );
+  }
+  if (result.fulfillmentsPushed > 0) {
+    // A finding, like the reconcile repair above, and read the same way: the order is
+    // right now, but it took the sweep to get there. The `shipment.created` subscriber
+    // is what should have told Allegro at the moment of shipment, so a run of these
+    // means the write-back is failing rather than that Allegro is losing events.
+    parts.push(
+      `${result.fulfillmentsPushed} shipped order(s) were set to SENT on Allegro by the reconciliation sweep rather than by the shipment.created subscriber; each is a write-back that never landed and a buyer who was reading a stale status`,
+    );
+  }
+  if (result.fulfillmentPushFailures > 0) {
+    parts.push(
+      `${result.fulfillmentPushFailures} shipped order(s) could still not be set to SENT on Allegro; each row carries the reason and the next sweep retries`,
     );
   }
   if (result.invoiceAttachFailures > 0) {
@@ -242,6 +268,8 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
       result.reconcilePayments = reconciled.paymentsRegistered;
       result.reconcileRepaired = reconciled.repaired;
       result.reconcileReservations = reconciled.reservationsCreated;
+      result.fulfillmentPushFailures = reconciled.fulfillmentPushFailures;
+      result.fulfillmentsPushed = reconciled.fulfillmentsPushed;
 
       // AFTER the drain, in the same claim. Attaching writes to the same rows the drain
       // does, so it belongs under the same single-flight lock; running it second means a

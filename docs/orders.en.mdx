@@ -182,15 +182,55 @@ A subscriber on `order.fulfillment_created` and `shipment.created` sets Allegro'
 seller-managed status - `READY_FOR_SHIPMENT` and `SENT` respectively - for
 Allegro-sourced orders. It is a no-op for any other order.
 
-It is the one part of this plugin that is event-driven rather than reconciled, and
-that is structural rather than convenient: a fulfillment is a point-in-time act,
-not reconcilable state. There is no "current fulfillment status" in Medusa for a
-sweep to compare against Allegro's, so the event is the only signal there is.
+The event is the fast path, and it is the only thing that reports a fulfillment
+*promptly*. But it is no longer the only signal, and that correction matters: a
+fulfillment is a point-in-time act, yet "this order has a fulfillment that has
+shipped" is ordinary durable state sitting on `fulfillment.shipped_at`. The
+reconciliation sweep compares exactly that against the status Allegro reports.
 
 **It never throws.** The Medusa fulfillment already exists by the time it runs, so
 failing the subscriber would not undo it and would bury the reason. The error is
-recorded on `allegro_order.last_error` instead, and an operator can set the status
-by hand on Allegro.
+recorded on `allegro_order.last_error` instead.
+
+### The sweep is the retry path
+
+The subscriber fires once per shipment. Until 2026-08-23 that was the only attempt
+there ever was, and a live order proved what that costs: the write-back failed, the
+buyer had their licence key, and the Allegro order read `READY_FOR_SHIPMENT` for
+three days with nothing anywhere saying why.
+
+So the reconciliation sweep - which already re-reads every open Allegro order, on
+the slow tier - gained one more comparison. **No new schedule was added**, and none
+is wanted: this rides the sweep that already runs.
+
+For each open order it re-reads, if Medusa has a live fulfillment with `shipped_at`
+set and the form Allegro just returned is not `SENT`, it pushes `SENT` through
+`pushAllegroFulfillment` - the subscriber's own workflow, not a second way to write
+a fulfillment status.
+
+Four refusals keep it from becoming a second writer rather than a backstop:
+
+- **Allegro already says `SENT`.** The idempotency gate. An order whose write-back
+  landed costs zero marketplace writes on every sweep after it.
+- **The shipment is younger than the grace window** (`ALLEGRO_ORDERS_RECONCILE_SENT_GRACE_MS`,
+  10 min by default). The subscriber gets first refusal. Without this the sweep
+  would race it: Allegro's checkout-form view lags its own writes by tens of
+  seconds, so a re-read moments after a *successful* push still reports
+  `READY_FOR_SHIPMENT`, and the sweep would "repair" an order that was never broken
+  and report a healthy write-back as failing.
+- **The order is `delivered`, `returned` or `cancelled`,** or carries a fulfillment
+  status this plugin does not model. `SENT` is either rejected there or walks a
+  finished order backwards.
+- **Nothing shipped.** A cancelled fulfillment is not a shipment and is ignored.
+
+A push the sweep makes is logged at `warn` and reported on the job line as
+`fulfillmentsPushed`, because it means the subscriber's write never landed. A push
+that *fails* is counted as `fulfillmentPushFailures`, carries its reason on
+`allegro_order.last_error`, and is retried by the next sweep - which is the whole
+difference from what came before, where a failed write-back left no trace at all.
+
+The same toggle governs both paths, so disarming `fulfillment_writeback_enabled`
+stops the sweep pushing as well as the subscriber.
 
 **It has its own toggle**, `fulfillment_writeback_enabled`, and deliberately does
 *not* read `ordersSyncDisabled`. That switch stops the drain from consuming the
