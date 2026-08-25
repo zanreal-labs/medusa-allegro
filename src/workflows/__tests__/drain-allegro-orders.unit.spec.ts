@@ -483,6 +483,20 @@ const setup = (input: {
   medusaOrderItems?: Record<string, Record<string, unknown>[]>;
   /** Reservations already held, by line item id. Absent is the incident's own shape. */
   existingReservations?: Record<string, unknown>[];
+  /**
+   * Medusa fulfillments behind an order, by order id, as the batched shipment read sees
+   * them.
+   *
+   * This is the fact the fulfillment write-back's retry path compares against: a
+   * `shipped_at` that is set while Allegro still reports `READY_FOR_SHIPMENT` is the
+   * stranded order of 2026-08-23.
+   */
+  medusaOrderFulfillments?: Record<
+    string,
+    { shipped_at?: string | null; canceled_at?: string | null }[]
+  >;
+  /** Disarm the fulfillment write-back, as the admin toggle does. */
+  fulfillmentWritebackDisabled?: boolean;
   /** Unregister the payment module, as a store with no `STRIPE_API_KEY` has it. */
   noPaymentModule?: boolean;
   /** Leave the event bus unregistered, so the never-fatal emit path is exercised. */
@@ -509,6 +523,7 @@ const setup = (input: {
   const allegro = fakeAllegroService({
     claimLost: input.claimLost,
     client,
+    fulfillmentWritebackDisabled: input.fulfillmentWritebackDisabled,
     ordersSyncDisabled: input.ordersSyncDisabled,
     states: input.states ?? [],
     syncOptions: { salesChannelId: "sc_allegro" },
@@ -614,10 +629,15 @@ const setup = (input: {
                     .filter(
                       (id) =>
                         input.medusaOrderTotals?.[id] !== undefined ||
-                        input.paymentCollections?.[id] !== undefined,
+                        input.paymentCollections?.[id] !== undefined ||
+                        input.medusaOrderFulfillments?.[id] !== undefined,
                     )
                     .map((id) => ({
                       id,
+                      // Both batched reads - payments and shipments - come through this
+                      // one branch, because both ask for a list of order ids. Answering
+                      // both from the same row is what the real query graph does too.
+                      fulfillments: input.medusaOrderFulfillments?.[id] ?? [],
                       payment_collections: input.paymentCollections?.[id] ?? [],
                       ...input.medusaOrderTotals?.[id],
                     })),
@@ -2779,6 +2799,194 @@ describe("drainAllegroOrders: the reconciliation sweep", () => {
     expect(result.reconciled).toBe(0);
     // The payment was still recorded - by the drain's own pass, which is the point.
     expect(coreFlows.markedPaid).toHaveLength(1);
+  });
+});
+
+describe("drainAllegroOrders: the fulfillment write-back has a retry path", () => {
+  /**
+   * The incident of 2026-08-23, order 48 / `ful_01M0PWKVWHGGRJB7DFVXN1YZVJ`.
+   *
+   * The buyer had their licence key. Medusa had a shipped fulfillment. The
+   * `shipment.created` subscriber ran against the pre-#14 handler, could not resolve an
+   * order id from a payload that carries only a fulfillment id, and returned in silence -
+   * writing nothing, anywhere. The Allegro order read `READY_FOR_SHIPMENT` for three days
+   * and nothing in this plugin would ever have looked at it again.
+   *
+   * #14 fixed the resolution. These cover the second half: that a write-back which fails
+   * for ANY reason is retried, by the sweep that already re-reads every open order, with
+   * no new schedule.
+   */
+  const quiet = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      pages: [[]],
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+      ...input,
+    });
+
+  const HOUR_AGO = new Date(Date.now() - 3_600_000).toISOString();
+
+  /** A paid form Allegro still reports as awaiting shipment. */
+  const readyForShipment = (id: string) =>
+    form({
+      fulfillment: { status: "READY_FOR_SHIPMENT" },
+      id,
+      payment: {
+        finishedAt: "2026-08-22T18:18:40.000Z",
+        paidAmount: { amount: "412.97", currency: "PLN" },
+        type: "ONLINE",
+      },
+    });
+
+  const strandedOrder = (over: Partial<Parameters<typeof setup>[0]> = {}) =>
+    quiet({
+      forms: [readyForShipment("f1")],
+      medusaOrderFulfillments: { order_1: [{ shipped_at: HOUR_AGO }] },
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "ready_for_shipment",
+          id: "algorder_1",
+          medusa_order_id: "order_1",
+        },
+      ],
+      paymentCollections: { order_1: [{ captured_amount: 412.97 }] },
+      ...over,
+    });
+
+  it("sets a stranded shipped order to SENT, through the subscriber's own workflow", async () => {
+    const context = strandedOrder();
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    // The marketplace write, and it went through `updateCheckoutFormFulfillment` - the
+    // one path this plugin has for a fulfillment status - not a hand-rolled call.
+    expect(context.client.fulfillmentCalls).toEqual([{ id: "f1", status: "SENT" }]);
+    expect(result.fulfillmentsPushed).toBe(1);
+    expect(result.fulfillmentPushFailures).toBe(0);
+    // Not folded into `reconcileRepaired`: that counter means an ALLEGRO event was lost,
+    // and this means one of OUR writes was.
+    expect(result.reconcileRepaired).toBe(0);
+    expect(result.error).toMatch(/were set to SENT on Allegro by the reconciliation sweep/);
+    expect(
+      context.logs.some((line) => line.includes("the buyer was reading a stale status")),
+    ).toBe(true);
+  });
+
+  it("is a no-op on an order Allegro already reports as sent", async () => {
+    // Idempotency, and the reason this can run on every open-tier tick: an order whose
+    // write-back landed costs zero marketplace writes forever after.
+    const context = strandedOrder({
+      forms: [form({ fulfillment: { status: "SENT" }, id: "f1" })],
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "sent",
+          id: "algorder_1",
+          medusa_order_id: "order_1",
+        },
+      ],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(context.client.fulfillmentCalls).toEqual([]);
+    expect(result.fulfillmentsPushed).toBe(0);
+    expect(result.error ?? null).toBeNull();
+  });
+
+  it("leaves a shipment the subscriber is still handling alone", async () => {
+    // The anti-race guard. A sweep seconds after a SUCCESSFUL subscriber push still reads
+    // READY_FOR_SHIPMENT from Allegro, whose checkout-form view lags its own writes - so
+    // without the grace window the sweep would "repair" an order that was never broken,
+    // and report a healthy write-back as failing.
+    const context = strandedOrder({
+      medusaOrderFulfillments: { order_1: [{ shipped_at: new Date().toISOString() }] },
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(context.client.fulfillmentCalls).toEqual([]);
+    expect(result.fulfillmentsPushed).toBe(0);
+    // The order was still re-read by the sweep; only the push was withheld.
+    expect(result.reconciled).toBe(1);
+  });
+
+  it("pushes nothing for an order that has not shipped", async () => {
+    const context = strandedOrder({
+      medusaOrderFulfillments: { order_1: [{ shipped_at: null }] },
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(context.client.fulfillmentCalls).toEqual([]);
+    expect(result.fulfillmentsPushed).toBe(0);
+  });
+
+  it("ignores a cancelled fulfillment, which is not a shipment", async () => {
+    const context = strandedOrder({
+      medusaOrderFulfillments: {
+        order_1: [{ canceled_at: HOUR_AGO, shipped_at: HOUR_AGO }],
+      },
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(context.client.fulfillmentCalls).toEqual([]);
+    expect(result.fulfillmentsPushed).toBe(0);
+  });
+
+  it("respects the write-back kill switch", async () => {
+    const context = strandedOrder({ fulfillmentWritebackDisabled: true });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(context.client.fulfillmentCalls).toEqual([]);
+    expect(result.fulfillmentsPushed).toBe(0);
+    // Still swept - the switch stops the marketplace write, not the reconciliation.
+    expect(result.reconciled).toBe(1);
+  });
+
+  it("records a rejected push on the order row instead of swallowing it", async () => {
+    // The audit's finding, and the property that makes this a retry path rather than a
+    // second silent writer: a failure has to be READABLE afterwards.
+    const context = strandedOrder({ fulfillmentError: new Error("Allegro said no") });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.fulfillmentPushFailures).toBe(1);
+    expect(result.fulfillmentsPushed).toBe(0);
+    const row = context.table.rows.find((entry) => entry.id === "algorder_1");
+    expect(row?.last_error).toMatch(/Allegro said no/);
+    // And on the job's own summary line, so it is visible without opening the order.
+    expect(result.error).toMatch(/could still not be set to SENT/);
+  });
+
+  it("does not re-push an order the drain applied on this same tick", async () => {
+    // The sweep skips forms the drain just applied, so the subscriber and the sweep can
+    // never both act on one shipment within a tick.
+    const context = setup({
+      forms: [readyForShipment("f1")],
+      medusaOrderFulfillments: { order_1: [{ shipped_at: HOUR_AGO }] },
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "ready_for_shipment",
+          id: "algorder_1",
+          medusa_order_id: "order_1",
+        },
+      ],
+      pages: [[event("e1", "f1")]],
+      paymentCollections: { order_1: [{ captured_amount: 412.97 }] },
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.reconciled).toBe(0);
+    expect(result.fulfillmentsPushed).toBe(0);
+    expect(context.client.fulfillmentCalls).toEqual([]);
   });
 });
 

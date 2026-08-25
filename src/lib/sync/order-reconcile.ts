@@ -162,11 +162,20 @@ export interface ReconcileCadence {
   openIntervalMs: number;
   /** Maximum rows re-read per sweep. */
   batchLimit: number;
+  /**
+   * How long a shipped Medusa fulfillment is left to the subscriber before the sweep
+   * takes it over. See `shouldPushSent`.
+   */
+  sentGraceMs: number;
 }
 
 export const DEFAULT_RECONCILE_CADENCE: ReconcileCadence = {
   batchLimit: 50,
   openIntervalMs: 900_000,
+  // Comfortably inside the open tier's own 15-minute gap, so the FIRST sweep that
+  // sees a shipment the subscriber lost is already past the grace window rather than
+  // deferring the repair by another whole interval.
+  sentGraceMs: 600_000,
   unpaidIntervalMs: 0,
 };
 
@@ -195,6 +204,10 @@ export const resolveReconcileCadence = (
   openIntervalMs: readInterval(
     env.ALLEGRO_ORDERS_RECONCILE_OPEN_INTERVAL_MS,
     DEFAULT_RECONCILE_CADENCE.openIntervalMs,
+  ),
+  sentGraceMs: readInterval(
+    env.ALLEGRO_ORDERS_RECONCILE_SENT_GRACE_MS,
+    DEFAULT_RECONCILE_CADENCE.sentGraceMs,
   ),
   unpaidIntervalMs: readInterval(
     env.ALLEGRO_ORDERS_RECONCILE_UNPAID_INTERVAL_MS,
@@ -374,4 +387,91 @@ export const planOrderPayment = (
     kind: "register",
     ...(shortfall ? { shortfall } : {}),
   };
+};
+
+/**
+ * What Medusa knows about the shipment behind one Allegro order.
+ *
+ * The fact the fulfillment write-back was missing. `shipment.created` is a
+ * point-in-time event, but "this order has a fulfillment that has shipped" is
+ * ordinary reconcilable state sitting on `fulfillment.shipped_at` - which is what
+ * makes a sweep possible at all, and why the write-back no longer has to be
+ * event-only.
+ */
+export interface ShipmentState {
+  /** The newest `shipped_at` across the order's live (non-cancelled) fulfillments. */
+  shippedAt?: Date;
+}
+
+/** Whether this sweep should push `SENT`, and why not when it should not. */
+export type SentPushDecision = { push: true } | { push: false; reason: string };
+
+/**
+ * Decide whether the reconciliation sweep should tell Allegro an order has shipped.
+ *
+ * The condition is the one the audit named: a Medusa fulfillment has shipped, and
+ * `allegro_order.derived_status` is not `sent`. The `derived` argument is the status
+ * mapped from the checkout form THIS SWEEP JUST READ, not the column as it stood
+ * before - the sweep re-applies the form first, so the column and this value agree,
+ * and using the fresh reading means an order Allegro already moved to `SENT` between
+ * ticks is recognised without a second database read.
+ *
+ * Four refusals, each protecting something:
+ *
+ * - **Nothing shipped.** The only positive evidence there is. A fulfillment that was
+ *   created but never shipped is `READY_FOR_SHIPMENT` on Allegro, which is where the
+ *   order already is.
+ * - **Allegro already says `sent`.** This is the idempotency gate, and it is what
+ *   makes a re-run of the sweep cost zero marketplace writes rather than one per
+ *   tick per shipped order.
+ * - **The ladder has moved past shipping, or off it.** `delivered`, `returned` and
+ *   `cancelled` are terminal; pushing `SENT` onto one would either be rejected or
+ *   walk a finished order backwards. An unmappable status (`undefined`) is refused
+ *   for the same reason the status mapper returns it rather than guessing: Allegro
+ *   adds fulfillment statuses over time, and a write built on a state this plugin
+ *   does not model is a write it cannot reason about.
+ * - **The shipment is younger than the grace window.** The subscriber gets first
+ *   refusal on every shipment, and it is still the fast path. Without this the sweep
+ *   would race it: Allegro's checkout-form read model lags its own writes by tens of
+ *   seconds, so a form re-read moments after a successful subscriber push still
+ *   reports `READY_FOR_SHIPMENT`, and the sweep would "repair" an order that was
+ *   never broken. The window is what makes the sweep a retry path rather than a
+ *   second writer.
+ */
+export const decideSentPush = (input: {
+  derived: DerivedOrderStatus | undefined;
+  shipment: ShipmentState | undefined;
+  now: number;
+  graceMs: number;
+}): SentPushDecision => {
+  const shippedAt = input.shipment?.shippedAt;
+  if (!shippedAt) {
+    return { push: false, reason: "no Medusa fulfillment for this order has shipped" };
+  }
+  if (input.derived === "sent") {
+    return { push: false, reason: "Allegro already reports this order as sent" };
+  }
+  if (!input.derived) {
+    return {
+      push: false,
+      reason:
+        "Allegro reports a fulfillment status this plugin does not model, so SENT is not a safe write",
+    };
+  }
+  if (TERMINAL_DERIVED_STATUSES.has(input.derived)) {
+    return {
+      push: false,
+      reason: `the order has reached ${input.derived}, which is the end of the ladder`,
+    };
+  }
+  const age = input.now - shippedAt.getTime();
+  if (age < input.graceMs) {
+    return {
+      push: false,
+      reason: `the shipment is ${Math.round(age / 1000)}s old and the write-back subscriber owns the first ${Math.round(
+        input.graceMs / 1000,
+      )}s`,
+    };
+  }
+  return { push: true };
 };

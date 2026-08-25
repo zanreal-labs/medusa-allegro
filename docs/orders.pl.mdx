@@ -191,15 +191,56 @@ zarządzany przez sprzedawcę status Allegro - odpowiednio `READY_FOR_SHIPMENT` 
 `SENT` - dla zamówień pochodzących z Allegro. Dla każdego innego zamówienia nic nie
 robi.
 
-To jedyny fragment tej wtyczki sterowany zdarzeniem, a nie uzgadnianiem, i wynika to
-ze struktury, a nie z wygody: realizacja jest aktem w punkcie czasu, a nie stanem,
-który da się uzgodnić. W Medusie nie ma „bieżącego statusu realizacji”, który
-przejście mogłoby porównać z tym w Allegro, więc zdarzenie to jedyny dostępny sygnał.
+Zdarzenie jest szybką ścieżką i tylko ono melduje wysyłkę *od razu*. Nie jest już
+jednak jedynym sygnałem - i ta poprawka ma znaczenie. Realizacja rzeczywiście jest
+aktem w punkcie czasu, ale zdanie „to zamówienie ma realizację, która wyszła” to
+zwyczajny, trwały stan zapisany w `fulfillment.shipped_at`. Przejście uzgadniające
+porównuje dokładnie to z tym, co raportuje Allegro.
 
 **Nigdy nie rzuca wyjątkiem.** Realizacja w Medusie w chwili jego uruchomienia już
 istnieje, więc wywrócenie subskrybenta jej nie cofnie, a pogrzebie powód. Błąd trafia
-zamiast tego do `allegro_order.last_error`, a operator może ustawić status ręcznie na
-Allegro.
+zamiast tego do `allegro_order.last_error`.
+
+### Przejście uzgadniające jako ponowienie
+
+Subskrybent odpala się raz na przesyłkę. Do 23 sierpnia 2026 była to jedyna próba,
+jaka w ogóle istniała, i pewne prawdziwe zamówienie pokazało, ile to kosztuje: zapis
+zwrotny się nie udał, kupujący miał już swój klucz licencyjny, a zamówienie na Allegro
+przez trzy dni pokazywało `READY_FOR_SHIPMENT` - i nigdzie ani słowa dlaczego.
+
+Dlatego przejście uzgadniające - które i tak odczytuje ponownie każde otwarte
+zamówienie Allegro na wolnej ścieżce - dostało jedno dodatkowe porównanie. **Nie
+doszedł żaden nowy harmonogram** i nie jest potrzebny: to jedzie na przejściu, które
+już chodzi.
+
+Dla każdego otwartego zamówienia, które odczytuje ponownie: jeśli w Medusie jest żywa
+realizacja z ustawionym `shipped_at`, a formularz zwrócony przed chwilą przez Allegro
+nie jest `SENT`, wysyła `SENT` przez `pushAllegroFulfillment` - czyli przez ten sam
+przepływ, z którego korzysta subskrybent, a nie przez drugi sposób zapisu statusu.
+
+Cztery odmowy pilnują, żeby to zostało zabezpieczeniem, a nie drugim piszącym:
+
+- **Allegro już mówi `SENT`.** Bramka idempotencji. Zamówienie, którego zapis zwrotny
+  doszedł, nie kosztuje ani jednego zapisu do marketplace'u przy kolejnych przejściach.
+- **Przesyłka jest młodsza niż okno karencji** (`ALLEGRO_ORDERS_RECONCILE_SENT_GRACE_MS`,
+  domyślnie 10 minut). Pierwszeństwo ma subskrybent. Bez tego przejście ścigałoby się
+  z nim: widok formularza zakupowego w Allegro jest opóźniony wobec własnych zapisów
+  o dziesiątki sekund, więc odczyt chwilę po *udanym* wysłaniu wciąż pokazuje
+  `READY_FOR_SHIPMENT` - a przejście „naprawiłoby” zamówienie, które nigdy nie było
+  zepsute, i zaraportowało zdrowy zapis zwrotny jako awarię.
+- **Zamówienie jest `delivered`, `returned` albo `cancelled`,** albo niesie status
+  realizacji, którego ta wtyczka nie modeluje. `SENT` zostanie tam albo odrzucone,
+  albo cofnie zakończone zamówienie o krok wstecz.
+- **Nic nie wyszło.** Anulowana realizacja nie jest przesyłką i jest pomijana.
+
+Wysłanie wykonane przez przejście trafia do logu na poziomie `warn` i na linię zadania
+jako `fulfillmentsPushed`, bo oznacza, że zapis subskrybenta nigdy nie doszedł.
+Nieudane wysłanie liczy się jako `fulfillmentPushFailures`, niesie swój powód
+w `allegro_order.last_error` i jest ponawiane przy kolejnym przejściu - i to jest cała
+różnica wobec stanu sprzed, gdzie nieudany zapis zwrotny nie zostawiał żadnego śladu.
+
+Oba przejścia rządzi ten sam przełącznik, więc wyłączenie `fulfillment_writeback_enabled`
+zatrzymuje wysyłanie zarówno z przejścia, jak i z subskrybenta.
 
 **Ma własny przełącznik**, `fulfillment_writeback_enabled`, i celowo *nie* czyta
 `ordersSyncDisabled`. Tamten wyłącznik zatrzymuje konsumowanie dziennika przez
