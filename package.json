@@ -12,7 +12,7 @@
     "plugin",
     "poland"
   ],
-  "homepage": "https://github.com/zanreal-labs/medusa-allegro#readme",
+  "homepage": "https://zanreal.com/docs/oss/medusa-allegro",
   "bugs": {
     "url": "https://github.com/zanreal-labs/medusa-allegro/issues"
   },
@@ -30,7 +30,7 @@
     ".medusa/server"
   ],
   "dependencies": {
-    "@zanreal/medusa-admin-kit": "github:zanreal-labs/medusa-admin-kit#45cbdc3beb5c50b32ba50b487ed81b22e299359e"
+    "@zanreal/medusa-admin-kit": "^0.1.0"
   },
   "exports": {
     "./package.json": "./package.json",
