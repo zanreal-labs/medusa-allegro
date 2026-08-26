@@ -30,7 +30,7 @@
     ".medusa/server"
   ],
   "dependencies": {
-    "@zanreal/medusa-admin-kit": "github:zanreal-labs/medusa-admin-kit#45cbdc3beb5c50b32ba50b487ed81b22e299359e"
+    "@zanreal/medusa-admin-kit": "^0.1.0"
   },
   "exports": {
     "./package.json": "./package.json",
