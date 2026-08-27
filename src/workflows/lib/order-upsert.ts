@@ -20,6 +20,8 @@ import { parseAmount } from "../../lib/sync/money";
 import type { AmountInput } from "../../lib/sync/money";
 import { planOrderPayment, readPaymentFacts } from "../../lib/sync/order-reconcile";
 import { nameOrderCustomer } from "./order-customer";
+import { planOrderAddressRepair } from "../../lib/sync/order-address";
+import { repairOrderAddresses } from "./order-address";
 import { emitOrderPlaced } from "./order-placed-event";
 import { readOrderPaymentState, registerOrderPayment } from "./order-payment";
 import { ensureOrderReservations } from "./order-reservations";
@@ -237,6 +239,14 @@ export interface ApplyFormResult {
    * was lost, and the sweep's repair counter means the latter.
    */
   customerNamed?: boolean;
+  /**
+   * True when this pass filled an address the order was created without.
+   *
+   * Reported separately and never folded into `statusChanged`, for the same reason
+   * `customerNamed` is: it is this plugin catching up with a form the buyer finished
+   * after we read it, not evidence that an Allegro event was lost.
+   */
+  addressRepaired?: boolean;
   /**
    * True when this pass emitted `order.placed` for a newly created order.
    *
@@ -581,6 +591,19 @@ interface MedusaOrderSnapshot {
    * whereas a second `query.graph` per form would not be.
    */
   customer?: CustomerNameRow;
+  /**
+   * Whether the order already has each address, for the address fill.
+   *
+   * Carried on this read for the same reason the customer columns are: the fill has
+   * to know which addresses are already set before it can decide to write either,
+   * and a second `query.graph` per form to learn two booleans would not be free.
+   *
+   * Only their PRESENCE is read, never their contents. The decision is "is this
+   * absent", never "does this differ" - an address already on the order is left
+   * alone even when Allegro's copy differs, because a human may have corrected it.
+   */
+  hasShippingAddress: boolean;
+  hasBillingAddress: boolean;
 }
 
 const readMedusaOrder = async (
@@ -601,6 +624,8 @@ const readMedusaOrder = async (
         "customer.first_name",
         "customer.last_name",
         "customer.company_name",
+        "shipping_address.id",
+        "billing_address.id",
       ],
       filters: { id: medusaOrderId },
     });
@@ -612,6 +637,8 @@ const readMedusaOrder = async (
     return {
       currency: (order.currency_code as string | null)?.trim().toLowerCase() || undefined,
       ...(customer?.id ? { customer } : {}),
+      hasBillingAddress: Boolean((order.billing_address as { id?: string } | null)?.id),
+      hasShippingAddress: Boolean((order.shipping_address as { id?: string } | null)?.id),
       status: (order.status as string | null) ?? undefined,
       // NOT cast to a scalar: `order.total` is a Medusa `BigNumber` instance, and the
       // scalar cast is what hid that. `parseAmount` reads the object directly.
@@ -902,6 +929,37 @@ export const applyCheckoutForm = async (
     customerNamed = outcome.named;
   }
 
+  // Step 3e: the order's addresses.
+  //
+  // Same shape and same reason as the customer name above, and run on EVERY pass for
+  // the same reason: an order created from a checkout form the buyer had not finished
+  // has no address, and nothing else ever writes one - addresses are set only inside
+  // `createOrderWorkflow`. Without this the order stays address-less forever and
+  // cannot be invoiced, which is what happened to order #49.
+  //
+  // Gap only. An address already on the order is never touched, even if Allegro's
+  // copy differs; see `planOrderAddressRepair`.
+  //
+  // Like the name fill, a failure here deliberately does NOT set `lastError`: a
+  // missing address is not a reason to hold the event cursor and stall every later
+  // order behind it.
+  let addressRepaired = false;
+  if (medusaOrderId && snapshot) {
+    const outcome = await repairOrderAddresses(
+      container,
+      logger,
+      medusaOrderId,
+      planOrderAddressRepair(
+        { billingAddress: view.billingAddress, shippingAddress: view.shippingAddress },
+        {
+          hasBillingAddress: snapshot.hasBillingAddress,
+          hasShippingAddress: snapshot.hasShippingAddress,
+        },
+      ),
+    );
+    addressRepaired = outcome.repaired;
+  }
+
   // Step 3b: reconcile the money. Read-only, and never a reason to withhold the order.
   // `undefined` clears any conflict a previous pass recorded, so a repaired order stops being
   // reported without needing its own action.
@@ -985,6 +1043,7 @@ export const applyCheckoutForm = async (
   return {
     conflicts,
     created,
+    addressRepaired,
     customerNamed,
     medusaOrderId,
     orderPlacedEmitted,

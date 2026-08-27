@@ -79,6 +79,15 @@ export interface ReconcileSweepResult {
    */
   customersNamed: number;
   /**
+   * Orders whose address was filled from a checkout form the buyer finished after
+   * the order was created.
+   *
+   * Counted apart from `repaired` for the same reason `customersNamed` is: the drain
+   * did nothing wrong - there was no address to write when it ran - so this says
+   * nothing about whether the event journal is working.
+   */
+  addressesRepaired: number;
+  /**
    * Inventory reservations created this sweep.
    *
    * Counted apart from `repaired` for the same reason `customersNamed` is: an Allegro
@@ -115,6 +124,7 @@ export interface ReconcileSweepResult {
 
 const emptySweep = (marks: ReconcileMarks): ReconcileSweepResult => ({
   checked: 0,
+  addressesRepaired: 0,
   customersNamed: 0,
   failed: 0,
   fulfillmentPushFailures: 0,
@@ -326,6 +336,18 @@ export const sweepOpenAllegroOrders = async (
           `[allegro-orders] reconciliation named the customer behind checkout form ${row.checkout_form_id} (Medusa order ${
             applied.medusaOrderId ?? "none"
           }), which was created before the order pipeline wrote customer names. No manual repair is needed for the rest.`,
+        );
+      }
+      if (applied.addressRepaired) {
+        // INFO, not WARN, and not counted as a repair - same as `customersNamed`. The
+        // order was created from a checkout form the buyer had not finished, so there
+        // was no address to write at the time. Nothing about the event journal is
+        // implicated, and the order can now be invoiced.
+        result.addressesRepaired += 1;
+        logger.info(
+          `[allegro-orders] reconciliation filled the address on checkout form ${row.checkout_form_id} (Medusa order ${
+            applied.medusaOrderId ?? "none"
+          }), which was created before the buyer finished the form. Its invoice can now be issued.`,
         );
       }
       if ((applied.reservationsCreated ?? 0) > 0) {
