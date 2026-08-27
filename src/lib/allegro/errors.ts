@@ -97,3 +97,68 @@ export class AllegroApiError extends Error {
     return this.httpStatus === 403;
   }
 }
+
+/**
+ * A human-readable description of anything that was thrown.
+ *
+ * `error instanceof Error ? error.message : String(error)` is the idiom used all
+ * over this plugin, and it has one hole that cost real time: a thrown value that
+ * is an object but not an `Error` renders as the literal string `[object Object]`,
+ * which names nothing and is indistinguishable from a bug in the logger.
+ *
+ * That is not hypothetical. `updateOrderWorkflow` rejected an address repair on
+ * 2026-08-27 and the failure reached the log as:
+ *
+ *   could not fill shipping_address, billing_address on Medusa order ...: [object Object]
+ *
+ * The cause had to be found by reading Medusa's source instead. So this handles
+ * every shape rather than the two common ones: an `Error` (including subclasses
+ * that fail a cross-realm `instanceof`), an object carrying a `message`, a
+ * workflow rejection carrying `errors[]`, and anything else via a JSON attempt
+ * that cannot itself throw.
+ */
+export const describeError = (error: unknown): string => {
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+
+    // Medusa's workflow engine rejects with `{ errors: [{ error }] }` rather than
+    // with the underlying error itself, so the useful message is one level in.
+    const nested = Array.isArray(record.errors) ? record.errors : undefined;
+    if (nested?.length) {
+      const inner = nested
+        .map((entry) => {
+          const wrapped = (entry as { error?: unknown })?.error ?? entry;
+          return describeError(wrapped);
+        })
+        .filter(Boolean)
+        .join("; ");
+      if (inner) {
+        return inner;
+      }
+    }
+
+    // Covers a subclass whose prototype chain does not survive a realm boundary,
+    // which is exactly how a MedusaError can fail `instanceof Error`.
+    if (typeof record.message === "string" && record.message) {
+      return record.code ? `${record.message} (${String(record.code)})` : record.message;
+    }
+
+    try {
+      const json = JSON.stringify(error);
+      if (json && json !== "{}") {
+        return json;
+      }
+    } catch {
+      // A circular or non-serialisable object falls through to the constructor
+      // name, which at least names the type rather than claiming nothing.
+    }
+    return `a non-serialisable ${record.constructor?.name ?? "object"} was thrown`;
+  }
+  return String(error);
+};
