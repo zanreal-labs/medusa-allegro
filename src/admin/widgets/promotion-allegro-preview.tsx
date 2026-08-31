@@ -10,6 +10,7 @@ import {
   movesHeadline,
   marginLabel,
   PROMO_COPY,
+  raisesPriceLabel,
   THIN_MARGIN_PCT,
   SKIP_REASON_PL,
 } from "../lib/promotion-preview-copy";
@@ -50,8 +51,11 @@ interface OfferPreview {
     | { fromRule: string; toRule: string; competitorRelativeCaveat: true }
     | { skipped: string };
   override: { price: number; clampedToFloor: boolean; revertRule: string } | { skipped: string };
+  currentPrice?: number;
   marginAmount?: number;
   marginPct?: number;
+  overrideMarginPct?: number;
+  raisesPrice?: boolean;
 }
 
 interface PromotionPreview {
@@ -194,8 +198,13 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
 };
 
 /**
- * The margin the SRP-base discounted price leaves, and the only pathology states
- * that can actually occur.
+ * The margin the CURRENT auction price leaves, and the pathology states that can
+ * actually occur.
+ *
+ * Anchored on the live price rather than an SRP hypothetical, because live data
+ * showed the two are nowhere near each other: an offer sitting at 155 under
+ * Allegro's own automation while SRP is 255. A margin measured against SRP would
+ * have described a sale that is not happening.
  *
  * Reachability, checked rather than assumed. Both modes clamp at the break-even
  * floor, and break-even already includes Allegro's commission, so a price below
@@ -237,11 +246,11 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
       <Table.Header>
         <Table.Row>
           <Table.HeaderCell>{PROMO_COPY.tableSku}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableCurrent}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableMargin}</Table.HeaderCell>
           <Table.HeaderCell>{PROMO_COPY.tableSrp}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableFloor}</Table.HeaderCell>
           <Table.HeaderCell>{PROMO_COPY.tableSrpBase}</Table.HeaderCell>
           <Table.HeaderCell>{PROMO_COPY.tableCompetitor}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableMargin}</Table.HeaderCell>
         </Table.Row>
       </Table.Header>
       <Table.Body>
@@ -249,10 +258,19 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
           <Table.Row key={row.sku}>
             <Table.Cell>{row.sku}</Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
-              {row.srp} {row.currency}
+              {row.currentPrice === undefined ? (
+                <span className="text-ui-fg-muted">{PROMO_COPY.marginUnknown}</span>
+              ) : (
+                <b>
+                  {row.currentPrice} {row.currency}
+                </b>
+              )}
             </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
-              {row.breakEven} {row.currency}
+              <MarginCell row={row} />
+            </Table.Cell>
+            <Table.Cell className="txt-compact-xsmall">
+              {row.srp} {row.currency}
             </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
               {"skipped" in row.override ? (
@@ -260,16 +278,29 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
                   {labelFor(SKIP_REASON_PL, row.override.skipped)}
                 </Badge>
               ) : (
-                <>
-                  <b>
-                    {row.override.price} {row.currency}
-                  </b>
-                  {row.override.clampedToFloor ? (
-                    <Badge color="orange" size="2xsmall" className="ml-1">
-                      {PROMO_COPY.clampedToFloor}
+                <div className="flex flex-col gap-1">
+                  <span>
+                    <b>
+                      {row.override.price} {row.currency}
+                    </b>
+                    {row.overrideMarginPct === undefined ? null : (
+                      <span className="text-ui-fg-muted">
+                        {" "}
+                        ({Math.round(row.overrideMarginPct * 100)}%)
+                      </span>
+                    )}
+                    {row.override.clampedToFloor ? (
+                      <Badge color="orange" size="2xsmall" className="ml-1">
+                        {PROMO_COPY.clampedToFloor}
+                      </Badge>
+                    ) : null}
+                  </span>
+                  {row.raisesPrice && row.currentPrice !== undefined ? (
+                    <Badge color="red" size="2xsmall">
+                      {raisesPriceLabel(row.currentPrice, row.override.price, row.currency)}
                     </Badge>
                   ) : null}
-                </>
+                </div>
               )}
             </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
@@ -282,9 +313,6 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
                   {row.breakEven} - {row.srp} {row.currency}
                 </span>
               )}
-            </Table.Cell>
-            <Table.Cell className="txt-compact-xsmall">
-              <MarginCell row={row} />
             </Table.Cell>
           </Table.Row>
         ))}

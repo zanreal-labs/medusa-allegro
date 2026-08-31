@@ -72,12 +72,12 @@ export const PROMO_COPY = {
   marginLoss: "Sprzedaż ze stratą",
   marginThin: "Niska marża",
   marginUnknown: "brak danych",
-  tableCompetitor: "Cena po rabacie (konkurencja)",
-  tableFloor: "Nie sprzedamy poniżej",
-  tableMargin: "Marża (od SRP)",
+  tableCompetitor: "Po rabacie (konkurencja)",
+  tableCurrent: "Cena teraz",
+  tableMargin: "Marża teraz",
   tableSku: "SKU",
   tableSrp: "SRP",
-  tableSrpBase: "Cena po rabacie (od SRP)",
+  tableSrpBase: "Po rabacie (od SRP)",
 } as const;
 
 /** "Zmieni N aukcji. Reszta katalogu zostaje bez zmian." */
@@ -112,6 +112,17 @@ export const marginLabel = (amount: number, pct: number | undefined, currency: s
  * so it can be argued with in one place rather than hunted through the widget.
  */
 export const THIN_MARGIN_PCT = 0.05;
+
+/**
+ * "Podniesie cenę z 155 do 255 PLN"
+ *
+ * The pathology that only live data could reveal: Allegro's automation has followed
+ * competitors well below SRP, so an SRP-based discount can land ABOVE what the
+ * auction currently sells for. That is a price rise wearing a promotion's clothes,
+ * and it has to be loud before anybody arms that mode.
+ */
+export const raisesPriceLabel = (from: number, to: number, currency: string): string =>
+  `Podniesie cenę z ${from} do ${to} ${currency}`;
 
 /**
  * Per-SKU skip reasons, keyed by the code the API returns.
