@@ -55,22 +55,17 @@ export const PROMO_COPY = {
   baseNone: "Nie wybrano (tylko podgląd)",
   baseSrp: "Rabat liczony od SRP (gwarantowany)",
   blockedTitle: "Ta promocja nie zmieni cen na Allegro:",
+  // Kept short on purpose: this sits in a table cell, not a paragraph.
   clampedToFloor: "ograniczone progiem opłacalności",
   competitorCaveat: "gdy jesteśmy już najtańsi, cena się nie zmienia",
   costEdited: "koszt zakupu zmieniony w ciągu 30 dni",
-  discountBaseHelp:
-    "Wybór decyduje, od czego liczymy obniżkę. Nic nie trafia na Allegro. Dopóki nie wybierzesz, to wyłącznie podgląd.",
   discountBaseLabel: "Jak liczyć rabat",
   emptyRows: "Żadna aukcja objęta tą promocją nie kwalifikuje się do zmiany ceny.",
-  heading: "Podgląd promocji na Allegro",
+  heading: "Podgląd cen na Allegro",
   loadError: "Nie udało się wczytać podglądu Allegro.",
   loading: "Wczytywanie podglądu...",
-  noWriteBody:
-    "Widok pokazuje wyłącznie to, co ta promocja zrobiłaby z cenami Twoich aukcji. Nic nie jest włączone i nic nie zostanie wysłane na Allegro.",
-  noWriteTitle: "Nic na tej stronie nie zmienia cen na Allegro",
-  /** `code` doubles as the promotion's name: an automatic promotion has no separate name field. */
-  promotionCodeLabel: "kod (nazwa promocji)",
-  promotionCodeMissing: "brak",
+  /** The whole reassurance, in one line. The explainer that used to follow was noise. */
+  noWriteLine: "Nic tu nie zmienia cen na Allegro.",
   reasonHeader: "Powód",
   /** Said once, plainly, instead of naming the rule the price returns to. */
   revertsNote: "po zakończeniu promocji cena wraca do dotychczasowych zasad",
@@ -87,7 +82,7 @@ export const PROMO_COPY = {
 
 /** "Zmieni N aukcji. Reszta katalogu zostaje bez zmian." */
 export const movesHeadline = (eligible: number): string =>
-  `Zmieni cenę na ${eligible} ${auctionsPl(eligible)}. Reszta katalogu zostaje bez zmian.`;
+  `Zmieni cenę na ${eligible} ${auctionsPl(eligible)}.`;
 
 /** The coverage sentence under the headline. */
 export const coverageBody = (coverage: {
@@ -96,8 +91,7 @@ export const coverageBody = (coverage: {
   eligible: number;
   skipped: number;
 }): string =>
-  `Objęte SKU: ${coverage.targeted}. Powiązane z aukcją na Allegro: ${coverage.linked}. Gotowe do zmiany ceny: ${coverage.eligible}. Pominięte: ${coverage.skipped}. ` +
-  "Promocja zmienia ceny wyłącznie na aukcjach swoich produktów, więc reszta katalogu zostaje dokładnie taka, jaka jest.";
+  `Objęte SKU: ${coverage.targeted}. Z aukcją na Allegro: ${coverage.linked}. Pominięte: ${coverage.skipped}.`;
 
 /** "Cena obniżona do 89,99 PLN" */
 export const priceLoweredTo = (price: number, currency: string): string =>
@@ -116,26 +110,24 @@ export const priceFollowsCompetition = (floor: number, currency: string): string
  * disappearing from the table.
  */
 export const SKIP_REASON_PL: Record<string, string> = {
-  "invalid-bounds": "próg opłacalności jest równy cenie SRP albo od niej wyższy, nie ma z czego dać rabatu",
-  "missing-break-even": "nie znamy progu opłacalności, brakuje kosztu zakupu albo prowizji Allegro",
-  "missing-srp": "brak ceny SRP, od której liczymy rabat",
-  "not-linked": "produkt nie ma powiązanej aukcji na Allegro",
-  "offer-not-active": "aukcja nie jest aktywna",
-  "promotion-unresolved": "nie udało się ustalić prowizji Allegro dla tej aukcji",
-  "rule-name-too-long": "nie udało się przygotować rabatu dla tej aukcji",
-  "status-unknown": "nie udało się odczytać statusu aukcji",
-  "sync-disabled": "automatyczna zmiana ceny wyłączona dla tej aukcji",
+  "invalid-bounds": "Próg opłacalności nie jest niższy od SRP, nie ma z czego dać rabatu.",
+  "missing-break-even": "Uzupełnij koszt zakupu i prowizję Allegro.",
+  "missing-srp": "Uzupełnij cenę SRP.",
+  "not-linked": "Powiąż produkt z aukcją na Allegro.",
+  "offer-not-active": "Aukcja nie jest aktywna.",
+  "promotion-unresolved": "Nie znamy prowizji Allegro dla tej aukcji.",
+  "rule-name-too-long": "Nie udało się przygotować rabatu dla tej aukcji.",
+  "status-unknown": "Nie udało się odczytać statusu aukcji.",
+  "sync-disabled": "Włącz automatyczną zmianę ceny dla tej aukcji.",
 };
 
 /** Promotion-level blockers, keyed by the code the API returns. */
 export const BLOCK_REASON_PL: Record<string, string> = {
-  "allegro-channel-excluded":
-    "promocja jest ograniczona do kanałów sprzedaży, wśród których nie ma kanału Allegro",
-  "discount-base-unset": "nie wybrano, jak liczyć rabat, więc na razie jest to wyłącznie podgląd",
-  "discount-unsupported": "takiego rabatu nie da się przenieść na pojedynczą aukcję",
-  "no-target-products": "promocja nie obejmuje żadnych produktów",
-  "not-automatic":
-    "promocja wymaga kodu rabatowego. Na Allegro zadziała tylko promocja automatyczna, bo kupujący nie ma gdzie wpisać kodu.",
+  "allegro-channel-excluded": "Dodaj kanał sprzedaży Allegro do tej promocji.",
+  "discount-base-unset": "Wybierz powyżej, jak liczyć rabat.",
+  "discount-unsupported": "Ustaw rabat jako procent od każdej sztuki, wtedy zadziała.",
+  "no-target-products": "Dodaj produkty do tej promocji.",
+  "not-automatic": "Włącz promocję automatyczną, bez kodu rabatowego.",
 };
 
 /** Polish label for a code, falling back to the raw code when it is not mapped. */

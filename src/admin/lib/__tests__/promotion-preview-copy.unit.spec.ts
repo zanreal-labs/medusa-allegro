@@ -42,17 +42,17 @@ describe("auctionsPl", () => {
 
 describe("movesHeadline", () => {
   it("declines the count in the headline", () => {
-    expect(movesHeadline(1)).toBe("Zmieni cenę na 1 aukcję. Reszta katalogu zostaje bez zmian.");
-    expect(movesHeadline(3)).toBe("Zmieni cenę na 3 aukcje. Reszta katalogu zostaje bez zmian.");
-    expect(movesHeadline(0)).toBe("Zmieni cenę na 0 aukcji. Reszta katalogu zostaje bez zmian.");
+    expect(movesHeadline(1)).toBe("Zmieni cenę na 1 aukcję.");
+    expect(movesHeadline(3)).toBe("Zmieni cenę na 3 aukcje.");
+    expect(movesHeadline(0)).toBe("Zmieni cenę na 0 aukcji.");
   });
 });
 
 describe("labelFor", () => {
   it("returns the Polish label for a known code", () => {
-    expect(labelFor(SKIP_REASON_PL, "missing-srp")).toBe("brak ceny SRP, od której liczymy rabat");
+    expect(labelFor(SKIP_REASON_PL, "missing-srp")).toBe("Uzupełnij cenę SRP.");
     expect(labelFor(BLOCK_REASON_PL, "no-target-products")).toBe(
-      "promocja nie obejmuje żadnych produktów",
+      "Dodaj produkty do tej promocji.",
     );
   });
 
@@ -79,5 +79,23 @@ describe("operator-facing copy stays about prices, not mechanism", () => {
     for (const forbidden of ["ZR\u276F", "Wyr\u00f3\u017cnienie", "Bitdefender", "regu\u0142y cenowej", "nadpisanie", "przelacz"]) {
       expect(surfaces).not.toContain(forbidden);
     }
+  });
+});
+
+describe("messages are short and actionable", () => {
+  it("every blocker says what to do, in one line", () => {
+    // Reported as a list of offenders rather than one bare assertion, so a failure
+    // names the string that grew instead of only the line number.
+    const tooLong = Object.entries(BLOCK_REASON_PL).filter(([, text]) => text.length > 70);
+    expect(tooLong).toEqual([]);
+    const multiSentence = Object.entries(BLOCK_REASON_PL).filter(
+      ([, text]) => text.split(". ").length > 1,
+    );
+    expect(multiSentence).toEqual([]);
+  });
+
+  it("keeps per-SKU skip reasons to one short line too", () => {
+    const tooLong = Object.entries(SKIP_REASON_PL).filter(([, text]) => text.length > 70);
+    expect(tooLong).toEqual([]);
   });
 });

@@ -114,22 +114,11 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
 
   return (
     <Container className="divide-y p-0">
-      <div className="flex flex-col gap-2 px-6 py-4">
+      <div className="flex flex-col gap-1 px-6 py-4">
         <Heading level="h2">{PROMO_COPY.heading}</Heading>
-        {preview ? (
-          // Only once the preview has loaded: rendering it earlier flashes
-          // "brak" for a moment and reads as "this promotion has no code".
-          <Text size="small" className="text-ui-fg-subtle">
-            {PROMO_COPY.promotionCodeLabel}:{" "}
-            <span className="text-ui-fg-base">
-              {preview.promotion.code ?? PROMO_COPY.promotionCodeMissing}
-            </span>
-          </Text>
-        ) : null}
-        <Alert variant="info">
-          <Text weight="plus">{PROMO_COPY.noWriteTitle}</Text>
-          <Text size="small">{PROMO_COPY.noWriteBody}</Text>
-        </Alert>
+        <Text size="small" className="text-ui-fg-subtle">
+          {PROMO_COPY.noWriteLine}
+        </Text>
       </div>
 
       {error ? (
@@ -179,9 +168,6 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
                 </Select>
               </div>
             </div>
-            <Text size="small" className="text-ui-fg-subtle">
-              {PROMO_COPY.discountBaseHelp}
-            </Text>
           </div>
 
           <div className="px-6 py-4">

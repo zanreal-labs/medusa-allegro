@@ -54,9 +54,33 @@ describe("resolveDiscount", () => {
     expect(result.kind).toBe("unsupported");
   });
 
-  it("rejects a unit-capped discount", () => {
-    const result = resolveDiscount({ max_quantity: 2, type: "percentage", value: 10 });
+  it("ACCEPTS a unit-capped `each` discount, because Medusa requires a cap for `each`", () => {
+    // Regression: rejecting any max_quantity rejected 100% of valid promotions,
+    // since Medusa's own validation requires max_quantity for both `each` and `once`.
+    // The first real promotion (10% off, each, max_quantity 100) hit exactly this.
+    expect(resolveDiscount({ allocation: "each", max_quantity: 100, type: "percentage", value: 10 })).toEqual({
+      kind: "percentage",
+      label: "-10%",
+      percent: 10,
+    });
+  });
+
+  it("rejects `once`, which discounts a single unit per order rather than each unit", () => {
+    const result = resolveDiscount({ allocation: "once", max_quantity: 1, type: "percentage", value: 10 });
     expect(result.kind).toBe("unsupported");
+  });
+
+  it("reproduces the exact shape of the first real promotion end to end", () => {
+    // percentage / items / each / max_quantity 100 / pln - what was created by hand.
+    const result = resolveDiscount({
+      allocation: "each",
+      currency_code: "pln",
+      max_quantity: 100,
+      target_type: "items",
+      type: "percentage",
+      value: 10,
+    });
+    expect(result).toEqual({ kind: "percentage", label: "-10%", percent: 10 });
   });
 
   it("rejects a percentage at or above 100%", () => {
