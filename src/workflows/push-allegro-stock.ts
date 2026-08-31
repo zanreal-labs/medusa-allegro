@@ -28,7 +28,7 @@ import type {
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
 import type AllegroModuleService from "../modules/allegro/service";
 import { listEligibleVariants, readAvailableQuantities } from "./lib/catalog";
-import { listAllOffers } from "./lib/offers";
+import { listAllOffers, listOffersByIds } from "./lib/offers";
 import type { OfferListing } from "./lib/offers";
 import { runUnderSyncClaim } from "./lib/run";
 import { warnOnUnscopedCatalogue } from "./lib/scope-warnings";
@@ -524,15 +524,36 @@ const recordStockConflicts = async (
 };
 
 /**
- * Run one quantity-push tick.
+ * What one run is allowed to touch.
  *
- * `listing` may be supplied by a caller that already fetched the catalogue.
+ * The scheduled loop takes the whole catalogue. The event-driven push takes a set of
+ * SKUs, and the narrowing is the ONLY difference between the two - everything after
+ * the plan (safety refusal, conflict recording, command grouping, per-offer
+ * confirmation, the `stock_synced_at` stamp) is shared code running unchanged. That
+ * matters more than the saved requests: two implementations of "how a quantity is
+ * written to Allegro" would drift, and the one that drifted would be the one nobody
+ * watches.
  */
-export const pushAllegroStock = async (
+interface StockPushScope {
+  /**
+   * SKUs this run may touch. Undefined means the whole eligible catalogue.
+   *
+   * An EMPTY set is not the same as undefined and never widens to it: it means the
+   * caller asked for nothing, and answering that with a catalogue-wide push is how a
+   * narrow path becomes a wide write.
+   */
+  only?: ReadonlySet<string>;
+  /** A catalogue listing the caller already fetched. Full-catalogue runs only. */
+  listing?: OfferListing;
+}
+
+/** Run one quantity push, over the whole catalogue or over a named set of SKUs. */
+const runStockPush = async (
   container: MedusaContainer,
-  listing?: OfferListing,
+  scope: StockPushScope,
 ): Promise<StockSyncResult> => {
   let result = emptyStockSyncResult();
+  const { only } = scope;
 
   const run = await runUnderSyncClaim(
     container,
@@ -540,25 +561,24 @@ export const pushAllegroStock = async (
     async ({ allegro, client, heartbeat, logger, mayContinue }) => {
       const options = await allegro.getSyncOptions();
       warnOnUnscopedCatalogue(logger, options, "stock");
-      const variants = await listEligibleVariants(container, options);
-
-      // The LISTING first, quantities second, and the order is deliberate. Paging a full
-      // catalogue is by far the slowest step here, so reading quantities before it left
-      // every figure ageing across the whole pagination window before it was compared and
-      // written. Reading them after means the numbers pushed are the freshest available at
-      // write time, which for stock is the difference between an oversell and a sale.
-      const offers = listing ?? (await listAllOffers(client));
-      const quantities = await readAvailableQuantities(
-        container,
-        variants,
-        options.stockLocationIds,
-      );
+      // Narrowed in memory rather than at the query. The catalogue read is a local
+      // database page, not an Allegro request, so filtering it here costs a scan and
+      // keeps `listEligibleVariants` - which four loops share - with one behaviour.
+      const allVariants = await listEligibleVariants(container, options);
+      const variants = only
+        ? allVariants.filter((variant) => only.has(variant.sku))
+        : allVariants;
 
       // Only mapped, unconflicted rows authorise a write, and the row also supplies the
       // PAIRING. Re-deriving the pairing from the live listing is what let a sygnatura
       // edited between discovery and now push one variant's quantity onto another
       // product's offer.
-      const rows = (await allegro.listAllegroOffers({})) as unknown as {
+      //
+      // Read BEFORE the offers on a targeted run, because it is what says which offers
+      // to read at all.
+      const rows = (await allegro.listAllegroOffers(
+        only ? { sku: [...only] } : {},
+      )) as unknown as {
         sku: string;
         offer_id?: string | null;
         conflict?: string | null;
@@ -566,6 +586,26 @@ export const pushAllegroStock = async (
       const authorized = rows
         .filter((row) => !row.conflict && row.offer_id)
         .map((row) => ({ offerId: row.offer_id as string, sku: row.sku }));
+
+      // The LISTING first, quantities second, and the order is deliberate. Paging a full
+      // catalogue is by far the slowest step here, so reading quantities before it left
+      // every figure ageing across the whole pagination window before it was compared and
+      // written. Reading them after means the numbers pushed are the freshest available at
+      // write time, which for stock is the difference between an oversell and a sale.
+      //
+      // A targeted run reads only the offers it was authorised to touch, which is the
+      // whole point: a sale must not cost a catalogue pass.
+      const offers = only
+        ? await listOffersByIds(
+            client,
+            authorized.map((row) => row.offerId),
+          )
+        : (scope.listing ?? (await listAllOffers(client))).offers;
+      const quantities = await readAvailableQuantities(
+        container,
+        variants,
+        options.stockLocationIds,
+      );
 
       const plan = planStockSync(
         variants.map((variant) => {
@@ -577,7 +617,7 @@ export const pushAllegroStock = async (
             ...(read && "absent" in read ? { absent: read.absent } : {}),
           };
         }),
-        offers.offers,
+        offers,
         authorized,
       );
       const { changes, conflicts, ...summary } = plan;
@@ -696,6 +736,57 @@ export const pushAllegroStock = async (
     result.skipped = run.skip.reason;
   }
   return result;
+};
+
+/**
+ * Run one full-catalogue quantity-push tick.
+ *
+ * `listing` may be supplied by a caller that already fetched the catalogue.
+ */
+export const pushAllegroStock = async (
+  container: MedusaContainer,
+  listing?: OfferListing,
+): Promise<StockSyncResult> => await runStockPush(container, { listing });
+
+/**
+ * Push the quantity for a named set of SKUs, now.
+ *
+ * The event path's write. It exists because the 15-minute reconciliation is also a
+ * 15-minute window in which something that just sold is still purchasable on Allegro
+ * at its old quantity, and that window is an oversell.
+ *
+ * It is ADDITIVE, never a replacement. The scheduled reconciliation still reads the
+ * whole catalogue and repairs anything this missed - a dropped event, a process that
+ * restarted with SKUs still buffered, an offer whose read failed - so the guarantee
+ * never gets weaker than it was before this path existed, only faster in the common
+ * case.
+ *
+ * Every safety property of the scheduled loop is inherited rather than reimplemented,
+ * because this is the same function underneath:
+ *
+ * - The same STOCK single-flight claim, so it cannot interleave with a reconciliation
+ *   pass that is mid-flight - two runs setting quantities on one offer is exactly what
+ *   the claim exists to prevent, and an event-driven push firing at an arbitrary
+ *   moment makes that collision likely rather than theoretical.
+ * - The same kill switch, re-read per command, so an operator stopping a runaway stops
+ *   this too.
+ * - The same plan-safety refusal: an ambiguous match or an unreadable quantity refuses
+ *   the WHOLE run rather than pushing the offers it happens to be sure about.
+ * - The same per-offer confirmation and `stock_synced_at` stamp, so a partly-confirmed
+ *   targeted push is recorded exactly as a partly-confirmed sweep is.
+ *
+ * An empty `skus` is a no-op that takes no claim: there is nothing to push, and taking
+ * the claim to discover that would block a reconciliation for no reason.
+ */
+export const pushTargetedAllegroStock = async (
+  container: MedusaContainer,
+  skus: readonly string[],
+): Promise<StockSyncResult> => {
+  const only = new Set(skus.map((sku) => sku.trim()).filter(Boolean));
+  if (only.size === 0) {
+    return { ...emptyStockSyncResult(), skipped: "no SKUs to push" };
+  }
+  return await runStockPush(container, { only });
 };
 
 const pushAllegroStockStep = createStep(

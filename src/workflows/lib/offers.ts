@@ -70,6 +70,69 @@ export const listAllOffers = async (client: AllegroClient): Promise<OfferListing
   return { complete: true, offers, totalCount: expectedTotal ?? 0 };
 };
 
+/** Concurrent per-offer reads in `listOffersByIds`. Matches the command-poll fan-out. */
+export const OFFER_READ_CONCURRENCY = 4;
+
+/**
+ * Just the named offers, for a push that already knows which ones it is touching.
+ *
+ * The event-driven quantity push exists to close an oversell window in seconds, and
+ * `listAllOffers` is the wrong shape for that: it pages the seller's whole catalogue,
+ * which is the expensive part of every loop that uses it and is why those loops share
+ * one listing between three stages. Reading three offers after a three-line sale must
+ * not cost a full catalogue pass.
+ *
+ * One request per offer, filtered by `offer.id`, rather than one request naming them
+ * all. Allegro documents the repeated form for `external.id` and not for `offer.id`,
+ * and an unrecognised repetition would be answered with a WIDER listing rather than an
+ * error - which the planner would then read as offers it had asked about and got. The
+ * single-valued filter is the one Allegro documents, so it is the one used; at the
+ * handful of offers a coalesced push carries, the difference is a few requests against
+ * a 9000/min budget.
+ *
+ * `GET /sale/offers` rather than `GET /sale/product-offers/{id}` on purpose: this is
+ * the resource whose response shape every existing consumer is written against, and
+ * the planner needs `stock.available` and `publication.status` from it. Reading the
+ * one offer through a different resource would be trusting that two payloads agree.
+ *
+ * DELIBERATELY NOT fail-closed the way `listAllOffers` is. A missing offer here is
+ * not evidence of a shrunken catalogue - it is one offer that could not be read - and
+ * the planner already counts an authorised offer absent from the listing as
+ * `skippedUnmatched` rather than writing to it. So a partial answer degrades to
+ * "fewer offers pushed, the rest reported and left to the reconciliation", which is
+ * the safe direction.
+ */
+export const listOffersByIds = async (
+  client: AllegroClient,
+  offerIds: readonly string[],
+): Promise<AllegroOffer[]> => {
+  const unique = [...new Set(offerIds.filter(Boolean))];
+  if (unique.length === 0) {
+    return [];
+  }
+  const found: AllegroOffer[] = [];
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < unique.length) {
+      const index = next;
+      next += 1;
+      const offerId = unique[index] as string;
+      const page = await client.listOffers({ limit: 1, offerId });
+      // Matched by id rather than taken positionally: an ignored or misread filter
+      // answers with SOME offer, and writing a quantity onto whatever came back is the
+      // one outcome this whole path must never produce.
+      const offer = (page.offers ?? []).find((candidate) => candidate.id === offerId);
+      if (offer) {
+        found.push(offer);
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(OFFER_READ_CONCURRENCY, unique.length) }, worker),
+  );
+  return found;
+};
+
 /**
  * Allegro answers this when the integration lacks the feature flag for an
  * endpoint. Retrying inside a run is pointless, and it is not an outage: the

@@ -186,7 +186,18 @@ export class AllegroClient {
 
   // ---------- Typed convenience methods ----------
 
-  /** GET /sale/offers */
+  /**
+   * GET /sale/offers
+   *
+   * `offerId` maps to `offer.id`, NOT `offer_id`. The dotted form is the parameter
+   * Allegro documents ("to search for offers by offer ID, call
+   * GET /sale/offers?offer.id={offer.id}"), and the underscore this used to send is
+   * simply not a parameter of the resource - Allegro ignores an unknown query key and
+   * answers with the UNFILTERED catalogue. Nothing called it with `offerId` until the
+   * targeted stock push did, so the mistake had never been exercised; had it shipped
+   * unfixed, a push meant for one offer would have planned against every offer the
+   * seller has.
+   */
   listOffers(params: ListOffersParams = {}): Promise<{
     offers: AllegroOffer[];
     count: number;
@@ -198,7 +209,7 @@ export class AllegroClient {
         external_id: params.externalId,
         limit: params.limit,
         name: params.name,
-        offer_id: params.offerId,
+        "offer.id": params.offerId,
         offset: params.offset,
         "publication.status": params.publication_status,
         "sellingMode.format": params.sellingMode_format,
