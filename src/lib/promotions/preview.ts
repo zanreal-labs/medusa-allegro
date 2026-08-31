@@ -107,14 +107,28 @@ export const resolveDiscount = (method: PromotionMethod): ResolvedDiscount => {
       reason: "allocation is `across` (spread over the basket), which has no fixed per-offer value",
     };
   }
-  // A unit cap ("first 2 units only") cannot be expressed by a rule or a Buy Now
-  // price that applies to every unit sold.
-  if (method.max_quantity !== null && method.max_quantity !== undefined && method.max_quantity > 0) {
+  // `once` discounts a single unit per order, so it is not a per-unit price either.
+  if (method.allocation === "once") {
     return {
       kind: "unsupported",
-      reason: `discount is capped at ${method.max_quantity} unit(s) per order, which a per-offer price cannot express`,
+      reason: "allocation is `once` (a single unit per order), which is not a per-unit price",
     };
   }
+  // `max_quantity` is deliberately NOT disqualifying, and getting that wrong made the
+  // whole feature unusable once already.
+  //
+  // Medusa's own validation (`allowedAllocationForQuantity` in the promotion module)
+  // REQUIRES `max_quantity` for both `each` and `once`, and forbids it for `across`.
+  // So every item-targeted promotion a person can actually save carries one, and
+  // rejecting any capped discount rejected 100% of valid promotions - the first real
+  // promotion built by hand hit exactly that and reported "no per-offer equivalent"
+  // for a plain 10% off.
+  //
+  // What the cap really means: Medusa discounts at most N units of this item per
+  // ORDER, while an Allegro offer price applies to every unit bought. The two diverge
+  // only for a single order larger than N. `each` is the closest and only expressible
+  // per-unit shape, so it is accepted, and the divergence is a property of the cap
+  // rather than a reason to refuse to price anything.
   const value = method.value;
   if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) {
     return { kind: "unsupported", reason: "discount value is missing or not positive" };
