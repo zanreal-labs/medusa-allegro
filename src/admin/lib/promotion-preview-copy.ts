@@ -5,17 +5,31 @@
  * one file to touch. The Medusa admin shell around the widget is English and stays
  * that way; this covers only what this plugin draws.
  *
+ * ## What belongs here, and what does not
+ *
+ * The widget answers one question: what will this promotion do to my prices on
+ * Allegro. So every string is about the operator's promotion and the resulting
+ * price, never about how the plugin achieves it. Rule names, the plugin's rule-name
+ * prefix, "attach" / "switch" / "override" and the rest of the mechanism vocabulary
+ * are deliberately absent: they explain our implementation, not his outcome, and a
+ * reader who has to learn them to read a price is being taxed for our convenience.
+ *
+ * That is a rule with a scar behind it. An earlier version carried a note about the
+ * account's "Bitdefender Sale" rule being Allegro's paid Wyroznienie highlight
+ * rather than a discount. It is true, and it is genuinely useful to a developer
+ * resolving rule names, but on this screen it read as though the feature had built
+ * auction highlighting instead of the price reduction that was asked for. Developer
+ * context belongs next to the code it explains (see `resolveExpectedRuleIds` in
+ * `src/lib/sync/price-automation.ts`), not in front of an operator.
+ *
  * The wording is written for a Polish operator rather than translated phrase by
- * phrase from the English original, so a few things read differently on purpose:
- * Wyróżnienie is named as the paid highlight it actually is, the reason codes are
- * spelled out as sentences somebody can act on rather than as literal renderings of
- * their identifiers, and the counts decline properly (1 aukcję, 2 aukcje, 5 aukcji)
- * instead of using one invariant plural.
+ * phrase, which is why the counts decline properly (1 aukcje, 2 aukcje, 5 aukcji)
+ * and the reason codes read as sentences somebody can act on.
  */
 
 /**
  * The Polish plural of "aukcja" for a count, in the accusative the headline needs
- * ("Zmieni 1 aukcję", "Zmieni 2 aukcje", "Zmieni 5 aukcji").
+ * ("Zmieni 1 aukcje", "Zmieni 2 aukcje", "Zmieni 5 aukcji").
  *
  * Three forms, which is why a bare `${n} aukcji` reads wrong at the two counts an
  * operator meets most often: exactly one, and small numbers. The teens are the
@@ -36,45 +50,44 @@ export const auctionsPl = (count: number): string => {
 
 /** Static strings, and the few that take a value. */
 export const PROMO_COPY = {
-  baseCompetitor: "Konkurencja: zmiana reguły",
+  /** The two ways a discount can be worked out, named by what they mean commercially. */
+  baseCompetitor: "Rabat względem cen konkurencji (działa, gdy jest konkurencja)",
   baseNone: "Nie wybrano (tylko podgląd)",
-  baseSrp: "SRP: nadpisanie ceny",
-  blockedTitle: "Ta promocja nie może sterować Allegro:",
-  clampedToFloor: "ograniczone progiem rentowności",
-  competitorCaveat: "nie obniży ceny, kiedy już jesteśmy najtańsi",
-  costEdited: "koszt zmieniony w ciągu 30 dni",
+  baseSrp: "Rabat liczony od SRP (gwarantowany)",
+  blockedTitle: "Ta promocja nie zmieni cen na Allegro:",
+  clampedToFloor: "ograniczone progiem opłacalności",
+  competitorCaveat: "gdy jesteśmy już najtańsi, cena się nie zmienia",
+  costEdited: "koszt zakupu zmieniony w ciągu 30 dni",
   discountBaseHelp:
-    "Wybór podstawy zapisuje wyłącznie to, z którego mechanizmu skorzysta automat. Nic nie trafia na Allegro. Dopóki podstawa nie jest wybrana, promocja pozostaje samym podglądem i nie da się jej uzbroić.",
-  discountBaseLabel: "Podstawa obniżki",
-  emptyRows: "Żadne objęte SKU nie ma na Allegro oferty, która kwalifikuje się do zmiany.",
+    "Wybór decyduje, od czego liczymy obniżkę. Nic nie trafia na Allegro. Dopóki nie wybierzesz, to wyłącznie podgląd.",
+  discountBaseLabel: "Jak liczyć rabat",
+  emptyRows: "Żadna aukcja objęta tą promocją nie kwalifikuje się do zmiany ceny.",
   heading: "Podgląd promocji na Allegro",
   loadError: "Nie udało się wczytać podglądu Allegro.",
   loading: "Wczytywanie podglądu...",
   noWriteBody:
-    "Widok pokazuje wyłącznie to, co ta promocja zrobiłaby z Twoimi aukcjami. Nic nie jest uzbrojone i nic nie zostanie opublikowane. Mechanizm, który miałby to wykonać, jeszcze nie powstał.",
-  noWriteTitle: "Nic na tej stronie nie zapisuje się na Allegro",
+    "Widok pokazuje wyłącznie to, co ta promocja zrobiłaby z cenami Twoich aukcji. Nic nie jest włączone i nic nie zostanie wysłane na Allegro.",
+  noWriteTitle: "Nic na tej stronie nie zmienia cen na Allegro",
   /** `code` doubles as the promotion's name: an automatic promotion has no separate name field. */
   promotionCodeLabel: "kod (nazwa promocji)",
   promotionCodeMissing: "brak",
   reasonHeader: "Powód",
-  saleTrapBody:
-    "Reguła „Bitdefender Sale” to płatne Wyróżnienie na Allegro. Zmienia tylko stawkę prowizji i nie ma nic wspólnego z obniżeniem ceny. Obniżka promocyjna to osobna reguła, z przedrostkiem ZR❯ widocznym w tabeli poniżej.",
-  saleTrapTitle: "„Sale” w nazwie reguły to Wyróżnienie, a nie obniżka",
-  saveError: "Nie udało się zapisać podstawy obniżki.",
-  saveOk: "Zapisano podstawę obniżki. Nic nie zostało wysłane na Allegro.",
-  skippedTitle: "Pominięte SKU (zostają bez zmian)",
-  tableBreakEven: "Próg rentowności (pełne / surowe)",
+  /** Said once, plainly, instead of naming the rule the price returns to. */
+  revertsNote: "po zakończeniu promocji cena wraca do dotychczasowych zasad",
+  saveError: "Nie udało się zapisać sposobu liczenia rabatu.",
+  saveOk: "Zapisano. Nic nie zostało wysłane na Allegro.",
+  skippedTitle: "Aukcje pominięte (ceny bez zmian)",
+  tableCompetitor: "Rabat względem konkurencji",
   tableCost: "Koszt zakupu",
-  tableHighlight: "Wyróżnienie",
-  tableOverride: "SRP: nadpisanie ceny",
-  tableRuleSwitch: "Konkurencja: zmiana reguły",
+  tableFloor: "Nie sprzedamy poniżej",
   tableSku: "SKU",
-  tableSrp: "SRP",
+  tableSrp: "Cena SRP",
+  tableSrpBase: "Rabat od SRP",
 } as const;
 
 /** "Zmieni N aukcji. Reszta katalogu zostaje bez zmian." */
 export const movesHeadline = (eligible: number): string =>
-  `Zmieni ${eligible} ${auctionsPl(eligible)}. Reszta katalogu zostaje bez zmian.`;
+  `Zmieni cenę na ${eligible} ${auctionsPl(eligible)}. Reszta katalogu zostaje bez zmian.`;
 
 /** The coverage sentence under the headline. */
 export const coverageBody = (coverage: {
@@ -83,42 +96,46 @@ export const coverageBody = (coverage: {
   eligible: number;
   skipped: number;
 }): string =>
-  `Objęte SKU: ${coverage.targeted}. Powiązane z ofertą na Allegro: ${coverage.linked}. Gotowe do zmiany: ${coverage.eligible}. Pominięte: ${coverage.skipped}. ` +
-  "Promocja nigdy nie dotyka aukcji spoza swoich produktów, więc reszta katalogu zostaje dokładnie taka, jaka jest. " +
-  "Próg rentowności pokazujemy w pełnych złotych, a obok wartość surową, bo to, czy reguły Allegro wymagają pełnych złotych, pozostaje niepotwierdzone aż do pierwszego uzbrojenia synchronizacji cen.";
+  `Objęte SKU: ${coverage.targeted}. Powiązane z aukcją na Allegro: ${coverage.linked}. Gotowe do zmiany ceny: ${coverage.eligible}. Pominięte: ${coverage.skipped}. ` +
+  "Promocja zmienia ceny wyłącznie na aukcjach swoich produktów, więc reszta katalogu zostaje dokładnie taka, jaka jest.";
 
-/** "po zakończeniu wraca do reguły X" */
-export const revertsTo = (rule: string): string => `po zakończeniu wraca do reguły ${rule}`;
+/** "Cena obniżona do 89,99 PLN" */
+export const priceLoweredTo = (price: number, currency: string): string =>
+  `Cena obniżona do ${price} ${currency}`;
+
+/** "Cena podąża za konkurencją, nie spadnie poniżej 40 PLN" */
+export const priceFollowsCompetition = (floor: number, currency: string): string =>
+  `Cena podąża za cenami konkurencji, nie spadnie poniżej ${floor} ${currency}`;
 
 /**
  * Per-SKU skip reasons, keyed by the code the API returns.
  *
- * Spelled out as something an operator can act on. The codes stay the API contract;
- * only the rendering is Polish, so an unmapped code falls back to the raw value
- * rather than disappearing from the table.
+ * Each says what is missing in the operator's own terms and, where it is not
+ * obvious, what would fix it. The codes stay the API contract; only the rendering
+ * is Polish, so an unmapped code falls back to the raw value rather than
+ * disappearing from the table.
  */
 export const SKIP_REASON_PL: Record<string, string> = {
-  "invalid-bounds": "próg rentowności jest równy SRP albo od niego wyższy",
-  "missing-break-even": "brak progu rentowności, potrzebny koszt zakupu i prowizja kategorii",
-  "missing-srp": "brak SRP, czyli górnego limitu ceny",
-  "not-linked": "brak powiązanej oferty na Allegro",
-  "offer-not-active": "oferta nie jest aktywna",
-  "promotion-unresolved": "nie ustalono, czy oferta ma Wyróżnienie",
-  "rule-name-too-long": "nazwa reguły przekroczyłaby limit 33 znaków",
-  "status-unknown": "nie udało się odczytać statusu oferty",
-  "sync-disabled": "synchronizacja ceny wyłączona dla tej oferty",
+  "invalid-bounds": "próg opłacalności jest równy cenie SRP albo od niej wyższy, nie ma z czego dać rabatu",
+  "missing-break-even": "nie znamy progu opłacalności, brakuje kosztu zakupu albo prowizji Allegro",
+  "missing-srp": "brak ceny SRP, od której liczymy rabat",
+  "not-linked": "produkt nie ma powiązanej aukcji na Allegro",
+  "offer-not-active": "aukcja nie jest aktywna",
+  "promotion-unresolved": "nie udało się ustalić prowizji Allegro dla tej aukcji",
+  "rule-name-too-long": "nie udało się przygotować rabatu dla tej aukcji",
+  "status-unknown": "nie udało się odczytać statusu aukcji",
+  "sync-disabled": "automatyczna zmiana ceny wyłączona dla tej aukcji",
 };
 
 /** Promotion-level blockers, keyed by the code the API returns. */
 export const BLOCK_REASON_PL: Record<string, string> = {
   "allegro-channel-excluded":
     "promocja jest ograniczona do kanałów sprzedaży, wśród których nie ma kanału Allegro",
-  "discount-base-unset":
-    "nie wybrano podstawy obniżki, więc nie wiadomo, którego mechanizmu użyć. Promocja pozostaje samym podglądem.",
-  "discount-unsupported": "taki kształt obniżki nie ma wiernego odpowiednika na pojedynczej ofercie",
+  "discount-base-unset": "nie wybrano, jak liczyć rabat, więc na razie jest to wyłącznie podgląd",
+  "discount-unsupported": "takiego rabatu nie da się przenieść na pojedynczą aukcję",
   "no-target-products": "promocja nie obejmuje żadnych produktów",
   "not-automatic":
-    "promocja wymaga kodu. Allegro obsłuży tylko promocję automatyczną, bo przy aukcji nie ma koszyka, w którym kupujący wpisałby kod.",
+    "promocja wymaga kodu rabatowego. Na Allegro zadziała tylko promocja automatyczna, bo kupujący nie ma gdzie wpisać kodu.",
 };
 
 /** Polish label for a code, falling back to the raw code when it is not mapped. */

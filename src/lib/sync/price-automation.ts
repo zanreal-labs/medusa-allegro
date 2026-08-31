@@ -251,6 +251,21 @@ export const evaluateSyncEligibility = (input: SyncEligibilityInput): SyncEligib
  * meant. Guessing attaches the wrong pricing policy to a live catalogue, and
  * creating the rule would silently take over configuration that belongs to the
  * seller.
+ *
+ * ## The name that misleads everyone once
+ *
+ * These two names are selected by PROMOTION STATE in the Allegro sense of the word:
+ * whether the offer carries a paid "Wyroznienie" highlight, which changes the
+ * commission rate and therefore the break-even floor. On this account they happen
+ * to be called "Bitdefender" and "Bitdefender Sale", and "Sale" there does NOT mean
+ * a discount or a price reduction of any kind. It is the highlighted variant, and
+ * the only thing it changes is which commission rate the floor is computed from.
+ *
+ * Worth stating here, and ONLY here: this belongs next to the code that resolves
+ * the names. It was briefly surfaced in the admin UI and read as though the feature
+ * had built auction highlighting instead of the price discount that was asked for,
+ * which is exactly the confusion it was meant to prevent. Operator-facing screens
+ * talk about prices; this file talks about rules.
  */
 export type ExpectedRuleResolution =
   | { ok: true; standardId: string; promotedId: string }
