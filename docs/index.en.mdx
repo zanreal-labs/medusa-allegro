@@ -73,6 +73,9 @@ the ones that write - its own kill switch.
 
   on a sale         targeted stock push  (debounced, coalesced)
   (~3s later)       writes a quantity command for the sold SKUs only
+
+  on a supplier     the same targeted push, same queue and claim
+  stock change      (marken.stock.changed -> the SKUs the supplier moved)
 ```
 
 The first three are chained into one job because they all need the same input, a
@@ -93,6 +96,15 @@ those offers a few seconds later — because for a quantity, "one cycle of stale
 means an item that sold out fifteen minutes ago is still purchasable, which is an
 oversell. The 15-minute sweep is unchanged and still reads everything, so the events
 only ever make the common case faster, never the guarantee weaker.
+
+Two things dirty a SKU, and they are the two ways a quantity can move. **We sell it**
+— order and reservation lifecycle events, which covers everything that consumes stock
+here. Or **the supplier's stock changes** — another reseller takes the last key, or a
+restock lands — which fires no Medusa event at all, and instead arrives as
+`marken.stock.changed` from the supplier plugin naming the SKUs it just moved. Both
+feed the *same* queue, so they coalesce with each other: a restock and a sale of one
+SKU in the same window produce one command carrying the quantity after both landed,
+not two racing each other.
 
 ## Install
 
