@@ -1,8 +1,12 @@
 import {
   auctionsPl,
   BLOCK_REASON_PL,
+  coverageBody,
   labelFor,
   movesHeadline,
+  priceFollowsCompetition,
+  priceLoweredTo,
+  PROMO_COPY,
   SKIP_REASON_PL,
 } from "../promotion-preview-copy";
 
@@ -38,15 +42,15 @@ describe("auctionsPl", () => {
 
 describe("movesHeadline", () => {
   it("declines the count in the headline", () => {
-    expect(movesHeadline(1)).toBe("Zmieni 1 aukcję. Reszta katalogu zostaje bez zmian.");
-    expect(movesHeadline(3)).toBe("Zmieni 3 aukcje. Reszta katalogu zostaje bez zmian.");
-    expect(movesHeadline(0)).toBe("Zmieni 0 aukcji. Reszta katalogu zostaje bez zmian.");
+    expect(movesHeadline(1)).toBe("Zmieni cenę na 1 aukcję. Reszta katalogu zostaje bez zmian.");
+    expect(movesHeadline(3)).toBe("Zmieni cenę na 3 aukcje. Reszta katalogu zostaje bez zmian.");
+    expect(movesHeadline(0)).toBe("Zmieni cenę na 0 aukcji. Reszta katalogu zostaje bez zmian.");
   });
 });
 
 describe("labelFor", () => {
   it("returns the Polish label for a known code", () => {
-    expect(labelFor(SKIP_REASON_PL, "missing-srp")).toBe("brak SRP, czyli górnego limitu ceny");
+    expect(labelFor(SKIP_REASON_PL, "missing-srp")).toBe("brak ceny SRP, od której liczymy rabat");
     expect(labelFor(BLOCK_REASON_PL, "no-target-products")).toBe(
       "promocja nie obejmuje żadnych produktów",
     );
@@ -56,5 +60,24 @@ describe("labelFor", () => {
     // An API that adds a reason code must still render something actionable.
     expect(labelFor(SKIP_REASON_PL, "brand-new-code")).toBe("brand-new-code");
     expect(labelFor(BLOCK_REASON_PL, "brand-new-code", "server label")).toBe("server label");
+  });
+});
+
+describe("operator-facing copy stays about prices, not mechanism", () => {
+  it("never leaks rule names, the rule prefix, or attach/switch/override vocabulary", () => {
+    // The regression this guards: developer context rendered as UI once read as
+    // though the feature had built auction highlighting instead of a price cut.
+    const surfaces = [
+      ...Object.values(PROMO_COPY),
+      ...Object.values(SKIP_REASON_PL),
+      ...Object.values(BLOCK_REASON_PL),
+      movesHeadline(3),
+      coverageBody({ eligible: 1, linked: 2, skipped: 0, targeted: 3 }),
+      priceLoweredTo(89.99, "PLN"),
+      priceFollowsCompetition(40, "PLN"),
+    ].join(" ");
+    for (const forbidden of ["ZR\u276F", "Wyr\u00f3\u017cnienie", "Bitdefender", "regu\u0142y cenowej", "nadpisanie", "przelacz"]) {
+      expect(surfaces).not.toContain(forbidden);
+    }
   });
 });

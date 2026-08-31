@@ -8,8 +8,9 @@ import {
   coverageBody,
   labelFor,
   movesHeadline,
+  priceFollowsCompetition,
+  priceLoweredTo,
   PROMO_COPY,
-  revertsTo,
   SKIP_REASON_PL,
 } from "../lib/promotion-preview-copy";
 
@@ -27,8 +28,12 @@ import {
  * overlay that would act on it does not exist yet, so there is no arm step and
  * nothing can be published from this page.
  *
- * Naming trap it states outright: the account's "Bitdefender Sale" rule is
- * Allegro's PAID HIGHLIGHT ("Wyróżnienie"), not a discount.
+ * Every string it draws is about the operator's promotion and the resulting price,
+ * never about the mechanism behind it: no rule names, no rule-name prefix, no
+ * attach/switch/override vocabulary. That context is real, but it belongs beside
+ * the code it explains (`resolveExpectedRuleIds` in `src/lib/sync/price-automation.ts`)
+ * rather than in front of somebody who opened this page to see what a promotion
+ * does to his prices. See the note in `src/admin/lib/promotion-preview-copy.ts`.
  */
 
 type DiscountBase = "srp" | "competitor";
@@ -125,10 +130,6 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
           <Text weight="plus">{PROMO_COPY.noWriteTitle}</Text>
           <Text size="small">{PROMO_COPY.noWriteBody}</Text>
         </Alert>
-        <Alert variant="warning">
-          <Text weight="plus">{PROMO_COPY.saleTrapTitle}</Text>
-          <Text size="small">{PROMO_COPY.saleTrapBody}</Text>
-        </Alert>
       </div>
 
       {error ? (
@@ -211,11 +212,10 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
       <Table.Header>
         <Table.Row>
           <Table.HeaderCell>{PROMO_COPY.tableSku}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableHighlight}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableBreakEven}</Table.HeaderCell>
           <Table.HeaderCell>{PROMO_COPY.tableSrp}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableRuleSwitch}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableOverride}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableFloor}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableSrpBase}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableCompetitor}</Table.HeaderCell>
           <Table.HeaderCell>{PROMO_COPY.tableCost}</Table.HeaderCell>
         </Table.Row>
       </Table.Header>
@@ -223,35 +223,11 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
         {preview.rows.map((row) => (
           <Table.Row key={row.sku}>
             <Table.Cell>{row.sku}</Table.Cell>
-            <Table.Cell>
-              {row.promoted ? (
-                <Badge color="orange" size="2xsmall">
-                  {PROMO_COPY.tableHighlight}
-                </Badge>
-              ) : (
-                <span className="text-ui-fg-muted">-</span>
-              )}
-            </Table.Cell>
-            <Table.Cell className="txt-compact-xsmall">
-              {row.breakEven} {row.currency}
-              <span className="text-ui-fg-muted"> / {row.breakEvenRaw}</span>
-            </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
               {row.srp} {row.currency}
             </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
-              {"skipped" in row.ruleSwitch ? (
-                <Badge color="red" size="2xsmall">
-                  {labelFor(SKIP_REASON_PL, row.ruleSwitch.skipped)}
-                </Badge>
-              ) : (
-                <div className="flex flex-col gap-1">
-                  <span>
-                    {row.ruleSwitch.fromRule} -&gt; <b>{row.ruleSwitch.toRule}</b>
-                  </span>
-                  <span className="text-ui-fg-muted">{PROMO_COPY.competitorCaveat}</span>
-                </div>
-              )}
+              {row.breakEven} {row.currency}
             </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
               {"skipped" in row.override ? (
@@ -261,16 +237,26 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
               ) : (
                 <div className="flex flex-col gap-1">
                   <span>
-                    <b>
-                      {row.override.price} {row.currency}
-                    </b>
+                    <b>{priceLoweredTo(row.override.price, row.currency)}</b>
                     {row.override.clampedToFloor ? (
                       <Badge color="orange" size="2xsmall" className="ml-1">
                         {PROMO_COPY.clampedToFloor}
                       </Badge>
                     ) : null}
                   </span>
-                  <span className="text-ui-fg-muted">{revertsTo(row.override.revertRule)}</span>
+                  <span className="text-ui-fg-muted">{PROMO_COPY.revertsNote}</span>
+                </div>
+              )}
+            </Table.Cell>
+            <Table.Cell className="txt-compact-xsmall">
+              {"skipped" in row.ruleSwitch ? (
+                <Badge color="red" size="2xsmall">
+                  {labelFor(SKIP_REASON_PL, row.ruleSwitch.skipped)}
+                </Badge>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  <span>{priceFollowsCompetition(row.breakEven, row.currency)}</span>
+                  <span className="text-ui-fg-muted">{PROMO_COPY.competitorCaveat}</span>
                 </div>
               )}
             </Table.Cell>
