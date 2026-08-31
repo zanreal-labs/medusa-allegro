@@ -592,6 +592,14 @@ export interface PriceAutomationRule {
   type?: PriceAutomationRuleType;
   /** True when Allegro created the rule automatically rather than the seller. */
   default?: boolean;
+  /**
+   * The reduction the rule carries, when it carries one:
+   * `{ changeByPercentage: { operation, value } }` or
+   * `{ changeByAmount: { operation, values } }`. Absent on a plain follow rule.
+   * Typed loosely here and compared structurally by `configEquals`, so a shape
+   * Allegro adds later is preserved rather than silently dropped.
+   */
+  configuration?: unknown;
 }
 
 /** Response of `GET /sale/price-automation/rules`. */

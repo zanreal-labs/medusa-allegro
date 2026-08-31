@@ -779,7 +779,7 @@ describe("runtime toggles", () => {
         forceDisabled: true,
         persistedEnabled: true,
       });
-      expect(states).toHaveLength(5);
+      expect(states).toHaveLength(6);
     } finally {
       if (previous === undefined) {
         delete process.env.ALLEGRO_STOCK_SYNC_DISABLED;

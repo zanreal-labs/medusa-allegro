@@ -1,6 +1,6 @@
 import { defineWidgetConfig } from "@medusajs/admin-sdk";
 import type { DetailWidgetProps } from "@medusajs/framework/types";
-import { Alert, Badge, Container, Heading, Select, Table, Text, toast } from "@medusajs/ui";
+import { Alert, Badge, Container, Heading, Select, Switch, Table, Text, toast } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
 import { sdk } from "../lib/sdk";
 import {
@@ -97,6 +97,25 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
     void load();
   }, [load]);
 
+  const setArmed = useCallback(
+    async (next: boolean) => {
+      setSaving(true);
+      try {
+        await sdk.client.fetch(`/admin/allegro/promotions/${encodeURIComponent(promotionId)}/config`, {
+          body: { discount_base: preview?.discountBase ?? null, enabled: next },
+          method: "POST",
+        });
+        toast.success(PROMO_COPY.saveOk);
+        await load();
+      } catch (caught) {
+        toast.error(caught instanceof Error ? caught.message : PROMO_COPY.saveError);
+      } finally {
+        setSaving(false);
+      }
+    },
+    [promotionId, preview?.discountBase, load],
+  );
+
   const setBase = useCallback(
     async (value: string) => {
       setSaving(true);
@@ -172,6 +191,29 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
                   </Select.Content>
                 </Select>
               </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <Switch
+                checked={preview.enabled}
+                disabled={
+                  saving ||
+                  preview.discountBase !== "competitor" ||
+                  preview.promotion.blockReasons.length > 0
+                }
+                onCheckedChange={(next) => void setArmed(next)}
+              />
+              <Text size="small" weight="plus">
+                {PROMO_COPY.armLabel}
+              </Text>
+              {preview.discountBase === null ? (
+                <Text size="small" className="text-ui-fg-subtle">
+                  {PROMO_COPY.armNeedsBase}
+                </Text>
+              ) : preview.discountBase === "srp" ? (
+                <Text size="small" className="text-ui-fg-subtle">
+                  {PROMO_COPY.armNeedsCompetitor}
+                </Text>
+              ) : null}
             </div>
           </div>
 

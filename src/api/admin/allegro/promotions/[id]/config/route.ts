@@ -18,7 +18,9 @@ import { setPromotionDiscountBase } from "../../../../../../workflows/lib/promot
  */
 export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<void> {
   const id = req.params.id;
-  const raw = (req.body as { discount_base?: unknown } | undefined)?.discount_base;
+  const body = req.body as { discount_base?: unknown; enabled?: unknown } | undefined;
+  const raw = body?.discount_base;
+  const enabled = typeof body?.enabled === "boolean" ? body.enabled : undefined;
 
   let discountBase: "srp" | "competitor" | null;
   if (raw === null || raw === undefined) {
@@ -34,6 +36,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     discountBase = parsed;
   }
 
-  const result = await setPromotionDiscountBase(req.scope, id, discountBase);
+  const result = await setPromotionDiscountBase(req.scope, id, discountBase, enabled);
+  // Still no Allegro write on this request. Arming only records intent; the overlay
+  // acts on the next price-sync tick, and only when its own global toggle is armed
+  // too.
   res.json({ ...result, readOnlyToAllegro: true });
 }

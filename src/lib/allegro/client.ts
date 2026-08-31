@@ -21,6 +21,7 @@ import type {
   ListOffersParams,
   ListOrderEventsParams,
   ListPriceAutomationRulesResponse,
+  PriceAutomationRule,
   NewCheckoutFormInvoice,
   OfferFeePreviewResponse,
   OfferPriceAutomationCommandReport,
@@ -267,6 +268,46 @@ export class AllegroClient {
    */
   listPriceAutomationRules(): Promise<ListPriceAutomationRulesResponse> {
     return this.request("GET", "/sale/price-automation/rules");
+  }
+
+  /**
+   * POST /sale/price-automation/rules - create a seller rule carrying a discount.
+   *
+   * The ONLY resource on which this plugin creates anything, and it is fenced: the
+   * caller (`decidePromoRule`) will only ever hand over a name carrying the plugin's
+   * own prefix, so a rule a person configured can never be the subject. Allegro
+   * answers 409 when the name already exists, which the ensure step treats as
+   * "somebody else created it first, re-read and reuse" rather than as a failure.
+   *
+   * `name` is capped at 33 characters by Allegro and unique per seller.
+   * Requires `allegro:api:sale:offers:write`.
+   */
+  createPriceAutomationRule(body: {
+    name: string;
+    type: string;
+    configuration?: unknown;
+  }): Promise<PriceAutomationRule> {
+    return this.request("POST", "/sale/price-automation/rules", { body });
+  }
+
+  /**
+   * PUT /sale/price-automation/rules/{ruleId} - re-assert a plugin-owned rule's
+   * configuration after it has drifted.
+   *
+   * Rule names are unique per seller, so a drifted rule cannot be replaced by
+   * creating a second one; editing is the only way back to the intended discount.
+   * Allegro refuses to edit its own default rules, which is a further backstop
+   * behind the plugin's prefix check.
+   */
+  updatePriceAutomationRule(
+    ruleId: string,
+    body: { name: string; configuration?: unknown },
+  ): Promise<PriceAutomationRule> {
+    return this.request(
+      "PUT",
+      `/sale/price-automation/rules/${encodeURIComponent(ruleId)}`,
+      { body },
+    );
   }
 
   /**

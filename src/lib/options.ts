@@ -304,6 +304,7 @@ export const DEFAULT_SCOPES = [
  * incident, and a stale `priceSyncDisabled: false` in config must not undo that.
  */
 const PRICE_SYNC_DISABLED_ENV = "ALLEGRO_PRICE_SYNC_DISABLED";
+const PROMOTION_OVERLAY_DISABLED_ENV = "ALLEGRO_PROMOTION_OVERLAY_DISABLED";
 /** Same contract as `ALLEGRO_PRICE_SYNC_DISABLED`, for the quantity writes. */
 const STOCK_SYNC_DISABLED_ENV = "ALLEGRO_STOCK_SYNC_DISABLED";
 /** Same contract again, for the order event drain. */
@@ -324,6 +325,11 @@ const truthyEnv = (value: string | undefined): boolean => {
 export const isPriceSyncDisabledByEnv = (
   env: NodeJS.ProcessEnv = process.env,
 ): boolean => truthyEnv(env[PRICE_SYNC_DISABLED_ENV]);
+
+/** Env force-off for the promotion overlay. Can only disable, never enable. */
+export const isPromotionOverlayDisabledByEnv = (
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => truthyEnv(env[PROMOTION_OVERLAY_DISABLED_ENV]);
 
 export const isStockSyncDisabledByEnv = (
   env: NodeJS.ProcessEnv = process.env,
