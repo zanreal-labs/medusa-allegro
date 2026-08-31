@@ -6,7 +6,7 @@ import {
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk";
 import { AllegroAuthError } from "../lib/allegro/auth-error";
-import { AllegroApiError } from "../lib/allegro/errors";
+import { AllegroApiError, describeError } from "../lib/allegro/errors";
 import {
   clearFailureKey,
   isEmptyFailureState,
@@ -382,7 +382,7 @@ export const repairAllegroOrder = async (
           value: undefined,
         };
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = describeError(error);
         result = { error: message, ok: false };
         // The failure state is deliberately untouched: a failed repair is not another
         // consecutive drain failure, and letting a retried repair drive the streak

@@ -1,5 +1,6 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { describeError } from "../../../../lib/allegro/errors";
 import { ALLEGRO_MODULE } from "../../../../modules/allegro";
 import type AllegroModuleService from "../../../../modules/allegro/service";
 
@@ -45,7 +46,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
   const token = await allegro.loadToken().catch((error: unknown) => {
     revocationFailed = true;
     logger.warn(
-      `[medusa-allegro] the stored tokens could not be read, so nothing was revoked at Allegro - ${String(error)}`,
+      `[medusa-allegro] the stored tokens could not be read, so nothing was revoked at Allegro - ${describeError(error)}`,
     );
     return;
   });

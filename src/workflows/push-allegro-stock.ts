@@ -9,7 +9,7 @@ import {
 } from "@medusajs/framework/workflows-sdk";
 import { AllegroAuthError } from "../lib/allegro/auth-error";
 import { AllegroClient } from "../lib/allegro/client";
-import { AllegroApiError } from "../lib/allegro/errors";
+import { AllegroApiError, describeError } from "../lib/allegro/errors";
 import type { OfferQuantityTask } from "../lib/allegro/types";
 import {
   buildStockCommandChunks,
@@ -183,9 +183,7 @@ const submitCommands = async (
       const message =
         error instanceof AllegroAuthError
           ? `auth error: ${error.message}`
-          : error instanceof Error
-            ? error.message
-            : String(error);
+          : describeError(error);
       return { error: message, submitted };
     }
   }
@@ -331,7 +329,7 @@ const collectOutcomes = async (
           synced: confirmed.length,
         };
       } catch (error) {
-        firstError ??= error instanceof Error ? error.message : String(error);
+        firstError ??= describeError(error);
         return {
           confirmed: [],
           failed: 0,
@@ -520,9 +518,7 @@ const recordStockConflicts = async (
     }
   } catch (error) {
     logger.error(
-      `[allegro-stock] could not record ${conflicts.length} sku-mismatch conflict(s) on their mapping rows: ${
-        error instanceof Error ? error.message : String(error)
-      }. The offers were still skipped and nothing was written to Allegro.`,
+      `[allegro-stock] could not record ${conflicts.length} sku-mismatch conflict(s) on their mapping rows: ${describeError(error)}. The offers were still skipped and nothing was written to Allegro.`,
     );
   }
 };

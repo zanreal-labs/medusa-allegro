@@ -1,5 +1,6 @@
 import type { IEventBusModuleService, Logger, MedusaContainer } from "@medusajs/framework/types";
 import { EventPriority, Modules, OrderWorkflowEvents } from "@medusajs/framework/utils";
+import { describeError } from "../../lib/allegro/errors";
 
 /**
  * `order.placed`, for orders that were placed on Allegro.
@@ -80,9 +81,7 @@ export const emitOrderPlaced = async (
     return true;
   } catch (error) {
     logger.warn(
-      `[allegro-orders] created Medusa order ${orderId} but could not emit \`${ORDER_PLACED_EVENT}\`: ${
-        error instanceof Error ? error.message : String(error)
-      }. The order is fine; anything listening for new orders (a Slack announcement, for instance) will not have heard about this one.`,
+      `[allegro-orders] created Medusa order ${orderId} but could not emit \`${ORDER_PLACED_EVENT}\`: ${describeError(error)}. The order is fine; anything listening for new orders (a Slack announcement, for instance) will not have heard about this one.`,
     );
     return false;
   }

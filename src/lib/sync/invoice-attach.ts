@@ -1,3 +1,4 @@
+import { describeError } from "../allegro/errors";
 import { ALLEGRO_INVOICE_MAX_BYTES } from "../allegro/types";
 import type { CheckoutFormInvoice } from "../allegro/types";
 
@@ -315,7 +316,7 @@ export const describeAttachFailure = (
       error.requestId ? ` [x-request-id: ${error.requestId}]` : ""
     }.${renderFacts(sent)}`;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = describeError(error);
   return `the invoice attachment failed ${where}: ${message}.${renderFacts(sent)}`;
 };
 

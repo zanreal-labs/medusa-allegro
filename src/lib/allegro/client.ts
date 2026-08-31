@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { AllegroAuthError } from "./auth-error";
-import { AllegroApiError } from "./errors";
+import { AllegroApiError, describeError } from "./errors";
 import { AllegroOAuth } from "./oauth";
 import { ALLEGRO_DEFAULT_MARKETPLACE_ID, ALLEGRO_ENDPOINTS, ALLEGRO_MEDIA_TYPE } from "./types";
 import type {
@@ -915,7 +915,7 @@ export class AllegroClient {
     try {
       await this.forceRefresh();
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = describeError(error);
       throw new AllegroAuthError(
         `Allegro rejected the access token (401) and the refresh token could not be exchanged: ${reason}. The Allegro account has to be reconnected.`,
         "refresh_rejected",
@@ -1012,7 +1012,7 @@ export class AllegroClient {
       if (error instanceof AllegroAuthError) {
         throw error;
       }
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = describeError(error);
       throw new AllegroApiError({
         httpStatus: 0,
         message: `Allegro request failed: ${reason}`,

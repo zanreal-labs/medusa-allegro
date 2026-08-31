@@ -5,6 +5,7 @@ import {
   completeOrderWorkflow,
   createOrderWorkflow,
 } from "@medusajs/medusa/core-flows";
+import { describeError } from "../../lib/allegro/errors";
 import type { AllegroCheckoutForm } from "../../lib/allegro/types";
 import {
   mapCheckoutFormStatus,
@@ -318,7 +319,7 @@ const createMedusaOrder = async (
     });
     return { id: (result as { id: string }).id };
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
+    return { error: describeError(error) };
   }
 };
 
@@ -414,7 +415,7 @@ const applyMedusaAction = async (
     }
     return { kind: "done" };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     if (isActionAlreadySatisfied(action, message)) {
       // The state Allegro is asking for already holds - a staff member cancelled by hand, or
       // our status snapshot was a moment stale. Treating this as a failure was a permanent
@@ -484,9 +485,7 @@ const findExistingMedusaOrder = async (
     );
   } catch (error) {
     logger.warn(
-      `[allegro-orders] could not query orders by \`metadata.allegro_checkout_form_id\` (${
-        error instanceof Error ? error.message : String(error)
-      }); falling back to a bounded newest-first scan so a duplicate order is not created.`,
+      `[allegro-orders] could not query orders by \`metadata.allegro_checkout_form_id\` (${describeError(error)}); falling back to a bounded newest-first scan so a duplicate order is not created.`,
     );
   }
 
@@ -537,9 +536,7 @@ const linkMedusaOrder = async (
     await allegro.updateAllegroOrders([{ id: rowId, medusa_order_id: medusaOrderId }] as never);
   } catch (error) {
     logger.error(
-      `[allegro-orders] created or adopted Medusa order ${medusaOrderId} for checkout form ${checkoutFormId} but FAILED to record the link on allegro_order ${rowId}: ${
-        error instanceof Error ? error.message : String(error)
-      }. The next pass adopts it by \`metadata.allegro_checkout_form_id\`; set \`medusa_order_id\` by hand if that does not happen.`,
+      `[allegro-orders] created or adopted Medusa order ${medusaOrderId} for checkout form ${checkoutFormId} but FAILED to record the link on allegro_order ${rowId}: ${describeError(error)}. The next pass adopts it by \`metadata.allegro_checkout_form_id\`; set \`medusa_order_id\` by hand if that does not happen.`,
     );
   }
 };
@@ -646,9 +643,7 @@ const readMedusaOrder = async (
     };
   } catch (error) {
     logger.warn(
-      `[allegro-orders] could not read Medusa order ${medusaOrderId}: ${
-        error instanceof Error ? error.message : String(error)
-      }. The status action falls back to attempting the workflow, no total conflict is recorded - an unreadable total is not evidence of a mismatch - and the customer name is left alone, because an unread customer cannot be shown to be missing one.`,
+      `[allegro-orders] could not read Medusa order ${medusaOrderId}: ${describeError(error)}. The status action falls back to attempting the workflow, no total conflict is recorded - an unreadable total is not evidence of a mismatch - and the customer name is left alone, because an unread customer cannot be shown to be missing one.`,
     );
     return undefined;
   }

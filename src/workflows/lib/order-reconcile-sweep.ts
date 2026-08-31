@@ -1,5 +1,6 @@
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import type { AllegroClient } from "../../lib/allegro/client";
+import { describeError } from "../../lib/allegro/errors";
 import {
   advanceReconcileMarks,
   classifyReconcileTier,
@@ -187,7 +188,7 @@ const pushSentIfShipped = async (
       orderId: medusaOrderId,
     });
   } catch (error) {
-    outcome = { attempted: true, error: error instanceof Error ? error.message : String(error) };
+    outcome = { attempted: true, error: describeError(error) };
   }
 
   if (outcome.status === "SENT" && !outcome.error) {
@@ -221,9 +222,7 @@ const pushSentIfShipped = async (
       ] as never)
       .catch((error: unknown) => {
         logger.error(
-          `[allegro-orders] could not record the failed SENT push on allegro_order ${row.id}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `[allegro-orders] could not record the failed SENT push on allegro_order ${row.id}: ${describeError(error)}`,
         );
       });
   }
@@ -404,9 +403,7 @@ export const sweepOpenAllegroOrders = async (
       // Warn rather than throw. The sweep is a safety net, and one unreadable form must not
       // stop it re-checking the rest - least of all the paid order sitting behind it.
       logger.warn(
-        `[allegro-orders] reconciliation could not re-read checkout form ${row.checkout_form_id}: ${
-          error instanceof Error ? error.message : String(error)
-        }. The next sweep retries it.`,
+        `[allegro-orders] reconciliation could not re-read checkout form ${row.checkout_form_id}: ${describeError(error)}. The next sweep retries it.`,
       );
     }
   }

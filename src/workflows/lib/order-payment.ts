@@ -4,6 +4,7 @@ import {
   createOrderPaymentCollectionWorkflow,
   markPaymentCollectionAsPaid,
 } from "@medusajs/medusa/core-flows";
+import { describeError } from "../../lib/allegro/errors";
 import { parseAmount } from "../../lib/sync/money";
 import type { AmountInput } from "../../lib/sync/money";
 import type { OrderPaymentState, PaymentPlan } from "../../lib/sync/order-reconcile";
@@ -103,9 +104,7 @@ export const readOrderPaymentStates = async (
     }
   } catch (error) {
     logger.warn(
-      `[allegro-orders] could not read the payment state of ${orderIds.length} Medusa order(s): ${
-        error instanceof Error ? error.message : String(error)
-      }. No payment is registered against a state that could not be read - inventing one is the failure this guard exists to prevent.`,
+      `[allegro-orders] could not read the payment state of ${orderIds.length} Medusa order(s): ${describeError(error)}. No payment is registered against a state that could not be read - inventing one is the failure this guard exists to prevent.`,
     );
   }
   return states;
@@ -204,7 +203,7 @@ export const registerOrderPayment = async (
     );
     return { registered: true };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     logger.error(
       `[allegro-orders] FAILED to register the buyer's payment on Medusa order ${orderId}: ${message}. The order stays unpaid, so it stays in the fast reconciliation tier and the next sweep retries it. Invoicing is blocked until this succeeds.`,
     );

@@ -1,6 +1,7 @@
 import type { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import { AllegroAuthError } from "../../../../../lib/allegro/auth-error";
+import { describeError } from "../../../../../lib/allegro/errors";
 import { safeEqual } from "../../../../../lib/crypto";
 import { clearStateCookie, readStateCookie, requestOrigin } from "../../../../../lib/oauth-state";
 import { ALLEGRO_MODULE } from "../../../../../modules/allegro";
@@ -117,7 +118,7 @@ export async function GET(req: AuthenticatedMedusaRequest, res: MedusaResponse):
     const isExchange = error instanceof AllegroAuthError;
     const reason = isExchange
       ? `${(error as AllegroAuthError).code}: ${error.message}`
-      : String(error);
+      : describeError(error);
     logger.error(`[medusa-allegro] connect failed - ${reason}`);
     return failSpent(res, isExchange ? "exchange_failed" : "persist_failed");
   }

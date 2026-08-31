@@ -1,6 +1,7 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework";
 import type { Logger } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { describeError } from "../lib/allegro/errors";
 import { INVOICE_ISSUED_EVENT, isSkipped, readInvoiceIssued } from "../lib/sync/invoice-attach";
 import { attachAllegroInvoice } from "../workflows/attach-allegro-invoice";
 
@@ -50,7 +51,7 @@ export default async function allegroInvoiceAttachSubscriber({
     // on the row, so reaching here means something unexpected - a container resolve, a
     // database outage. Still swallowed, for the reasons above.
     logger.error(
-      `[allegro-invoice] subscriber failed for order ${read.orderId}: ${error instanceof Error ? error.message : String(error)}`,
+      `[allegro-invoice] subscriber failed for order ${read.orderId}: ${describeError(error)}`,
     );
   }
 }
