@@ -1,6 +1,7 @@
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import type { AllegroClient } from "../../lib/allegro/client";
+import { describeError } from "../../lib/allegro/errors";
 import { ALLEGRO_MODULE } from "../../modules/allegro";
 import type AllegroModuleService from "../../modules/allegro/service";
 import type {
@@ -254,7 +255,7 @@ export const runUnderSyncClaim = async <T>(
     ({ outcome } = result);
     return { outcome, ran: true, value: result.value };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     logger.error(`[allegro-${provider}] run failed: ${message}`);
     outcome = { lastError: message, status: "error" };
     throw error;

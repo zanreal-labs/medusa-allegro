@@ -1,3 +1,4 @@
+import { describeError } from "../allegro/errors";
 import type { AllegroOrderEvent } from "../allegro/types";
 import {
   emptyFailureState,
@@ -362,7 +363,7 @@ const applyEventRefreshes = async (
       refreshed += 1;
       succeeded.add(formId);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = describeError(error);
       failed.set(formId, message);
       if (deps.isSystemicError?.(error)) {
         systemicSignal = true;

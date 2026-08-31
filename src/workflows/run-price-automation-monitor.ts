@@ -6,7 +6,7 @@ import {
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk";
 import type { AllegroClient } from "../lib/allegro/client";
-import { AllegroApiError } from "../lib/allegro/errors";
+import { AllegroApiError, describeError } from "../lib/allegro/errors";
 import type { AllegroOffer } from "../lib/allegro/types";
 import {
   computeDrift,
@@ -372,7 +372,7 @@ export const runPriceAutomationMonitor = async (
           result.updated = updates.length;
         } catch (error) {
           result.failed += updates.length;
-          firstError = `automation column update: ${error instanceof Error ? error.message : String(error)}`;
+          firstError = `automation column update: ${describeError(error)}`;
         }
       }
       if (auditRows.length > 0) {
@@ -381,7 +381,7 @@ export const runPriceAutomationMonitor = async (
           result.transitions = auditRows.length;
         } catch (error) {
           result.failed += 1;
-          firstError ??= `audit insert: ${error instanceof Error ? error.message : String(error)}`;
+          firstError ??= `audit insert: ${describeError(error)}`;
         }
       }
 

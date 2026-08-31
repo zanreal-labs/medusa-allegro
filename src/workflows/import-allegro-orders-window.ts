@@ -5,6 +5,7 @@ import {
   StepResponse,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk";
+import { describeError } from "../lib/allegro/errors";
 import { readFailureState, standingHealthLine } from "../lib/sync/failure-state";
 import { ALLEGRO_SYNC_PROVIDERS } from "../modules/allegro/service";
 import { applyCheckoutForm } from "./lib/order-upsert";
@@ -128,7 +129,7 @@ export const importAllegroOrdersWindow = async (
             // the ids to chase what is left.
             failedFormIds.push(form.id);
             logger.error(
-              `[allegro-orders-import] checkout form ${form.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+              `[allegro-orders-import] checkout form ${form.id} failed: ${describeError(error)}`,
             );
           }
         }

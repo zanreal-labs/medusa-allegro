@@ -1,6 +1,7 @@
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import { createReservationsWorkflow } from "@medusajs/medusa/core-flows";
+import { describeError } from "../../lib/allegro/errors";
 import type { AmountInput } from "../../lib/sync/money";
 import { planOrderReservations, readQuantity } from "../../lib/sync/order-reservations";
 import type {
@@ -258,7 +259,7 @@ export const ensureOrderReservations = async (
   try {
     plan = await planReservationsForOrder(container, orderId);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     logger.warn(
       `[allegro-orders] could not work out which inventory reservations Medusa order ${orderId} is missing: ${message}. No reservation is created against a state that could not be read; the next reconciliation sweep retries it.`,
     );
@@ -284,7 +285,7 @@ export const ensureOrderReservations = async (
     );
     return { created: plan.create.length, gaps: plan.gaps.length };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     logger.warn(
       `[allegro-orders] could not reserve inventory for Medusa order ${orderId}: ${message}. The order stands and the licence/delivery work is unaffected, but fulfilling it will fail with "No stock reservation found" until this succeeds. The next reconciliation sweep retries it.`,
     );

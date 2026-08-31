@@ -1,5 +1,6 @@
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { updateCustomersWorkflow } from "@medusajs/medusa/core-flows";
+import { describeError } from "../../lib/allegro/errors";
 import type { CustomerNamePlan } from "../../lib/sync/customer-identity";
 
 /**
@@ -60,7 +61,7 @@ export const nameOrderCustomer = async (
     );
     return { named: true };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     logger.warn(
       `[allegro-orders] could not fill ${plan.fields.join(", ")} on customer ${plan.customerId} (Medusa order ${orderId}): ${message}. The order is otherwise applied and the next pass retries this.`,
     );

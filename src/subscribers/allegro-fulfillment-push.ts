@@ -1,6 +1,7 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework";
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { describeError } from "../lib/allegro/errors";
 import { pushAllegroFulfillment } from "../workflows/push-allegro-fulfillment";
 
 /**
@@ -112,7 +113,7 @@ export default async function allegroFulfillmentPushSubscriber({
     // reaching here means something unexpected (a container resolve, a database
     // outage, the order lookup). Still swallowed, for the same reason.
     logger.error(
-      `[allegro-fulfillment] subscriber failed for ${event.name}: ${error instanceof Error ? error.message : String(error)}`,
+      `[allegro-fulfillment] subscriber failed for ${event.name}: ${describeError(error)}`,
     );
   }
 }

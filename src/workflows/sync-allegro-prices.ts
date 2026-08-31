@@ -11,7 +11,7 @@ import { AllegroAuthError } from "../lib/allegro/auth-error";
 // `AllegroClient is not defined`, which `runCommand` catches and reports as a per-offer
 // failure - so every healthy push would look like a failed one.
 import { AllegroClient } from "../lib/allegro/client";
-import { AllegroApiError } from "../lib/allegro/errors";
+import { AllegroApiError, describeError } from "../lib/allegro/errors";
 import type { AllegroOffer } from "../lib/allegro/types";
 import {
   clearFailureKey,
@@ -440,7 +440,7 @@ const mapCommandError = (error: unknown): { outcome: CommandOutcome; auditError:
     }
     return { auditError: error.message, outcome: { error: error.message, kind: "failed" } };
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = describeError(error);
   return { auditError: message, outcome: { error: message, kind: "failed" } };
 };
 
@@ -468,7 +468,7 @@ const openAuditRow = async (
     pushId = created.id;
   } catch (error) {
     return {
-      error: `audit insert failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: `audit insert failed: ${describeError(error)}`,
       ok: false,
     };
   }

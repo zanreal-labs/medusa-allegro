@@ -1,5 +1,6 @@
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { describeError } from "../../lib/allegro/errors";
 import type { ShipmentState } from "../../lib/sync/order-reconcile";
 
 /**
@@ -91,9 +92,7 @@ export const readOrderShipmentStates = async (
     }
   } catch (error) {
     logger.warn(
-      `[allegro-orders] could not read the shipment state of ${orderIds.length} Medusa order(s): ${
-        error instanceof Error ? error.message : String(error)
-      }. No fulfillment status is pushed to Allegro for a state that could not be read; the next sweep retries.`,
+      `[allegro-orders] could not read the shipment state of ${orderIds.length} Medusa order(s): ${describeError(error)}. No fulfillment status is pushed to Allegro for a state that could not be read; the next sweep retries.`,
     );
   }
   return states;

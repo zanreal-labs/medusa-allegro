@@ -1,7 +1,7 @@
 import type { MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import type { Logger } from "@medusajs/framework/types";
-import { AllegroApiError } from "../lib/allegro/errors";
+import { AllegroApiError, describeError } from "../lib/allegro/errors";
 import type { AllegroSettableFulfillmentStatus } from "../lib/allegro/types";
 import { ALLEGRO_MODULE } from "../modules/allegro";
 import type AllegroModuleService from "../modules/allegro/service";
@@ -102,9 +102,7 @@ export const pushAllegroFulfillment = async (
     const message =
       error instanceof AllegroApiError
         ? `Allegro rejected the fulfillment update (HTTP ${error.httpStatus}): ${error.message}`
-        : (error instanceof Error
-          ? error.message
-          : String(error));
+        : describeError(error);
     // Recorded, never thrown. The Medusa fulfillment already exists; failing the
     // subscriber would not undo it, and it would bury the reason.
     await allegro.updateAllegroOrders([

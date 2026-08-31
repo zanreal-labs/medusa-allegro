@@ -1,6 +1,7 @@
 import type { Logger, MedusaContainer } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import type { AllegroClient } from "../lib/allegro/client";
+import { describeError as describeThrownValue } from "../lib/allegro/errors";
 import {
   attachErrorLine,
   describeAttachFailure,
@@ -121,7 +122,7 @@ class StagedError extends Error {
     readonly stage: AttachStage,
     readonly reason: unknown,
   ) {
-    super(reason instanceof Error ? reason.message : String(reason));
+    super(describeThrownValue(reason));
     this.name = "StagedError";
   }
 }
