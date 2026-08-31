@@ -720,8 +720,11 @@ conflicted, so running price sync against a stale mapping is exactly the case wh
 a command lands on the wrong offer.
 
 Stock has its own cadence because stock moves on every order and an hour-stale
-marketplace quantity is how a sold-out item stays purchasable. Orders runs per
-minute because an unapplied `BOUGHT` event is an order nobody has been told about.
+marketplace quantity is how a sold-out item stays purchasable — and it also has an
+event-driven fast path on top, so a sale updates its own SKUs within seconds rather
+than waiting for the sweep. Orders runs on a ~20s interval because an unapplied
+`BOUGHT` event is an order nobody has been told about; an interval rather than a
+cron because Medusa's cron only resolves to the minute.
 
 ### Reconciliation first, events almost never
 
@@ -735,10 +738,20 @@ depended on them would leave a permanently wrong marketplace quantity behind eve
 missed event. With reconciliation, a missed event costs at most one cycle of
 staleness.
 
-The one exception is fulfillment write-back, and it is an exception for a structural
-reason rather than a convenient one: a fulfillment is a point-in-time act, not
-reconcilable state. There is no "current fulfillment status" in Medusa for a sweep
-to compare against Allegro's, so the event is the only signal there is.
+The one loop that is *only* event-driven is fulfillment write-back, and it is an
+exception for a structural reason rather than a convenient one: a fulfillment is a
+point-in-time act, not reconcilable state. There is no "current fulfillment status"
+in Medusa for a sweep to compare against Allegro's, so the event is the only signal
+there is.
+
+Stock is the one place where events and reconciliation run *together*. Order and
+reservation lifecycle events mark the SKUs they touched dirty, and a debounced queue
+pushes just those offers within seconds; the 15-minute sweep still reads the whole
+catalogue and repairs anything the events missed. The events are a hint about *what
+to re-read*, never a source of quantity — the push reads Medusa's available quantity
+and Allegro's offer for itself — so the unreliability behind medusa#11691 cannot
+produce a wrong write, only a late one. And because the sweep is unchanged, a dropped
+event costs exactly what it cost before: the next cycle.
 
 ### Medusa inventory is the source of truth for stock
 

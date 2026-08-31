@@ -13,12 +13,19 @@ const JOB_NAME = "allegro-stock-sync";
  * not move on that timescale, so pinning both to the faster cadence would multiply
  * the catalogue listing cost for no benefit.
  *
- * Reconciliation-first, which is why it needs no event subscriber to be correct.
+ * Reconciliation-first, which is why it needs no event subscriber to be CORRECT.
  * Medusa's inventory events are not a reliable trigger (see the plugin README and
  * medusa#11691), so the design does not depend on them: every run reads the whole
  * eligible catalogue's available quantity and compares it against Allegro, so a
  * missed event costs at most one cycle of staleness rather than a permanently wrong
  * quantity.
+ *
+ * There IS an event path now (`subscribers/allegro-stock-dirty` ->
+ * `workflows/lib/stock-push-queue`), and it changes nothing about the above. It makes
+ * the common case fast - a sale updates its own SKUs within seconds instead of within
+ * the cycle - and this run remains the thing that makes the catalogue right. Anything
+ * the events missed, dropped on a restart, or could not read is repaired here, so the
+ * guarantee this job provides is exactly what it was before the fast path existed.
  */
 export default async function allegroStockSyncJob(container: MedusaContainer): Promise<void> {
   const logger = container.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
@@ -47,15 +54,51 @@ export default async function allegroStockSyncJob(container: MedusaContainer): P
   }
 }
 
+/** The default reconciliation cadence, in milliseconds. */
+export const DEFAULT_STOCK_SYNC_INTERVAL_MS = 900_000;
+
+/**
+ * Resolve the reconciliation schedule from the environment.
+ *
+ * Fifteen minutes by default, unchanged: fast enough to bound how long a wrong
+ * quantity can persist, slow enough that a full catalogue listing plus an inventory
+ * read per variant is not a constant load.
+ *
+ * What is new is that the cadence is now expressible as an INTERVAL and not only as
+ * cron. Medusa's cron resolves to the minute, so cron could express "every 15
+ * minutes" and "every minute" and nothing in between or below - and this is the loop
+ * whose staleness window is an oversell, so the cadence is a dial an operator may
+ * genuinely need to turn during an incident. An interval also spreads the run off the
+ * whole-minute boundary that every other cron in the stack fires on.
+ *
+ * Note the cadence itself is deliberately NOT changed here. The event-driven push
+ * (`workflows/lib/stock-push-queue`) is what closes the window in the common case;
+ * this loop's job is to be the reconciliation that catches what events miss, and
+ * making it run more often is a separate decision with a real request cost, taken with
+ * numbers rather than bundled into the plumbing that makes it possible.
+ *
+ * `ALLEGRO_STOCK_SYNC_CRON`, if set, wins - the two are mutually exclusive in Medusa's
+ * scheduler. That also means every store already setting the cron (the shipped
+ * `.env.template` does) keeps precisely the behaviour it has today.
+ *
+ * An env var rather than a plugin option because Medusa evaluates `config.schedule` at
+ * plugin-load time, before the DI container - and therefore this plugin's `options` -
+ * exists. See the offer-sync job.
+ */
+export const resolveStockSyncSchedule = (
+  env: NodeJS.ProcessEnv = process.env,
+): { cron: string } | { interval: number } => {
+  const cron = env.ALLEGRO_STOCK_SYNC_CRON?.trim();
+  if (cron) {
+    return { cron };
+  }
+  const parsed = Number.parseInt(env.ALLEGRO_STOCK_SYNC_INTERVAL_MS ?? "", 10);
+  const interval =
+    Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_STOCK_SYNC_INTERVAL_MS;
+  return { interval };
+};
+
 export const config = {
   name: JOB_NAME,
-  /**
-   * Env var rather than a plugin option: Medusa evaluates `config.schedule` at
-   * plugin-load time, before the DI container exists. See the offer-sync job.
-   *
-   * Every 15 minutes by default. Fast enough that a sold-out item stops being
-   * purchasable within a quarter of an hour, slow enough that a full catalogue
-   * listing plus an inventory read per variant is not a constant load.
-   */
-  schedule: process.env.ALLEGRO_STOCK_SYNC_CRON ?? "*/15 * * * *",
+  schedule: resolveStockSyncSchedule(),
 };

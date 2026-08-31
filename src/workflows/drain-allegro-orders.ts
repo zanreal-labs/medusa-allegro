@@ -30,8 +30,9 @@ import { runUnderSyncClaim } from "./lib/run";
  * per-form application in `lib/order-upsert`. What is here is the wiring: the
  * claim, the cursor and failure state, and the operator entry points.
  *
- * Runs per minute, because a `BOUGHT` event that has not been applied is an order
- * nobody has been told about.
+ * Runs on a ~20s interval, because a `BOUGHT` event that has not been applied is an
+ * order nobody has been told about. An interval rather than a cron because Medusa's
+ * cron only resolves to the minute; see `resolveOrdersSyncSchedule`.
  */
 
 export interface OrdersSyncResult extends OrdersSyncSummary {

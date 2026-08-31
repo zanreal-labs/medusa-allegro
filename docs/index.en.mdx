@@ -70,6 +70,9 @@ the ones that write - its own kill switch.
 
   every 20s         order drain
                     reads GET /order/events, writes Medusa orders
+
+  on a sale         targeted stock push  (debounced, coalesced)
+  (~3s later)       writes a quantity command for the sold SKUs only
 ```
 
 The first three are chained into one job because they all need the same input, a
@@ -83,6 +86,13 @@ fulfillment write-back and the invoice attach. Neither is a loop because neither
 has reconcilable state to compare against. Everything else is a reconciliation
 that reads the whole relevant state each run, so a missed event costs at most one
 cycle of staleness instead of leaving a permanently wrong quantity behind.
+
+Stock is the exception that proves the rule: it has *both*. Order and reservation
+lifecycle events mark the SKUs they touched dirty, and a debounced queue pushes just
+those offers a few seconds later — because for a quantity, "one cycle of staleness"
+means an item that sold out fifteen minutes ago is still purchasable, which is an
+oversell. The 15-minute sweep is unchanged and still reads everything, so the events
+only ever make the common case faster, never the guarantee weaker.
 
 ## Install
 
