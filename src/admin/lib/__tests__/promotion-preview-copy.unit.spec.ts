@@ -4,9 +4,9 @@ import {
   coverageBody,
   labelFor,
   movesHeadline,
-  priceFollowsCompetition,
-  priceLoweredTo,
+  marginLabel,
   PROMO_COPY,
+  THIN_MARGIN_PCT,
   SKIP_REASON_PL,
 } from "../promotion-preview-copy";
 
@@ -73,8 +73,7 @@ describe("operator-facing copy stays about prices, not mechanism", () => {
       ...Object.values(BLOCK_REASON_PL),
       movesHeadline(3),
       coverageBody({ eligible: 1, linked: 2, skipped: 0, targeted: 3 }),
-      priceLoweredTo(89.99, "PLN"),
-      priceFollowsCompetition(40, "PLN"),
+      marginLabel(12.4, 0.13, "PLN"),
     ].join(" ");
     for (const forbidden of ["ZR\u276F", "Wyr\u00f3\u017cnienie", "Bitdefender", "regu\u0142y cenowej", "nadpisanie", "przelacz"]) {
       expect(surfaces).not.toContain(forbidden);
@@ -97,5 +96,36 @@ describe("messages are short and actionable", () => {
   it("keeps per-SKU skip reasons to one short line too", () => {
     const tooLong = Object.entries(SKIP_REASON_PL).filter(([, text]) => text.length > 70);
     expect(tooLong).toEqual([]);
+  });
+});
+
+describe("marginLabel", () => {
+  it("shows money and percent together", () => {
+    expect(marginLabel(12.4, 0.13, "PLN")).toBe("12.40 PLN (13%)");
+  });
+
+  it("omits the percent when the ratio is unknown rather than printing NaN", () => {
+    expect(marginLabel(12.4, undefined, "PLN")).toBe("12.40 PLN");
+  });
+
+  it("keeps two decimals on the money", () => {
+    expect(marginLabel(0, 0, "PLN")).toBe("0.00 PLN (0%)");
+  });
+});
+
+describe("thin margin threshold", () => {
+  it("is a single constant, expressed as a fraction", () => {
+    expect(THIN_MARGIN_PCT).toBe(0.05);
+  });
+});
+
+describe("no behavioural notes remain in the table copy", () => {
+  it("carries no revert or cheapest-case sentence", () => {
+    // The owner asked for prices, not explanations. These two sentences used to
+    // repeat under every row, twice per row.
+    const all = Object.values(PROMO_COPY).join(" ");
+    expect(all).not.toContain("wraca do");
+    expect(all).not.toContain("najtańsi");
+    expect(all).not.toContain("30 dni");
   });
 });

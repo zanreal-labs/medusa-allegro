@@ -8,9 +8,9 @@ import {
   coverageBody,
   labelFor,
   movesHeadline,
-  priceFollowsCompetition,
-  priceLoweredTo,
+  marginLabel,
   PROMO_COPY,
+  THIN_MARGIN_PCT,
   SKIP_REASON_PL,
 } from "../lib/promotion-preview-copy";
 
@@ -50,7 +50,8 @@ interface OfferPreview {
     | { fromRule: string; toRule: string; competitorRelativeCaveat: true }
     | { skipped: string };
   override: { price: number; clampedToFloor: boolean; revertRule: string } | { skipped: string };
-  costRecentlyEdited: boolean;
+  marginAmount?: number;
+  marginPct?: number;
 }
 
 interface PromotionPreview {
@@ -192,6 +193,44 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
   );
 };
 
+/**
+ * The margin the SRP-base discounted price leaves, and the only pathology states
+ * that can actually occur.
+ *
+ * Reachability, checked rather than assumed. Both modes clamp at the break-even
+ * floor, and break-even already includes Allegro's commission, so a price below
+ * cost is not reachable through either path: the override is floored at break-even
+ * by `computeOverridePrice`, and the competitor rule is bounded by the same floor.
+ * The loss state is therefore rendered defensively rather than expectantly - if it
+ * ever appears, the clamp invariant is broken and that is precisely the moment
+ * somebody needs to see it, so it stays.
+ *
+ * The state that IS routinely reachable is a thin margin: a discount landing near
+ * the floor leaves a few percent, and the clamped case leaves whatever the whole-PLN
+ * rounding of the floor happens to give.
+ */
+const MarginCell = ({ row }: { row: OfferPreview }) => {
+  if (row.marginAmount === undefined) {
+    return <span className="text-ui-fg-muted">{PROMO_COPY.marginUnknown}</span>;
+  }
+  const value = marginLabel(row.marginAmount, row.marginPct, row.currency);
+  if (row.marginAmount <= 0) {
+    return (
+      <Badge color="red" size="2xsmall">
+        {PROMO_COPY.marginLoss}: {value}
+      </Badge>
+    );
+  }
+  if (row.marginPct !== undefined && row.marginPct < THIN_MARGIN_PCT) {
+    return (
+      <Badge color="orange" size="2xsmall">
+        {PROMO_COPY.marginThin}: {value}
+      </Badge>
+    );
+  }
+  return <span>{value}</span>;
+};
+
 const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
   <>
     <Table>
@@ -202,7 +241,7 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
           <Table.HeaderCell>{PROMO_COPY.tableFloor}</Table.HeaderCell>
           <Table.HeaderCell>{PROMO_COPY.tableSrpBase}</Table.HeaderCell>
           <Table.HeaderCell>{PROMO_COPY.tableCompetitor}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableCost}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableMargin}</Table.HeaderCell>
         </Table.Row>
       </Table.Header>
       <Table.Body>
@@ -221,17 +260,16 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
                   {labelFor(SKIP_REASON_PL, row.override.skipped)}
                 </Badge>
               ) : (
-                <div className="flex flex-col gap-1">
-                  <span>
-                    <b>{priceLoweredTo(row.override.price, row.currency)}</b>
-                    {row.override.clampedToFloor ? (
-                      <Badge color="orange" size="2xsmall" className="ml-1">
-                        {PROMO_COPY.clampedToFloor}
-                      </Badge>
-                    ) : null}
-                  </span>
-                  <span className="text-ui-fg-muted">{PROMO_COPY.revertsNote}</span>
-                </div>
+                <>
+                  <b>
+                    {row.override.price} {row.currency}
+                  </b>
+                  {row.override.clampedToFloor ? (
+                    <Badge color="orange" size="2xsmall" className="ml-1">
+                      {PROMO_COPY.clampedToFloor}
+                    </Badge>
+                  ) : null}
+                </>
               )}
             </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
@@ -240,20 +278,13 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
                   {labelFor(SKIP_REASON_PL, row.ruleSwitch.skipped)}
                 </Badge>
               ) : (
-                <div className="flex flex-col gap-1">
-                  <span>{priceFollowsCompetition(row.breakEven, row.currency)}</span>
-                  <span className="text-ui-fg-muted">{PROMO_COPY.competitorCaveat}</span>
-                </div>
+                <span>
+                  {row.breakEven} - {row.srp} {row.currency}
+                </span>
               )}
             </Table.Cell>
-            <Table.Cell>
-              {row.costRecentlyEdited ? (
-                <Badge color="orange" size="2xsmall">
-                  {PROMO_COPY.costEdited}
-                </Badge>
-              ) : (
-                <span className="text-ui-fg-muted">-</span>
-              )}
+            <Table.Cell className="txt-compact-xsmall">
+              <MarginCell row={row} />
             </Table.Cell>
           </Table.Row>
         ))}
