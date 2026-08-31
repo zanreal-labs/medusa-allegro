@@ -65,6 +65,7 @@ import AllegroCategoryRate from "./models/allegro-category-rate";
 import AllegroOffer from "./models/allegro-offer";
 import AllegroOrder from "./models/allegro-order";
 import AllegroPricePush from "./models/allegro-price-push";
+import AllegroPromotionConfig from "./models/allegro-promotion-config";
 import AllegroSettings from "./models/allegro-settings";
 import AllegroSyncState from "./models/allegro-sync-state";
 
@@ -344,6 +345,7 @@ class AllegroModuleService extends MedusaService({
   AllegroOffer,
   AllegroOrder,
   AllegroPricePush,
+  AllegroPromotionConfig,
   AllegroSettings,
   AllegroSyncState,
 }) {
