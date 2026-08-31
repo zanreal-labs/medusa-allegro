@@ -1,4 +1,17 @@
-import { StockPushQueue } from "../lib/stock-push-queue";
+import {
+  enqueueStockPush,
+  resetStockPushQueue,
+  StockPushQueue,
+} from "../lib/stock-push-queue";
+import { pushTargetedAllegroStock } from "../push-allegro-stock";
+
+jest.mock("../push-allegro-stock", () => ({
+  pushTargetedAllegroStock: jest.fn(),
+}));
+
+const targetedPush = pushTargetedAllegroStock as jest.MockedFunction<
+  typeof pushTargetedAllegroStock
+>;
 
 /**
  * The queue's own behaviour, with the timer and the clock injected.
@@ -216,5 +229,49 @@ describe("StockPushQueue", () => {
     queue.add([]);
     expect(clock.pendingTimer).toBeNull();
     expect(queue.pending).toBe(0);
+  });
+});
+
+/** A container exposing only the logger the queue's callbacks resolve. */
+const fakeContainer = (id: string) => ({
+  id,
+  resolve: () => ({
+    debug: () => undefined,
+    error: () => undefined,
+    info: () => undefined,
+    warn: () => undefined,
+  }),
+});
+
+describe("enqueueStockPush", () => {
+  beforeEach(() => {
+    resetStockPushQueue();
+    targetedPush.mockReset();
+    targetedPush.mockResolvedValue({ skipped: "test" } as never);
+    // The real debounce, driven by fake timers rather than by waiting three seconds.
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    resetStockPushQueue();
+  });
+
+  it("pushes with the container of the LATEST event, not the one that built the queue", async () => {
+    const first = fakeContainer("first");
+    const second = fakeContainer("second");
+
+    enqueueStockPush(first as never, ["SKU-1"]);
+    // A second event, seconds later, with its own container. The queue outlives both -
+    // that is the point of it - so a container captured in its closures would pin the
+    // process to `first` forever and flush against one its event has finished with.
+    enqueueStockPush(second as never, ["SKU-2"]);
+
+    await jest.advanceTimersByTimeAsync(5000);
+
+    expect(targetedPush).toHaveBeenCalledTimes(1);
+    expect(targetedPush.mock.calls[0]?.[0]).toBe(second);
+    // Both events' SKUs, coalesced into the one push.
+    expect(targetedPush.mock.calls[0]?.[1]).toEqual(["SKU-1", "SKU-2"]);
   });
 });

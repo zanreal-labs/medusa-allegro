@@ -200,6 +200,29 @@ const notifyStockPushFailed = async (
 let queue: StockPushQueue | undefined;
 
 /**
+ * The container the NEXT flush will use.
+ *
+ * Deliberately a moving reference rather than one captured in the queue's closures.
+ * The queue outlives any single event - that is the point of it - so closing over the
+ * container of whichever event happened to build it would pin the process to that one
+ * forever, and a push firing seconds later would run against a container its own event
+ * has finished with. Re-pointing it per event costs nothing and means the flush always
+ * uses a live one.
+ */
+let activeContainer: MedusaContainer | undefined;
+
+/** The current container, or a refusal rather than a confusing `undefined.resolve`. */
+const requireContainer = (): MedusaContainer => {
+  if (!activeContainer) {
+    throw new MedusaError(
+      MedusaError.Types.UNEXPECTED_STATE,
+      "medusa-allegro: the stock push queue flushed with no container. Nothing can be pushed.",
+    );
+  }
+  return activeContainer;
+};
+
+/**
  * Hand SKUs to the process-wide queue, building it on first use.
  *
  * Exported for the subscribers. Everything about the push - the claim, the kill
@@ -210,25 +233,36 @@ export const enqueueStockPush = (
   container: MedusaContainer,
   skus: readonly string[],
 ): void => {
-  const logger = container.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
+  activeContainer = container;
   queue ??= new StockPushQueue({
     onError: (error, failed) => {
+      const active = requireContainer();
+      const log = active.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
       const reason = describeError(error);
-      logger.error(
+      log.error(
         `[allegro-stock] the immediate quantity push for ${failed.length} SKU(s) failed: ${reason}. They may be advertising a stale quantity on Allegro until the next scheduled reconciliation. SKUs: ${failed.join(", ")}`,
       );
-      void notifyStockPushFailed(container, logger, failed, reason);
+      void notifyStockPushFailed(active, log, failed, reason);
     },
     onSchedule: ({ added, pending, waitMs }) => {
       // Debug rather than info: this fires per event, and a store doing normal volume
       // would otherwise write several lines per sale into the log the order drain
       // shares.
-      logger.debug(
-        `[allegro-stock] ${added} new dirty SKU(s), ${pending} pending, pushing in ${waitMs}ms`,
-      );
+      //
+      // Resolved from the active container like the other two, even though this one
+      // fires synchronously from `add` and would have got the right logger anyway. A
+      // single rule - "the callbacks use the current container" - is what stops the
+      // next edit reintroducing the captured reference.
+      requireContainer()
+        .resolve<Logger>(ContainerRegistrationKeys.LOGGER)
+        .debug(
+          `[allegro-stock] ${added} new dirty SKU(s), ${pending} pending, pushing in ${waitMs}ms`,
+        );
     },
     push: async (dirty) => {
-      const result = await pushTargetedAllegroStock(container, dirty);
+      const active = requireContainer();
+      const logger = active.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
+      const result = await pushTargetedAllegroStock(active, dirty);
       if (result.skipped) {
         // A skip is not a failure and must not alert: a held claim means a
         // reconciliation is pushing these very SKUs right now, and a flipped kill
@@ -254,7 +288,8 @@ export const enqueueStockPush = (
   queue.add(skus);
 };
 
-/** Reset the process-wide queue. Tests only. */
+/** Reset the process-wide queue and its container. Tests only. */
 export const resetStockPushQueue = (): void => {
+  activeContainer = undefined;
   queue = undefined;
 };
