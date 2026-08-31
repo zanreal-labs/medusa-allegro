@@ -2,6 +2,7 @@ import {
   enqueueStockPush,
   resetStockPushQueue,
   StockPushQueue,
+  summarizeSkus,
 } from "../lib/stock-push-queue";
 import { pushTargetedAllegroStock } from "../push-allegro-stock";
 
@@ -273,5 +274,16 @@ describe("enqueueStockPush", () => {
     expect(targetedPush.mock.calls[0]?.[0]).toBe(second);
     // Both events' SKUs, coalesced into the one push.
     expect(targetedPush.mock.calls[0]?.[1]).toEqual(["SKU-1", "SKU-2"]);
+  });
+});
+
+describe("summarizeSkus", () => {
+  it("elides a bulk movement rather than printing an unreadable list", () => {
+    // A supplier-wide restock can dirty hundreds; an alert nobody can read is not an
+    // alert. The count of the remainder is kept, because "and 340 more" is itself the
+    // signal that this was not a single sale.
+    expect(summarizeSkus(["A", "B", "C"], 2)).toBe("A, B and 1 more");
+    expect(summarizeSkus(["A", "B"], 2)).toBe("A, B");
+    expect(summarizeSkus([], 2)).toBe("");
   });
 });

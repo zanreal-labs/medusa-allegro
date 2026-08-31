@@ -21,10 +21,28 @@ describe("buildAllegroAlert", () => {
       "promotion_no_coverage",
       "write_scope_missing",
       "price_sync_systemic",
+      "stock_push_failed",
     ];
     for (const kind of kinds) {
       expect(buildAllegroAlert({ kind, resourceId: "r" }).trigger_type).toBe(`allegro.${kind}`);
     }
+  });
+
+  it("describes a failed stock push as the oversell it is, not as stale data", () => {
+    const alert = buildAllegroAlert({
+      detail: "2 SKU(s): SKU-1, SKU-2. Reason: Allegro HTTP 429",
+      kind: "stock_push_failed",
+      resourceId: "stock",
+    });
+
+    expect(alert.trigger_type).toBe("allegro.stock_push_failed");
+    expect(alert.data.title).toBe("Allegro stock update failed");
+    // The commercial fact first - these offers may be advertising stock we do not
+    // have - then the affected SKUs, then the reassurance that a sweep will fix the
+    // number, so nobody hand-edits quantities while one is about to.
+    expect(alert.data.description).toContain("may be advertising stock the store no longer has");
+    expect(alert.data.description).toContain("SKU-1, SKU-2");
+    expect(alert.data.description).toContain("reconciliation will retry");
   });
 
   it("keys idempotency on kind + resource, so a sweep re-raise collapses to one entry", () => {

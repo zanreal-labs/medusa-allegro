@@ -38,12 +38,17 @@ import { Modules } from "@medusajs/framework/utils";
  *   reconnect. Warning.
  * - `price_sync_systemic` - a tick held on a systemic condition (429/5xx/auth).
  *   Warning; the loop self-heals, but a persistent one needs eyes.
+ * - `stock_push_failed` - the immediate quantity push after a sale or a supplier
+ *   stock change did not land, so those offers may be advertising stock the store
+ *   no longer has. Critical: it reopens the oversell window that push exists to
+ *   close.
  */
 export type AllegroAlertKind =
   | "promotion_half_applied"
   | "promotion_no_coverage"
   | "write_scope_missing"
-  | "price_sync_systemic";
+  | "price_sync_systemic"
+  | "stock_push_failed";
 
 export interface BuildAllegroAlertInput {
   kind: AllegroAlertKind;
@@ -71,6 +76,7 @@ export interface AdminFeedNotification {
 
 const TITLES: Record<AllegroAlertKind, string> = {
   price_sync_systemic: "Allegro price sync held",
+  stock_push_failed: "Allegro stock update failed",
   promotion_half_applied: "Allegro promotion only partly applied",
   promotion_no_coverage: "Allegro promotion covers no auctions",
   write_scope_missing: "Allegro cannot write offers",
@@ -79,6 +85,8 @@ const TITLES: Record<AllegroAlertKind, string> = {
 const DESCRIPTIONS: Record<AllegroAlertKind, string> = {
   price_sync_systemic:
     "A price-sync tick held on a systemic condition (rate limit, 5xx, or auth). Nothing was mispriced and the next tick retries; if it persists, check the Allegro connection.",
+  stock_push_failed:
+    "The immediate Allegro quantity update failed, so the affected offers may be advertising stock the store no longer has. The scheduled reconciliation will retry and should correct it; if this keeps appearing, quantities are not reaching Allegro at all.",
   promotion_half_applied:
     "A promotion repriced some but not all of its targeted Allegro auctions. The marketplace is inconsistently discounted until the rest apply or are resolved.",
   promotion_no_coverage:
