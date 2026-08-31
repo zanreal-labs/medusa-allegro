@@ -209,7 +209,22 @@ export interface OfferPreview {
   /** Override outcome (SRP base): the clamped Buy Now price and its revert rule. */
   override: { price: number; clampedToFloor: boolean; revertRule: string } | { skipped: SyncSkipReason };
   /**
-   * What the SRP-base discounted price actually leaves, computed by the costs
+   * The price the auction is actually selling at right now, as the monitor last
+   * observed it (`allegro_offer.price_amount`). This is the anchor: every margin
+   * worth trusting is measured against what the offer really sells for, not
+   * against an SRP the automation may be nowhere near.
+   */
+  currentPrice?: number;
+  /** Margin percent the SRP-base discounted price would leave. A what-if, not the anchor. */
+  overrideMarginPct?: number;
+  /**
+   * True when the SRP-base discount would RAISE the live price. Reachable whenever
+   * Allegro's automation has followed competitors below SRP minus the discount, and
+   * it means that mode is a price increase wearing a promotion's clothes.
+   */
+  raisesPrice?: boolean;
+  /**
+   * What the CURRENT price leaves, computed by the costs
    * plugin's own `computeEconomics` rather than a second formula here, so the
    * margin can never disagree with the break-even it is measured against.
    *
@@ -330,6 +345,10 @@ export const resolvePromotionPreview = async (
     }
     const promoted = offer?.promoted ?? undefined;
     const currency = offer?.price_currency ?? "PLN";
+    // Refreshed by offer discovery on every pass (the upsert is unconditional), so
+    // this is the live price even when the row's `updated_at` looks old: the ORM
+    // simply does not flush an update whose fields all already match.
+    const currentPrice = parseAmount(offer?.price_amount ?? null);
     const commission = resolveCommissionFraction(categoryRates, offer?.category_id, promoted);
     const breakEvenRaw = promoted === undefined ? undefined : await breakEvenFor(sku, commission);
     const eligibility = evaluateSyncEligibility({
@@ -350,7 +369,16 @@ export const resolvePromotionPreview = async (
     rows.push({
       breakEven: eligibility.floor,
       breakEvenRaw: breakEvenRaw as number,
-      ...(await resolveMargin(costs, netCostBySku.get(sku), commission, override.price)),
+      // Anchor margin: measured on the price the auction actually sells at.
+      ...(currentPrice === undefined
+        ? {}
+        : await resolveMargin(costs, netCostBySku.get(sku), commission, currentPrice)),
+      currentPrice,
+      // What-if margin for the SRP-base price, and whether that price is an increase.
+      overrideMarginPct: (
+        await resolveMargin(costs, netCostBySku.get(sku), commission, override.price)
+      ).marginPct,
+      raisesPrice: currentPrice !== undefined && override.price > currentPrice,
       currency,
       offerId: offer?.offer_id ?? null,
       override: { clampedToFloor: override.clampedToFloor, price: override.price, revertRule: baseRule },
@@ -380,6 +408,7 @@ interface RawOffer {
   promoted?: boolean | null;
   price_sync_enabled?: boolean;
   price_currency?: string | null;
+  price_amount?: string | null;
   status?: string | null;
 }
 

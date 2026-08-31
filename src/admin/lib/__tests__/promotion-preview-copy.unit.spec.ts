@@ -6,6 +6,7 @@ import {
   movesHeadline,
   marginLabel,
   PROMO_COPY,
+  raisesPriceLabel,
   THIN_MARGIN_PCT,
   SKIP_REASON_PL,
 } from "../promotion-preview-copy";
@@ -127,5 +128,16 @@ describe("no behavioural notes remain in the table copy", () => {
     expect(all).not.toContain("wraca do");
     expect(all).not.toContain("najtańsi");
     expect(all).not.toContain("30 dni");
+  });
+});
+
+describe("raisesPriceLabel", () => {
+  it("names both prices so the increase is unmissable", () => {
+    // The live case that forced this: offer at 155 while SRP-10% lands at 255.
+    expect(raisesPriceLabel(155, 255, "PLN")).toBe("Podniesie cenę z 155 do 255 PLN");
+  });
+
+  it("stays inside the one-line budget", () => {
+    expect(raisesPriceLabel(1555.55, 2555.55, "PLN").length).toBeLessThanOrEqual(70);
   });
 });
