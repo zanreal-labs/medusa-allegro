@@ -1,13 +1,9 @@
-import type {
-  INotificationModuleService,
-  Logger,
-  MedusaContainer,
-} from "@medusajs/framework/types";
-import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils";
+import type { Logger, MedusaContainer } from "@medusajs/framework/types";
+import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils";
+import { raiseAllegroAlert } from "../../lib/admin-notification";
 import { describeError } from "../../lib/allegro/errors";
 import { StockDirtyBuffer } from "../../lib/sync/stock-dirty";
 import type { StockDirtyBufferOptions } from "../../lib/sync/stock-dirty";
-import { buildStockPushFailedNotification } from "../../lib/sync/stock-notify";
 import { pushTargetedAllegroStock } from "../push-allegro-stock";
 
 /**
@@ -164,11 +160,45 @@ export class StockPushQueue {
 }
 
 /**
+ * SKUs named in the alert before the list is elided.
+ *
+ * The list is the actionable part - an operator wants to know WHICH products are
+ * advertising the wrong quantity - but a bulk supplier movement can dirty hundreds,
+ * and an alert nobody can read is not an alert.
+ */
+export const ALERT_MAX_SKUS = 10;
+
+/** The SKU list as it appears in the alert detail, elided past the cap. */
+export const summarizeSkus = (
+  skus: readonly string[],
+  max: number = ALERT_MAX_SKUS,
+): string => {
+  const named = skus.slice(0, max).join(", ");
+  const rest = skus.length - Math.min(skus.length, max);
+  return rest > 0 ? `${named} and ${rest} more` : named;
+};
+
+/**
  * Raise the admin-feed alert for a targeted push that did not land.
  *
- * Swallows every failure. A host that has wired no notification provider, or a
- * transient fault in the module, must never turn a contained push failure into an
- * unhandled rejection from a timer.
+ * Through the SHARED `raiseAllegroAlert`, not a private builder. This path used to
+ * have its own, written before the shared one existed, and the result was two ways
+ * to raise an Allegro alert with two different trigger spellings - exactly the drift
+ * this plugin argues against everywhere else. One emitter, one taxonomy.
+ *
+ * `resourceId` is the loop, not the SKU set, and that is the substantive change the
+ * consolidation brings. The old builder keyed on the SKU list plus a 15-minute time
+ * bucket, so an ongoing failure produced a NEW feed entry for every distinct set of
+ * SKUs in every bucket - a fault affecting a rotating handful of products could fill
+ * the feed while looking like many separate incidents. Keying on the loop gives one
+ * persistent entry that updates, which is what the shared builder's idempotency key
+ * is for and what the Slack mirror's throttle already collapses on. The affected
+ * SKUs move into the detail line, where they stay visible without multiplying the
+ * alert.
+ *
+ * Best-effort: `raiseAllegroAlert` never throws and reports failure by returning
+ * false, which is logged here. An alert that cannot be recorded must not turn a
+ * contained push failure into an unhandled rejection from a timer.
  */
 const notifyStockPushFailed = async (
   container: MedusaContainer,
@@ -176,16 +206,14 @@ const notifyStockPushFailed = async (
   skus: string[],
   reason: string,
 ): Promise<void> => {
-  try {
-    const notifications = container.resolve<INotificationModuleService>(
-      Modules.NOTIFICATION,
-    );
-    await notifications.createNotifications(
-      buildStockPushFailedNotification({ now: Date.now(), reason, skus }),
-    );
-  } catch (error) {
+  const raised = await raiseAllegroAlert(container, {
+    detail: `${skus.length} SKU(s): ${summarizeSkus(skus)}. Reason: ${reason}`,
+    kind: "stock_push_failed",
+    resourceId: "stock",
+  });
+  if (!raised) {
     logger.warn(
-      `[allegro-stock] could not raise an admin notification for the failed quantity push of ${skus.length} SKU(s): ${describeError(error)}. The failure is still logged above, and the scheduled reconciliation will retry.`,
+      `[allegro-stock] could not raise an admin notification for the failed quantity push of ${skus.length} SKU(s). The failure is still logged above, and the scheduled reconciliation will retry.`,
     );
   }
 };
