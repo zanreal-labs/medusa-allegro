@@ -29,6 +29,7 @@ export const resolveEffectiveEnabled = (
 /** The stable key for each governed writer. */
 export type RuntimeToggleKey =
   | "priceSync"
+  | "promotionOverlay"
   | "stockSync"
   | "ordersSync"
   | "fulfillmentWriteback"
@@ -37,6 +38,7 @@ export type RuntimeToggleKey =
 /** The persisted boolean column backing each toggle on `allegro_settings`. */
 export type RuntimeToggleColumn =
   | "price_sync_enabled"
+  | "promotion_overlay_enabled"
   | "stock_sync_enabled"
   | "orders_sync_enabled"
   | "fulfillment_writeback_enabled"
@@ -70,6 +72,14 @@ export const RUNTIME_TOGGLES: readonly RuntimeToggleMeta[] = [
     envVar: "ALLEGRO_PRICE_SYNC_DISABLED",
     key: "priceSync",
     label: "Price writes",
+  },
+  {
+    column: "promotion_overlay_enabled",
+    description:
+      "Lets an armed Medusa promotion move offers onto a promotional price rule, and back when it ends. Needs price writes armed too.",
+    envVar: "ALLEGRO_PROMOTION_OVERLAY_DISABLED",
+    key: "promotionOverlay",
+    label: "Promotion overlay",
   },
   {
     column: "stock_sync_enabled",
@@ -115,5 +125,6 @@ export const FRESH_INSTALL_SETTINGS: Record<RuntimeToggleColumn, boolean> = {
   invoice_attach_enabled: true,
   orders_sync_enabled: false,
   price_sync_enabled: false,
+  promotion_overlay_enabled: false,
   stock_sync_enabled: false,
 };

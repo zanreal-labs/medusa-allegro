@@ -61,6 +61,8 @@ import {
   resolveVariantPrice,
   warnOnMissingSrpSource,
 } from "./lib/pricing";
+import { resolvePromotionOverlay } from "./lib/promotion-overlay";
+import type { PromoRuleOverride } from "./lib/promotion-overlay";
 import { runUnderSyncClaim } from "./lib/run";
 import { warnOnUnscopedCatalogue } from "./lib/scope-warnings";
 
@@ -691,6 +693,13 @@ interface PlanningInputs {
    */
   expectedIds?: { standardId: string; promotedId: string };
   rules?: AutomationRuleNames;
+  /**
+   * Per-SKU promotional rule overrides from an armed promotion. Absent for every SKU
+   * no promotion covers, which is what makes reverting free: when a promotion ends
+   * the SKU simply drops out of this map, the expected rule falls back to
+   * `rules`, and the planner emits the switch back.
+   */
+  promoRulesBySku?: Map<string, PromoRuleOverride>;
   categoryRates: ReturnType<typeof buildCategoryRates>;
   breakEvenFor: (sku: string, commission: number | undefined) => Promise<number | undefined>;
   srp: SrpSource;
@@ -806,6 +815,13 @@ const planOffer = async (
     return { skip: "sync-disabled" };
   }
 
+  // An armed promotion swaps in its own pair of rule names for this SKU. Everything
+  // downstream - the drift comparison, the switch, the cap, the audit - is unchanged,
+  // which is why applying and reverting a promotion need no separate machinery.
+  const promo = inputs.promoRulesBySku?.get(row.sku);
+  const effectiveRules = promo?.names ?? inputs.rules;
+  const effectiveIds = promo?.ids ?? inputs.expectedIds;
+
   const rule = observedRule(offer, inputs);
   const decision = decideSyncAction({
     attachedRuleId: rule.id,
@@ -813,7 +829,7 @@ const planOffer = async (
     desiredBounds: { ceiling, floor },
     lastPushedBounds: inputs.lastBounds.get(offer.id),
     promoted,
-    rules: inputs.rules,
+    rules: effectiveRules,
   });
   if (!decision.act) {
     return { noop: true };
@@ -827,7 +843,7 @@ const planOffer = async (
       // on a non-PLN marketplace.
       currency,
       expectedRule: decision.expectedRule,
-      expectedRuleId: promoted ? inputs.expectedIds.promotedId : inputs.expectedIds.standardId,
+      expectedRuleId: promoted ? effectiveIds.promotedId : effectiveIds.standardId,
       floor,
       kind: decision.kind,
       observedMode: observedPriceMode(offer, rule.id),
@@ -944,6 +960,21 @@ const resolvePlanningInputs = async (
     expectedIds = { promotedId: expected.promotedId, standardId: expected.standardId };
   }
 
+  // The overlay only runs in automation-rule mode (it swaps rule names), and only
+  // when its own toggle is armed. A refusal is logged and alerted inside, and leaves
+  // the affected promotion simply not applied rather than failing the whole run:
+  // ordinary drift correction for every other offer must keep working.
+  let promoRulesBySku: Map<string, PromoRuleOverride> | undefined;
+  if (rules) {
+    const overlay = await resolvePromotionOverlay(container, client, rules);
+    if (overlay.bySku.size > 0 || overlay.active > 0) {
+      logger.info(
+        `[allegro-prices] promotion overlay: ${overlay.active} armed promotion(s), ${overlay.bySku.size} SKU(s) on a promotional rule, ${overlay.refused.length} refused.`,
+      );
+    }
+    promoRulesBySku = overlay.bySku;
+  }
+
   warnOnMissingSrpSource(logger, options);
   warnOnUnscopedCatalogue(logger, options, "prices");
   const variants = await listEligibleVariants(container, options);
@@ -961,6 +992,7 @@ const resolvePlanningInputs = async (
       ...(expectedIds ? { expectedIds } : {}),
       lastBounds,
       ruleNames,
+      ...(promoRulesBySku ? { promoRulesBySku } : {}),
       ...(rules ? { rules } : {}),
       srp: srpSource,
       variantPrices: buildVariantPriceBySku(variants),

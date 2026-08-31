@@ -57,6 +57,9 @@ export const PROMO_COPY = {
   blockedTitle: "Ta promocja nie zmieni cen na Allegro:",
   // Kept short on purpose: this sits in a table cell, not a paragraph.
   clampedToFloor: "ograniczone progiem opłacalności",
+  armLabel: "Uzbrojona",
+  armNeedsBase: "Najpierw wybierz, jak liczyć rabat.",
+  armNeedsCompetitor: "Uzbrojenie działa na razie tylko dla rabatu względem konkurencji.",
   discountBaseLabel: "Jak liczyć rabat",
   emptyRows: "Żadna aukcja objęta tą promocją nie kwalifikuje się do zmiany ceny.",
   heading: "Podgląd cen na Allegro",

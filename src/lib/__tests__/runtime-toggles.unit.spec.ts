@@ -32,9 +32,10 @@ describe("resolveEffectiveEnabled", () => {
 });
 
 describe("RUNTIME_TOGGLES", () => {
-  it("declares exactly the five governed writers", () => {
+  it("declares exactly the six governed writers", () => {
     expect(RUNTIME_TOGGLES.map((toggle) => toggle.key)).toEqual([
       "priceSync",
+      "promotionOverlay",
       "stockSync",
       "ordersSync",
       "fulfillmentWriteback",
@@ -72,6 +73,8 @@ describe("FRESH_INSTALL_SETTINGS", () => {
       invoice_attach_enabled: true,
       orders_sync_enabled: false,
       price_sync_enabled: false,
+      // The overlay is a writer like any other, and ships disarmed like any other.
+      promotion_overlay_enabled: false,
       stock_sync_enabled: false,
     });
   });

@@ -1964,6 +1964,22 @@
           "enumItems": [],
           "mappedType": "boolean"
         },
+        "promotion_overlay_enabled": {
+          "name": "promotion_overlay_enabled",
+          "type": "boolean",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "false",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "boolean"
+        },
         "sales_channel_id": {
           "name": "sales_channel_id",
           "type": "text",

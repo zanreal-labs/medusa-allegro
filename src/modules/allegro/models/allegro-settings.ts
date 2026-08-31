@@ -113,6 +113,17 @@ const AllegroSettings = model.define("allegro_settings", {
   /** When price-automation rules and bounds are written to Allegro. Defaults OFF. */
   price_sync_enabled: model.boolean().default(false),
   /**
+   * When an armed Medusa promotion is allowed to move offers onto a promotional
+   * price-automation rule, and back again when it ends. Defaults OFF.
+   *
+   * A SECOND gate, not a replacement for `price_sync_enabled`: the overlay rides the
+   * price-sync loop, so both this and price sync must be armed before a promotion
+   * changes anything, and each promotion additionally carries its own `enabled`.
+   * Three deliberate switches, because this is the only path that reprices a live
+   * catalogue on a schedule.
+   */
+  promotion_overlay_enabled: model.boolean().default(false),
+  /**
    * Sales channel id that scopes which Medusa products are matched against
    * Allegro offers. Persisted counterpart of the `salesChannelId` plugin option.
    * `null` falls back to that option.

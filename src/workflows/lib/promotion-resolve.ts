@@ -75,7 +75,7 @@ interface QueryGraph {
   }) => Promise<{ data: Record<string, unknown>[] }>;
 }
 
-interface RawPromotion {
+export interface RawPromotion {
   id: string;
   code?: string | null;
   status?: string | null;
@@ -94,7 +94,7 @@ interface RawPromotion {
   allegro_promotion_config?: { id?: string; discount_base?: string | null; enabled?: boolean | null } | null;
 }
 
-const PROMOTION_FIELDS = [
+export const PROMOTION_FIELDS = [
   "id",
   "code",
   "status",
@@ -132,7 +132,7 @@ export interface PromotionSummary {
   targetProductCount: number;
 }
 
-const toMethod = (raw: RawPromotion): PromotionMethod => ({
+export const toMethod = (raw: RawPromotion): PromotionMethod => ({
   allocation: raw.application_method?.allocation,
   currency_code: raw.application_method?.currency_code,
   max_quantity: raw.application_method?.max_quantity ?? null,
@@ -412,7 +412,7 @@ interface RawOffer {
   status?: string | null;
 }
 
-interface TargetVariant {
+export interface TargetVariant {
   id: string;
   sku: string;
   metadata?: Record<string, unknown> | null;
@@ -424,7 +424,7 @@ interface TargetVariant {
  * variant and product metadata `buildSrpBySku` reads. Shaped as `CatalogVariant`
  * enough for that reuse without pulling in the inventory read the sync loop needs.
  */
-const loadTargetVariants = async (
+export const loadTargetVariants = async (
   query: QueryGraph,
   productIds: ReadonlySet<string>,
   variantIds: ReadonlySet<string>,
@@ -553,7 +553,8 @@ export const setPromotionDiscountBase = async (
   container: MedusaContainer,
   promotionId: string,
   discountBase: DiscountBase | null,
-): Promise<{ discountBase: DiscountBase | null }> => {
+  enabled?: boolean,
+): Promise<{ discountBase: DiscountBase | null; enabled: boolean }> => {
   const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
   const allegro = container.resolve(ALLEGRO_MODULE) as AllegroModuleService;
 
@@ -565,19 +566,28 @@ export const setPromotionDiscountBase = async (
   const existingId = (data as { allegro_promotion_config?: { id?: string } | null }[])[0]
     ?.allegro_promotion_config?.id;
 
+  // Arming without a base is refused rather than stored: a promotion with no base
+  // selects no mechanism, so an armed one would be a switch that can never fire and
+  // would read in the admin as "on" while doing nothing.
+  const armed = enabled === true && discountBase !== null;
+
   if (existingId) {
-    await allegro.updateAllegroPromotionConfigs({ discount_base: discountBase, id: existingId });
-    return { discountBase };
+    await allegro.updateAllegroPromotionConfigs({
+      discount_base: discountBase,
+      ...(enabled === undefined ? {} : { enabled: armed }),
+      id: existingId,
+    });
+    return { discountBase, enabled: armed };
   }
 
   const created = (await allegro.createAllegroPromotionConfigs({
     discount_base: discountBase,
-    enabled: false,
+    enabled: armed,
   })) as { id: string };
   const link = container.resolve<LinkService>(ContainerRegistrationKeys.LINK);
   await link.create({
     [ALLEGRO_MODULE]: { allegro_promotion_config_id: created.id },
     [Modules.PROMOTION]: { promotion_id: promotionId },
   });
-  return { discountBase };
+  return { discountBase, enabled: armed };
 };

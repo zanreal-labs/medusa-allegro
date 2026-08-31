@@ -26,6 +26,7 @@ import {
   isInvoiceAttachDisabledByEnv,
   isOrdersSyncDisabledByEnv,
   isPriceSyncDisabledByEnv,
+  isPromotionOverlayDisabledByEnv,
   isStockSyncDisabledByEnv,
   marketplaceIdEnvOverride,
   pricingModeEnvOverride,
@@ -569,6 +570,7 @@ class AllegroModuleService extends MedusaService({
       invoiceAttach: o.invoiceAttachDisabled || isInvoiceAttachDisabledByEnv(),
       ordersSync: o.ordersSyncDisabled || isOrdersSyncDisabledByEnv(),
       priceSync: o.priceSyncDisabled || isPriceSyncDisabledByEnv(),
+      promotionOverlay: isPromotionOverlayDisabledByEnv(),
       stockSync: o.stockSyncDisabled || isStockSyncDisabledByEnv(),
     };
   }
@@ -594,6 +596,20 @@ class AllegroModuleService extends MedusaService({
     return !(await this.resolveWriterEnabled(
       "priceSync",
       "price_sync_enabled",
+    ));
+  }
+
+  /**
+   * Effective promotion-overlay kill-switch.
+   *
+   * Independent of price sync on purpose: the overlay rides that loop, so both must
+   * be armed for a promotion to move anything, and turning the overlay off leaves
+   * ordinary price sync running rather than stopping the catalogue.
+   */
+  async isPromotionOverlayDisabled(): Promise<boolean> {
+    return !(await this.resolveWriterEnabled(
+      "promotionOverlay",
+      "promotion_overlay_enabled",
     ));
   }
 
