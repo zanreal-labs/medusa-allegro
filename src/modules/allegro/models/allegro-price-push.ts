@@ -50,6 +50,28 @@ const AllegroPricePush = model.define("allegro_price_push", {
   price_mode_new: model.text().nullable(),
   /** Pricing mode before and after, e.g. "fixed" or "automation". */
   price_mode_old: model.text().nullable(),
+  /**
+   * The resolved discount the switched-to rule encodes, when this row was driven
+   * by a Medusa promotion. Free-form and human-readable, e.g. `"percentage:10"`
+   * or `"fixed:10.00 PLN"`, following `pushed_by`'s free-form philosophy so a
+   * later wave can enrich it without a migration.
+   *
+   * This is the audit's answer to "what discount did this switch actually apply",
+   * separate from `rule_name_new`: the rule NAME says which rule was attached, this
+   * says what reduction that rule carries. Null on any row not driven by a
+   * promotion - the ordinary standard/Wyroznienie switches leave it unset.
+   */
+  promotion_discount: model.text().nullable(),
+  /**
+   * The Medusa promotion that drove this row, when one did. Null for every row a
+   * promotion did not cause, which is the normal case: ordinary drift correction
+   * and the standard/Wyroznienie switches carry no promotion.
+   *
+   * Free-form text holding the promotion id rather than a foreign key, because the
+   * audit is append-only and must survive the promotion being deleted in Medusa -
+   * a row records what was true when it was written, not what still exists.
+   */
+  promotion_id: model.text().nullable(),
   /** Promotion state at decision time; it selects the commission rate. */
   promotion_state: model.text().nullable(),
   pushed_at: model.dateTime(),
