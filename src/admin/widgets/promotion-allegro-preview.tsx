@@ -3,6 +3,15 @@ import type { DetailWidgetProps } from "@medusajs/framework/types";
 import { Alert, Badge, Container, Heading, Select, Table, Text, toast } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
 import { sdk } from "../lib/sdk";
+import {
+  BLOCK_REASON_PL,
+  coverageBody,
+  labelFor,
+  movesHeadline,
+  PROMO_COPY,
+  revertsTo,
+  SKIP_REASON_PL,
+} from "../lib/promotion-preview-copy";
 
 /**
  * The Allegro promotion preview, rendered on the promotion's own detail page.
@@ -19,7 +28,7 @@ import { sdk } from "../lib/sdk";
  * nothing can be published from this page.
  *
  * Naming trap it states outright: the account's "Bitdefender Sale" rule is
- * Allegro's PAID HIGHLIGHT ("Wyroznienie"), not a discount.
+ * Allegro's PAID HIGHLIGHT ("Wyróżnienie"), not a discount.
  */
 
 type DiscountBase = "srp" | "competitor";
@@ -70,7 +79,7 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
       );
       setPreview(response.preview);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not load the Allegro preview.");
+      setError(caught instanceof Error ? caught.message : PROMO_COPY.loadError);
     }
   }, [promotionId]);
 
@@ -87,10 +96,10 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
           body: { discount_base },
           method: "POST",
         });
-        toast.success("Discount base saved. Nothing was sent to Allegro.");
+        toast.success(PROMO_COPY.saveOk);
         await load();
       } catch (caught) {
-        toast.error(caught instanceof Error ? caught.message : "Could not save the discount base.");
+        toast.error(caught instanceof Error ? caught.message : PROMO_COPY.saveError);
       } finally {
         setSaving(false);
       }
@@ -101,21 +110,24 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
   return (
     <Container className="divide-y p-0">
       <div className="flex flex-col gap-2 px-6 py-4">
-        <Heading level="h2">Allegro promotion preview</Heading>
-        <Alert variant="info">
-          <Text weight="plus">Nothing here writes to Allegro.</Text>
-          <Text size="small">
-            This shows what this promotion WOULD do to your Allegro auctions. It is not armed and
-            cannot publish anything - the overlay that would act on it does not exist yet.
+        <Heading level="h2">{PROMO_COPY.heading}</Heading>
+        {preview ? (
+          // Only once the preview has loaded: rendering it earlier flashes
+          // "brak" for a moment and reads as "this promotion has no code".
+          <Text size="small" className="text-ui-fg-subtle">
+            {PROMO_COPY.promotionCodeLabel}:{" "}
+            <span className="text-ui-fg-base">
+              {preview.promotion.code ?? PROMO_COPY.promotionCodeMissing}
+            </span>
           </Text>
+        ) : null}
+        <Alert variant="info">
+          <Text weight="plus">{PROMO_COPY.noWriteTitle}</Text>
+          <Text size="small">{PROMO_COPY.noWriteBody}</Text>
         </Alert>
         <Alert variant="warning">
-          <Text weight="plus">&quot;Sale&quot; on Allegro is a paid highlight, not a discount.</Text>
-          <Text size="small">
-            The &quot;Bitdefender Sale&quot; rule is Allegro&apos;s &quot;Wyroznienie&quot; highlight
-            and only changes the commission rate. A promotional discount is a different rule, named
-            with the ZR&#x276F; prefix below.
-          </Text>
+          <Text weight="plus">{PROMO_COPY.saleTrapTitle}</Text>
+          <Text size="small">{PROMO_COPY.saleTrapBody}</Text>
         </Alert>
       </div>
 
@@ -130,11 +142,13 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
           {preview.promotion.blockReasons.length > 0 ? (
             <div className="px-6 py-4">
               <Alert variant="warning">
-                <Text weight="plus">This promotion cannot drive Allegro:</Text>
+                <Text weight="plus">{PROMO_COPY.blockedTitle}</Text>
                 <ul className="list-disc pl-5">
                   {preview.promotion.blockReasons.map((blocker) => (
                     <li key={blocker.reason}>
-                      <Text size="small">{blocker.label}</Text>
+                      <Text size="small">
+                        {labelFor(BLOCK_REASON_PL, blocker.reason, blocker.label)}
+                      </Text>
                     </li>
                   ))}
                 </ul>
@@ -145,7 +159,7 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
           <div className="flex flex-col gap-2 px-6 py-4">
             <div className="flex items-center gap-3">
               <Text size="small" weight="plus">
-                Discount base
+                {PROMO_COPY.discountBaseLabel}
               </Text>
               <div className="w-64">
                 <Select
@@ -154,36 +168,25 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
                   onValueChange={(value) => void setBase(value)}
                 >
                   <Select.Trigger>
-                    <Select.Value placeholder="Not chosen (preview only)" />
+                    <Select.Value placeholder={PROMO_COPY.baseNone} />
                   </Select.Trigger>
                   <Select.Content>
-                    <Select.Item value="none">Not chosen (preview only)</Select.Item>
-                    <Select.Item value="competitor">Competitor - rule switch</Select.Item>
-                    <Select.Item value="srp">SRP - price override</Select.Item>
+                    <Select.Item value="none">{PROMO_COPY.baseNone}</Select.Item>
+                    <Select.Item value="competitor">{PROMO_COPY.baseCompetitor}</Select.Item>
+                    <Select.Item value="srp">{PROMO_COPY.baseSrp}</Select.Item>
                   </Select.Content>
                 </Select>
               </div>
             </div>
             <Text size="small" className="text-ui-fg-subtle">
-              Choosing a base records which mechanism the overlay would use. It writes nothing to
-              Allegro. Until a base is chosen this promotion is preview-only and cannot be armed.
+              {PROMO_COPY.discountBaseHelp}
             </Text>
           </div>
 
           <div className="px-6 py-4">
             <Alert variant="success">
-              <Text weight="plus">
-                Would move {preview.coverage.eligible} auction(s). Everything else is untouched.
-              </Text>
-              <Text size="small">
-                Targeted {preview.coverage.targeted} SKU(s): {preview.coverage.linked} linked to an
-                Allegro offer, {preview.coverage.eligible} eligible to move,{" "}
-                {preview.coverage.skipped} skipped. This promotion never touches an auction outside
-                its own targeted products - the rest of your catalogue is left exactly as it is.
-                Break-even is shown whole-PLN with the raw value beside it, because whether
-                Allegro&apos;s managed rules require whole-unit bounds is UNVERIFIED until price sync
-                is armed once.
-              </Text>
+              <Text weight="plus">{movesHeadline(preview.coverage.eligible)}</Text>
+              <Text size="small">{coverageBody(preview.coverage)}</Text>
             </Alert>
           </div>
 
@@ -194,7 +197,7 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
       ) : (
         !error && (
           <div className="px-6 py-4">
-            <Text size="small">Loading preview...</Text>
+            <Text size="small">{PROMO_COPY.loading}</Text>
           </div>
         )
       )}
@@ -207,13 +210,13 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
     <Table>
       <Table.Header>
         <Table.Row>
-          <Table.HeaderCell>SKU</Table.HeaderCell>
-          <Table.HeaderCell>Highlight</Table.HeaderCell>
-          <Table.HeaderCell>Break-even (whole / raw)</Table.HeaderCell>
-          <Table.HeaderCell>SRP</Table.HeaderCell>
-          <Table.HeaderCell>Competitor -&gt; rule switch</Table.HeaderCell>
-          <Table.HeaderCell>SRP -&gt; price override</Table.HeaderCell>
-          <Table.HeaderCell>Cost</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableSku}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableHighlight}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableBreakEven}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableSrp}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableRuleSwitch}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableOverride}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableCost}</Table.HeaderCell>
         </Table.Row>
       </Table.Header>
       <Table.Body>
@@ -223,7 +226,7 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
             <Table.Cell>
               {row.promoted ? (
                 <Badge color="orange" size="2xsmall">
-                  Wyroznienie
+                  {PROMO_COPY.tableHighlight}
                 </Badge>
               ) : (
                 <span className="text-ui-fg-muted">-</span>
@@ -239,23 +242,21 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
             <Table.Cell className="txt-compact-xsmall">
               {"skipped" in row.ruleSwitch ? (
                 <Badge color="red" size="2xsmall">
-                  {row.ruleSwitch.skipped}
+                  {labelFor(SKIP_REASON_PL, row.ruleSwitch.skipped)}
                 </Badge>
               ) : (
                 <div className="flex flex-col gap-1">
                   <span>
                     {row.ruleSwitch.fromRule} -&gt; <b>{row.ruleSwitch.toRule}</b>
                   </span>
-                  <span className="text-ui-fg-muted">
-                    won&apos;t lower the price when we are already the cheapest
-                  </span>
+                  <span className="text-ui-fg-muted">{PROMO_COPY.competitorCaveat}</span>
                 </div>
               )}
             </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
               {"skipped" in row.override ? (
                 <Badge color="red" size="2xsmall">
-                  {row.override.skipped}
+                  {labelFor(SKIP_REASON_PL, row.override.skipped)}
                 </Badge>
               ) : (
                 <div className="flex flex-col gap-1">
@@ -265,18 +266,18 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
                     </b>
                     {row.override.clampedToFloor ? (
                       <Badge color="orange" size="2xsmall" className="ml-1">
-                        floored at break-even
+                        {PROMO_COPY.clampedToFloor}
                       </Badge>
                     ) : null}
                   </span>
-                  <span className="text-ui-fg-muted">reverts to {row.override.revertRule} on expiry</span>
+                  <span className="text-ui-fg-muted">{revertsTo(row.override.revertRule)}</span>
                 </div>
               )}
             </Table.Cell>
             <Table.Cell>
               {row.costRecentlyEdited ? (
                 <Badge color="orange" size="2xsmall">
-                  edited &lt;30d
+                  {PROMO_COPY.costEdited}
                 </Badge>
               ) : (
                 <span className="text-ui-fg-muted">-</span>
@@ -287,7 +288,7 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
         {preview.rows.length === 0 ? (
           <Table.Row>
             <Table.Cell className="text-ui-fg-muted">
-              No targeted SKU resolves to an eligible Allegro offer.
+              {PROMO_COPY.emptyRows}
             </Table.Cell>
           </Table.Row>
         ) : null}
@@ -296,13 +297,13 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
     {preview.skipped.length > 0 ? (
       <div className="mt-3">
         <Text size="small" weight="plus">
-          Skipped SKUs (stay untouched)
+          {PROMO_COPY.skippedTitle}
         </Text>
         <Table>
           <Table.Header>
             <Table.Row>
-              <Table.HeaderCell>SKU</Table.HeaderCell>
-              <Table.HeaderCell>Reason</Table.HeaderCell>
+              <Table.HeaderCell>{PROMO_COPY.tableSku}</Table.HeaderCell>
+              <Table.HeaderCell>{PROMO_COPY.reasonHeader}</Table.HeaderCell>
             </Table.Row>
           </Table.Header>
           <Table.Body>
@@ -311,7 +312,7 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
                 <Table.Cell>{entry.sku}</Table.Cell>
                 <Table.Cell>
                   <Badge color="grey" size="2xsmall">
-                    {entry.reason}
+                    {labelFor(SKIP_REASON_PL, entry.reason)}
                   </Badge>
                 </Table.Cell>
               </Table.Row>
