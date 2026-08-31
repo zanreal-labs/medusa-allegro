@@ -234,15 +234,22 @@ describe("StockPushQueue", () => {
 });
 
 /** A container exposing only the logger the queue's callbacks resolve. */
-const fakeContainer = (id: string) => ({
-  id,
-  resolve: () => ({
-    debug: () => undefined,
-    error: () => undefined,
-    info: () => undefined,
-    warn: () => undefined,
-  }),
-});
+const fakeContainer = (id: string) => {
+  const logs: string[] = [];
+  const record = (level: string) => (message: string) => {
+    logs.push(`${level}: ${message}`);
+  };
+  return {
+    id,
+    logs,
+    resolve: () => ({
+      debug: record("debug"),
+      error: record("error"),
+      info: record("info"),
+      warn: record("warn"),
+    }),
+  };
+};
 
 describe("enqueueStockPush", () => {
   beforeEach(() => {
@@ -256,6 +263,80 @@ describe("enqueueStockPush", () => {
   afterEach(() => {
     jest.useRealTimers();
     resetStockPushQueue();
+  });
+
+  /** A push result carrying only the counters these assertions care about. */
+  const pushResult = (over: Record<string, unknown>) => ({
+    alreadyInSync: 0,
+    ambiguous: 0,
+    commands: 0,
+    complete: false,
+    conflicted: 0,
+    eligible: 0,
+    failed: 0,
+    mismatched: 0,
+    pending: 0,
+    skippedInactive: 0,
+    skippedNoInventory: 0,
+    skippedNoListingStock: 0,
+    skippedUnlinked: 0,
+    skippedUnmatched: 0,
+    synced: 0,
+    unresolved: 0,
+    ...over,
+  });
+
+  it("raises NO alert when the run only had findings", async () => {
+    const container = fakeContainer("only-findings");
+    targetedPush.mockResolvedValue(
+      pushResult({
+        finding: "1 eligible variant(s) are claimed by no mapped Allegro offer, so their quantity is published nowhere",
+        skippedUnlinked: 1,
+        synced: 1,
+      }) as never,
+    );
+
+    enqueueStockPush(container as never, ["SKU-1", "SKU-2"]);
+    await jest.advanceTimersByTimeAsync(5000);
+
+    // The condition that paged the owner CRITICAL on the first live supplier change.
+    // A variant with no Allegro auction is normal and permanent here - auctions are
+    // created by hand - so alerting on it fires on every stock movement of every
+    // unlisted product until nobody reads the alerts at all.
+    //
+    // Asserted against the log the alert path actually writes, NOT against a local
+    // array nothing populates: the first version of this test collected into an
+    // `errors` list that no code appended to, so it would have passed just as
+    // happily with the alert still firing. A regression test that cannot fail is the
+    // same defect it is meant to catch.
+    const log = container.logs.join("\n");
+    // The alert path's own line, matched precisely - the healthy info line carries
+    // `failed=0`, so a looser match would collide with it and pass for the wrong
+    // reason.
+    expect(log).not.toContain("the immediate quantity push for");
+    // And the finding is still REPORTED - narrowing the alert must not make a skip
+    // invisible, because the log is now the only place it shows up.
+    expect(log).toContain("claimed by no mapped Allegro offer");
+  });
+
+  it("still alerts when the run genuinely failed", async () => {
+    const container = fakeContainer("real-failure");
+    targetedPush.mockResolvedValue(
+      pushResult({
+        error: "2 offer quantity write(s) were not confirmed by Allegro",
+        failed: 2,
+      }) as never,
+    );
+
+    enqueueStockPush(container as never, ["SKU-1"]);
+    await jest.advanceTimersByTimeAsync(5000);
+
+    // A MAPPED offer that may now be advertising stock the store does not have. This
+    // is the one worth waking somebody for, and narrowing the alert must not have
+    // silenced it.
+    expect(container.logs.join("\n")).toContain(
+      "the immediate quantity push for 1 SKU(s) failed",
+    );
   });
 
   it("pushes with the container of the LATEST event, not the one that built the queue", async () => {

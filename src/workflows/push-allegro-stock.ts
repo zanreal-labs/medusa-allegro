@@ -67,6 +67,21 @@ import { warnOnUnscopedCatalogue } from "./lib/scope-warnings";
 export interface StockSyncResult extends StockSyncSummary {
   /** Set when the run did nothing. */
   skipped?: string;
+  /**
+   * Conditions worth reporting on a run that otherwise did its job: offers held out
+   * by a mapping conflict, variants no offer claims, writes still pending.
+   *
+   * SEPARATE from `error`, and that separation is load-bearing rather than tidy.
+   * These two used to be flattened into `error` by a `combineReport` helper, which
+   * made a field named "error" carry things that are not errors - and the first
+   * consumer to treat it as one (the immediate push's alert) escalated a normal
+   * state to a CRITICAL page. In this store Allegro auctions are created by hand, so
+   * a variant with no offer is a deliberate, permanent condition; paging on it would
+   * fire on every stock movement of every unlisted product and bury the alert that
+   * matters. The state row always kept the two apart (`last_error` vs
+   * `last_finding`); only the returned result conflated them.
+   */
+  finding?: string;
 }
 
 export const emptyStockSyncResult = (): StockSyncResult => ({
@@ -421,17 +436,19 @@ const buildStockError = (
 };
 
 /**
- * Both halves as one line, for the result object.
+ * Copy the report onto the result, keeping the two halves apart.
  *
- * The state row keeps them apart - that split is the point - but the run-now
- * response and the job log want everything the run noticed in one sentence.
+ * There is deliberately no "both halves as one line" helper any more. The one that
+ * existed produced a single string for `result.error`, and every caller that wanted
+ * to know "did this run FAIL?" then had to answer it from prose. The immediate
+ * push's alert got that wrong in the only way that matters - it paged on a finding.
  */
-const combineReport = (report: {
-  error: string | null;
-  finding: string | null;
-}): string | undefined => {
-  const combined = [report.error, report.finding].filter(Boolean).join("; ");
-  return combined.length > 0 ? combined : undefined;
+const applyReport = (
+  result: StockSyncResult,
+  report: { error: string | null; finding: string | null },
+): void => {
+  result.error = report.error ?? undefined;
+  result.finding = report.finding ?? undefined;
 };
 
 /** Stamp `stock_synced_at` on the offers whose quantity Allegro confirmed. */
@@ -635,7 +652,7 @@ const runStockPush = async (
         result.complete = false;
         result.failed = changes.length;
         const report = buildStockError(result);
-        result.error = combineReport(report);
+        applyReport(result, report);
         logger.warn(
           `[allegro-stock] plan refused: ambiguous=${plan.ambiguous} unresolved=${plan.unresolved}. No quantity was written.`,
         );
@@ -653,7 +670,7 @@ const runStockPush = async (
       if (changes.length === 0) {
         result.complete = isStockCoverageComplete(plan);
         const report = buildStockError(result);
-        result.error = combineReport(report);
+        applyReport(result, report);
         return {
           outcome: {
             counts: { ...result },
@@ -709,7 +726,7 @@ const runStockPush = async (
 
       const firstError = submitError ?? outcomes.error;
       const report = buildStockError(result, firstError);
-      result.error = combineReport(report);
+      applyReport(result, report);
       return {
         outcome: {
           counts: { ...result },

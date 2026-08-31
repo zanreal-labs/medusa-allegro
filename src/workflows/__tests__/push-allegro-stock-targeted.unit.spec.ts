@@ -259,3 +259,65 @@ describe("pushTargetedAllegroStock", () => {
     expect(result.alreadyInSync).toBe(1);
   });
 });
+
+/**
+ * The skip ladder, on the path that ALERTS.
+ *
+ * The scheduled sweep has always classified these correctly; the immediate push
+ * originally read the two halves flattened into one string and treated the lot as
+ * failure. The first live supplier change then paged the owner CRITICAL because a
+ * variant had no Allegro offer - a permanent, deliberate state in a store whose
+ * auctions are created by hand. These tests pin the line between the two halves.
+ */
+describe("pushTargetedAllegroStock skip ladder", () => {
+  it("pushes the mapped SKUs and counts an unmapped one as a skip, not a failure", async () => {
+    const { client, container } = twoOffers({
+      // SKU-2 is a real, eligible variant that simply has no Allegro auction. In this
+      // store that is normal and permanent, not a backlog.
+      rows: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+    });
+
+    const result = await pushTargetedAllegroStock(container as never, ["SKU-1", "SKU-2"]);
+
+    // The mapped one still goes out - an unmapped sibling must not hold it back.
+    expect(client.submissions).toEqual([
+      { commandId: expect.any(String), offerIds: ["o1"], value: 9 },
+    ]);
+    expect(result.synced).toBe(1);
+    // Counted and reported...
+    expect(result.skippedUnlinked).toBe(1);
+    expect(result.finding).toContain("claimed by no mapped Allegro offer");
+    // ...but NOT a failure, which is what decides whether anybody gets paged.
+    expect(result.error).toBeUndefined();
+  });
+
+  it("keeps a genuine Allegro failure on the error half", async () => {
+    const { container } = twoOffers({ noInventory: true });
+
+    const result = await pushTargetedAllegroStock(container as never, ["SKU-1"]);
+
+    // An unreadable quantity refuses the whole plan: a MAPPED offer may now be
+    // advertising stock the store does not have, which is the oversell worth waking
+    // somebody for.
+    expect(result.error).toContain("whole plan was refused");
+  });
+
+  it("reports a mapping conflict as a finding, not a failure", async () => {
+    const { client, container } = twoOffers({
+      live: [
+        offerFixture({ external: { id: "RENAMED" }, id: "o1", stock: { available: 5 } }),
+      ],
+      rows: [{ id: "row-1", offer_id: "o1", sku: "SKU-1" }],
+    });
+
+    const result = await pushTargetedAllegroStock(container as never, ["SKU-1"]);
+
+    // Nothing was written, and it is recorded on the mapping row and visible in the
+    // admin. It needs a human eventually, not a page now - the same call the sweep
+    // has always made.
+    expect(client.submissions).toEqual([]);
+    expect(result.conflicted).toBe(1);
+    expect(result.finding).toContain("contradict their mapping row");
+    expect(result.error).toBeUndefined();
+  });
+});
