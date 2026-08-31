@@ -57,8 +57,6 @@ export const PROMO_COPY = {
   blockedTitle: "Ta promocja nie zmieni cen na Allegro:",
   // Kept short on purpose: this sits in a table cell, not a paragraph.
   clampedToFloor: "ograniczone progiem opłacalności",
-  competitorCaveat: "gdy jesteśmy już najtańsi, cena się nie zmienia",
-  costEdited: "koszt zakupu zmieniony w ciągu 30 dni",
   discountBaseLabel: "Jak liczyć rabat",
   emptyRows: "Żadna aukcja objęta tą promocją nie kwalifikuje się do zmiany ceny.",
   heading: "Podgląd cen na Allegro",
@@ -67,17 +65,19 @@ export const PROMO_COPY = {
   /** The whole reassurance, in one line. The explainer that used to follow was noise. */
   noWriteLine: "Nic tu nie zmienia cen na Allegro.",
   reasonHeader: "Powód",
-  /** Said once, plainly, instead of naming the rule the price returns to. */
-  revertsNote: "po zakończeniu promocji cena wraca do dotychczasowych zasad",
   saveError: "Nie udało się zapisać sposobu liczenia rabatu.",
   saveOk: "Zapisano. Nic nie zostało wysłane na Allegro.",
   skippedTitle: "Aukcje pominięte (ceny bez zmian)",
-  tableCompetitor: "Rabat względem konkurencji",
-  tableCost: "Koszt zakupu",
+  /** Loud, and only rendered when it can actually be true. */
+  marginLoss: "Sprzedaż ze stratą",
+  marginThin: "Niska marża",
+  marginUnknown: "brak danych",
+  tableCompetitor: "Cena po rabacie (konkurencja)",
   tableFloor: "Nie sprzedamy poniżej",
+  tableMargin: "Marża (od SRP)",
   tableSku: "SKU",
-  tableSrp: "Cena SRP",
-  tableSrpBase: "Rabat od SRP",
+  tableSrp: "SRP",
+  tableSrpBase: "Cena po rabacie (od SRP)",
 } as const;
 
 /** "Zmieni N aukcji. Reszta katalogu zostaje bez zmian." */
@@ -93,13 +93,25 @@ export const coverageBody = (coverage: {
 }): string =>
   `Objęte SKU: ${coverage.targeted}. Z aukcją na Allegro: ${coverage.linked}. Pominięte: ${coverage.skipped}.`;
 
-/** "Cena obniżona do 89,99 PLN" */
-export const priceLoweredTo = (price: number, currency: string): string =>
-  `Cena obniżona do ${price} ${currency}`;
+/**
+ * Margin, as money and percent: "12,40 PLN (13%)".
+ *
+ * One value with a short label, which is what a person scanning twelve rows can
+ * actually use. The percent is `netIncome / sellingPrice`, the same ratio the costs
+ * plugin reports, rounded for display only.
+ */
+export const marginLabel = (amount: number, pct: number | undefined, currency: string): string =>
+  pct === undefined
+    ? `${amount.toFixed(2)} ${currency}`
+    : `${amount.toFixed(2)} ${currency} (${Math.round(pct * 100)}%)`;
 
-/** "Cena podąża za konkurencją, nie spadnie poniżej 40 PLN" */
-export const priceFollowsCompetition = (floor: number, currency: string): string =>
-  `Cena podąża za cenami konkurencji, nie spadnie poniżej ${floor} ${currency}`;
+/**
+ * Below this, a margin is thin enough to be worth flagging amber.
+ *
+ * 5% of the selling price. Not a law of nature, and deliberately a single constant
+ * so it can be argued with in one place rather than hunted through the widget.
+ */
+export const THIN_MARGIN_PCT = 0.05;
 
 /**
  * Per-SKU skip reasons, keyed by the code the API returns.

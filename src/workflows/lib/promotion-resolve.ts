@@ -51,6 +51,21 @@ import {
  * the native promotion - the single source of truth the storefront also honours.
  */
 
+/** The costs plugin, duck-typed on the two calls this resolver makes. */
+interface CostsEconomics {
+  getCostsBySkus: (skus: string[]) => Promise<{ sku: string; unit_cost_net: number }[]>;
+  computeEconomics: (input: {
+    netCost?: number;
+    commissionRate?: number;
+    sellingPrice?: number;
+  }) => Promise<{
+    netIncome?: number;
+    marginPct?: number;
+    breakEvenPrice?: number;
+    grossCost?: number;
+  }>;
+}
+
 interface QueryGraph {
   graph: (input: {
     entity: string;
@@ -193,8 +208,19 @@ export interface OfferPreview {
     | { skipped: SyncSkipReason | "rule-name-too-long" };
   /** Override outcome (SRP base): the clamped Buy Now price and its revert rule. */
   override: { price: number; clampedToFloor: boolean; revertRule: string } | { skipped: SyncSkipReason };
-  /** True when this SKU's cost was edited within the recent window - a floor-drift warning. */
-  costRecentlyEdited: boolean;
+  /**
+   * What the SRP-base discounted price actually leaves, computed by the costs
+   * plugin's own `computeEconomics` rather than a second formula here, so the
+   * margin can never disagree with the break-even it is measured against.
+   *
+   * Undefined when the cost or commission is unknown. It is deliberately the
+   * SRP-base price: that is the only mode whose price is determinable in advance.
+   * The competitor mode lets Allegro pick a price inside [break-even, SRP], so its
+   * margin is a range, not a number, and inventing one would be a guess.
+   */
+  marginAmount?: number;
+  /** `netIncome / sellingPrice` as a fraction (0.42 = 42%). */
+  marginPct?: number;
 }
 
 /** The full per-promotion preview. */
@@ -220,9 +246,6 @@ export interface PromotionPreview {
    */
   coverage: { targeted: number; linked: number; eligible: number; skipped: number };
 }
-
-/** How recent a cost edit has to be to raise the floor-drift warning. */
-const RECENT_COST_EDIT_DAYS = 30;
 
 /**
  * Resolve the full per-SKU preview for one promotion.
@@ -287,12 +310,12 @@ export const resolvePromotionPreview = async (
   // The offers for those SKUs, plus the shared pricing inputs, resolved once.
   const offers = await allegro.listAllegroOffers({ sku: skus });
   const offerBySku = new Map<string, RawOffer>((offers as RawOffer[]).map((offer) => [offer.sku, offer]));
-  const [categoryRateRows, costRows] = await Promise.all([
+  const [categoryRateRows, netCostBySku] = await Promise.all([
     allegro.listAllegroCategoryRates({}),
-    loadRecentlyEditedCosts(container, skus),
+    loadNetCosts(container, options.costsModuleKey, skus),
   ]);
   const categoryRates = buildCategoryRates(categoryRateRows as Record<string, unknown>[]);
-  const costs = resolveCostsService(container, options.costsModuleKey);
+  const costs = resolveCostsService(container, options.costsModuleKey) as CostsEconomics | undefined;
   const breakEvenFor = await buildBreakEvenResolver(costs, skus);
   const srpSource = await buildSrpBySku(container, variants as unknown as CatalogVariant[], options);
 
@@ -327,7 +350,7 @@ export const resolvePromotionPreview = async (
     rows.push({
       breakEven: eligibility.floor,
       breakEvenRaw: breakEvenRaw as number,
-      costRecentlyEdited: costRows.has(sku),
+      ...(await resolveMargin(costs, netCostBySku.get(sku), commission, override.price)),
       currency,
       offerId: offer?.offer_id ?? null,
       override: { clampedToFloor: override.clampedToFloor, price: override.price, revertRule: baseRule },
@@ -417,42 +440,65 @@ const loadTargetVariants = async (
 };
 
 /**
- * SKUs whose cost was edited within the recent window, read from the product-costs
- * module. A SOFT read: the module is optional (exactly as the break-even resolver
- * treats it), so an absent module or a failed read yields an empty set and simply
- * no floor-drift warnings, never a broken preview.
+ * Net purchase cost per SKU, for the margin figure.
  *
- * The warning it feeds is the whole mitigation for the accepted permanent-floor
- * risk: a promotional supplier cost entered for a sale lowers break-even forever,
- * and the operator seeing "cost edited 3 days ago" on a discounted SKU is how that
- * silent margin loss becomes visible.
+ * A SOFT read, exactly as the break-even resolver treats the same module: an absent
+ * costs plugin or a failed read yields an empty map and simply no margin column
+ * content, never a broken preview and never a guessed cost.
  */
-const loadRecentlyEditedCosts = async (
+const loadNetCosts = async (
   container: MedusaContainer,
+  costsModuleKey: string,
   skus: readonly string[],
-): Promise<Set<string>> => {
+): Promise<Map<string, number>> => {
+  const byShu = new Map<string, number>();
   if (skus.length === 0) {
-    return new Set();
+    return byShu;
   }
   try {
-    const query = container.resolve<QueryGraph>(ContainerRegistrationKeys.QUERY);
-    const { data } = await query.graph({
-      entity: "cost_price",
-      fields: ["sku", "updated_at"],
-      filters: { sku: [...skus] },
-    });
-    const cutoff = Date.now() - RECENT_COST_EDIT_DAYS * 24 * 60 * 60 * 1000;
-    const recent = new Set<string>();
-    for (const row of data) {
-      const sku = (row.sku as string | null)?.trim();
-      const updatedAt = row.updated_at ? Date.parse(String(row.updated_at)) : Number.NaN;
-      if (sku && Number.isFinite(updatedAt) && updatedAt >= cutoff) {
-        recent.add(sku);
+    const costs = resolveCostsService(container, costsModuleKey) as CostsEconomics | undefined;
+    if (!costs) {
+      return byShu;
+    }
+    for (const row of await costs.getCostsBySkus([...skus])) {
+      const netCost = parseAmount(row.unit_cost_net);
+      if (netCost !== undefined) {
+        byShu.set(row.sku, netCost);
       }
     }
-    return recent;
   } catch {
-    return new Set();
+    return byShu;
+  }
+  return byShu;
+};
+
+/**
+ * The margin a given selling price leaves, delegated to the costs plugin.
+ *
+ * Deliberately NOT reimplemented here. The plugin already owns the relationship
+ * between net cost, VAT, commission and break-even; a second formula in this file
+ * would be one refactor away from quietly disagreeing with the floor it is shown
+ * next to. Missing inputs yield an absent margin rather than a zero, because a
+ * margin of "unknown" and a margin of "nothing" are different facts.
+ */
+const resolveMargin = async (
+  costs: CostsEconomics | undefined,
+  netCost: number | undefined,
+  commissionRate: number | undefined,
+  sellingPrice: number,
+): Promise<{ marginAmount?: number; marginPct?: number }> => {
+  if (!costs || netCost === undefined || commissionRate === undefined) {
+    return {};
+  }
+  try {
+    const { netIncome, marginPct } = await costs.computeEconomics({
+      commissionRate,
+      netCost,
+      sellingPrice,
+    });
+    return { marginAmount: netIncome, marginPct };
+  } catch {
+    return {};
   }
 };
 
