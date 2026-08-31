@@ -71,9 +71,15 @@ export class StockPushQueue {
 
   constructor(deps: StockPushQueueDeps) {
     this.buffer = new StockDirtyBuffer(deps.buffer);
+    // The resolved defaults come AFTER the spread, not before it. Spreading last would
+    // let a caller that passes `{ now: undefined }` - an explicitly present key, which
+    // is easy to produce from an options object - overwrite a working default with
+    // undefined, and the failure would be a `TypeError` from inside a timer.
     this.deps = {
+      ...deps,
       clearTimer: deps.clearTimer ?? ((handle) => clearTimeout(handle as never)),
       now: deps.now ?? (() => Date.now()),
+      push: deps.push,
       setTimer:
         deps.setTimer ??
         ((fn, ms) => {
@@ -83,8 +89,6 @@ export class StockPushQueue {
           handle.unref?.();
           return handle;
         }),
-      ...deps,
-      push: deps.push,
     };
   }
 

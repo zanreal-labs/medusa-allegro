@@ -172,6 +172,41 @@ describe("StockPushQueue", () => {
     await clock.fire();
   });
 
+  it("falls back to a real clock and timer when none are injected", async () => {
+    const pushes: string[][] = [];
+    const queue = new StockPushQueue({
+      buffer: { debounceMs: 1 },
+      push: async (skus) => {
+        pushes.push(skus);
+      },
+    });
+
+    queue.add(["SKU-1"]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(pushes).toEqual([["SKU-1"]]);
+  });
+
+  it("survives an options object carrying explicit undefined overrides", async () => {
+    const pushes: string[][] = [];
+    const queue = new StockPushQueue({
+      buffer: { debounceMs: 1 },
+      // An explicitly PRESENT undefined, which is easy to produce from an options
+      // object. Spreading the caller's deps over the resolved defaults would replace a
+      // working clock with undefined, and the failure would surface as a TypeError from
+      // inside a timer - in production only, since every test injects all three.
+      clearTimer: undefined,
+      now: undefined,
+      push: async (skus) => {
+        pushes.push(skus);
+      },
+      setTimer: undefined,
+    });
+
+    queue.add(["SKU-2"]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(pushes).toEqual([["SKU-2"]]);
+  });
+
   it("does nothing at all when handed no SKUs", () => {
     const clock = harness();
     const queue = new StockPushQueue({
