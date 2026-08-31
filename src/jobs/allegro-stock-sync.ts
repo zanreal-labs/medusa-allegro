@@ -49,8 +49,14 @@ export default async function allegroStockSyncJob(container: MedusaContainer): P
       `conflicted=${result.conflicted} ` +
       `complete=${result.complete}`,
   );
+  // The two halves, reported as what they are. This used to print `result.error`
+  // under the label "findings", which was accurate only because that field carried
+  // both - the same conflation that let the immediate push page on a normal state.
+  if (result.finding) {
+    logger.info(`[${JOB_NAME}] findings: ${result.finding}`);
+  }
   if (result.error) {
-    logger.warn(`[${JOB_NAME}] finished with findings: ${result.error}`);
+    logger.warn(`[${JOB_NAME}] finished with errors: ${result.error}`);
   }
 }
 

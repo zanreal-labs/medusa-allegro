@@ -300,15 +300,34 @@ export const enqueueStockPush = (
         );
         return;
       }
+      // The full skip ladder on the line, not just the write counters. Every one of
+      // these buckets means "this offer's quantity was published nowhere", and after
+      // the alert was narrowed to genuine failures the log is the ONLY place a skip
+      // is visible - so it has to name each reason rather than leave an operator to
+      // infer the gap from `synced` being smaller than they expected.
       logger.info(
         `[allegro-stock] immediate push: skus=${dirty.length} eligible=${result.eligible} ` +
           `mismatched=${result.mismatched} synced=${result.synced} alreadyInSync=${result.alreadyInSync} ` +
-          `pending=${result.pending} failed=${result.failed}`,
+          `pending=${result.pending} failed=${result.failed} ` +
+          `unlinked=${result.skippedUnlinked} unmatched=${result.skippedUnmatched} ` +
+          `conflicted=${result.conflicted} noInventory=${result.skippedNoInventory} ` +
+          `noListingStock=${result.skippedNoListingStock}`,
       );
+      if (result.finding) {
+        // Reported, never alerted. A finding is a run that did its job while leaving
+        // something out on purpose, and the commonest one here - a variant no Allegro
+        // offer claims - is a PERMANENT, deliberate state in this store, because
+        // auctions are created by hand. Paging on it would fire on every stock
+        // movement of every unlisted product until nobody reads the alerts at all.
+        logger.info(`[allegro-stock] immediate push findings: ${result.finding}`);
+      }
       if (result.error) {
-        // Thrown so the queue's `onError` raises the alert: a push that reported
-        // failures left a quantity wrong on the marketplace, which is the whole thing
-        // this path exists to prevent, and it must not be a log line nobody reads.
+        // Thrown so the queue's `onError` raises the alert. Reserved for a run that
+        // genuinely FAILED: an Allegro API error, a command Allegro rejected, or a
+        // plan refused over an ambiguous or unreadable quantity. What those have in
+        // common is a MAPPED offer that may now be advertising stock the store does
+        // not have - which is the oversell this whole path exists to prevent, and the
+        // only condition worth waking somebody for.
         throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, result.error);
       }
     },

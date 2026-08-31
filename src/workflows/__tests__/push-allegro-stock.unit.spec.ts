@@ -295,7 +295,7 @@ describe("pushAllegroStock: the mapping row is the authority", () => {
 
     expect(client.submissions).toEqual([]);
     expect(result.conflicted).toBe(1);
-    expect(result.error).toContain("contradict their mapping row");
+    expect(result.finding).toContain("contradict their mapping row");
     // Durable, not just counted: visible in the admin, and it holds the offer out of the
     // PRICE path too until somebody resolves it.
     expect(allegro.offers[0]).toMatchObject({
@@ -316,7 +316,7 @@ describe("pushAllegroStock: the mapping row is the authority", () => {
     const result = await pushAllegroStock(context.container as never);
 
     expect(result.skippedUnmatched).toBe(1);
-    expect(result.error).toContain("could not be paired");
+    expect(result.finding).toContain("could not be paired");
     expect(result.complete).toBe(false);
   });
 
@@ -339,7 +339,7 @@ describe("pushAllegroStock: the mapping row is the authority", () => {
     const result = await pushAllegroStock(context.container as never);
 
     expect(result.skippedUnlinked).toBe(1);
-    expect(result.error).toContain("claimed by no mapped Allegro offer");
+    expect(result.finding).toContain("claimed by no mapped Allegro offer");
   });
 });
 
@@ -549,7 +549,7 @@ describe("pushAllegroStock", () => {
     expect(result.skippedNoInventory).toBe(1);
     expect(result.unresolved).toBe(0);
     // Reported and not complete, because its quantity is published nowhere.
-    expect(result.error).toContain("does not manage inventory");
+    expect(result.finding).toContain("does not manage inventory");
     expect(result.complete).toBe(false);
   });
 
@@ -661,7 +661,7 @@ describe("pushAllegroStock", () => {
       script: { pendingCommands: [0] },
     });
     expect(result).toMatchObject({ failed: 0, pending: 1, synced: 0 });
-    expect(result.error).toContain("not confirmed within the poll budget");
+    expect(result.finding).toContain("not confirmed within the poll budget");
     // Not stamped: nothing was confirmed.
     expect(allegro.offers[0]?.stock_synced_at).toBeUndefined();
   });
