@@ -312,6 +312,23 @@
     "statusError": "błąd",
     "notListed": "brak na Allegro",
     "priceColumnHeader": "Allegro",
-    "statusColumnHeader": "Stan Allegro"
+    "statusColumnHeader": "Stan Allegro",
+    "marginColumnHeader": "Marża Allegro",
+    "marginError": "błąd",
+    "marginNoPrice": "brak ceny Allegro",
+    "marginNoCost": "brak ceny zakupu",
+    "marginNoCommission": "brak prowizji"
+  },
+  "marginCard": {
+    "heading": "Marża Allegro",
+    "loadError": "Nie udało się wczytać marż Allegro",
+    "noSku": "brak SKU",
+    "columns": {
+      "variant": "Wariant",
+      "sku": "SKU",
+      "price": "Cena Allegro",
+      "commission": "Prowizja",
+      "margin": "Marża Allegro"
+    }
   }
 }

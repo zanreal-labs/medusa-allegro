@@ -164,6 +164,26 @@ export interface OfferRow {
   conflict?: OfferConflict | null;
   conflict_detail?: string | null;
   last_error?: string | null;
+  /** Present only when the row was fetched with `?economics=1`. */
+  economics?: OfferEconomicsDTO | null;
+}
+
+/**
+ * What one offer earns at its live price, as `?economics=1` returns it.
+ *
+ * Every field is independently optional and an absent one always means
+ * "unknown", never "zero" - see `workflows/lib/offer-economics.ts` for why a
+ * defaulted commission or cost would overstate what an offer makes.
+ */
+export interface OfferEconomicsDTO {
+  selling_price?: number;
+  currency?: string | null;
+  net_cost?: number;
+  cost_gross?: number;
+  commission_rate?: number;
+  commission_amount?: number;
+  margin_amount?: number;
+  margin_pct?: number;
 }
 
 export interface OffersResponse {

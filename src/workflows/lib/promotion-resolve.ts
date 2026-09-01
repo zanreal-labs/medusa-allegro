@@ -31,8 +31,10 @@ import {
   buildBreakEvenResolver,
   buildCategoryRates,
   buildSrpBySku,
+  loadNetCosts,
   resolveCommissionFraction,
   resolveCostsService,
+  resolveMargin,
   resolveSrp,
 } from "./pricing";
 
@@ -50,21 +52,6 @@ import {
  * The channel set, the product targets, the discount and the window all come from
  * the native promotion - the single source of truth the storefront also honours.
  */
-
-/** The costs plugin, duck-typed on the two calls this resolver makes. */
-interface CostsEconomics {
-  getCostsBySkus: (skus: string[]) => Promise<{ sku: string; unit_cost_net: number }[]>;
-  computeEconomics: (input: {
-    netCost?: number;
-    commissionRate?: number;
-    sellingPrice?: number;
-  }) => Promise<{
-    netIncome?: number;
-    marginPct?: number;
-    breakEvenPrice?: number;
-    grossCost?: number;
-  }>;
-}
 
 interface QueryGraph {
   graph: (input: {
@@ -343,7 +330,7 @@ export const resolvePromotionPreview = async (
     loadNetCosts(container, options.costsModuleKey, skus),
   ]);
   const categoryRates = buildCategoryRates(categoryRateRows as Record<string, unknown>[]);
-  const costs = resolveCostsService(container, options.costsModuleKey) as CostsEconomics | undefined;
+  const costs = resolveCostsService(container, options.costsModuleKey);
   const breakEvenFor = await buildBreakEvenResolver(costs, skus);
   const srpSource = await buildSrpBySku(container, variants as unknown as CatalogVariant[], options);
 
@@ -479,81 +466,6 @@ export const loadTargetVariants = async (
     collect(data);
   }
   return [...byId.values()];
-};
-
-/**
- * Net purchase cost per SKU, for the margin figure.
- *
- * A SOFT read, exactly as the break-even resolver treats the same module: an absent
- * costs plugin or a failed read yields an empty map and simply no margin column
- * content, never a broken preview and never a guessed cost.
- */
-const loadNetCosts = async (
-  container: MedusaContainer,
-  costsModuleKey: string,
-  skus: readonly string[],
-): Promise<Map<string, number>> => {
-  const byShu = new Map<string, number>();
-  if (skus.length === 0) {
-    return byShu;
-  }
-  try {
-    const costs = resolveCostsService(container, costsModuleKey) as CostsEconomics | undefined;
-    if (!costs) {
-      return byShu;
-    }
-    for (const row of await costs.getCostsBySkus([...skus])) {
-      const netCost = parseAmount(row.unit_cost_net);
-      if (netCost !== undefined) {
-        byShu.set(row.sku, netCost);
-      }
-    }
-  } catch {
-    return byShu;
-  }
-  return byShu;
-};
-
-/**
- * The margin a given selling price leaves, delegated to the costs plugin.
- *
- * Deliberately NOT reimplemented here. The plugin already owns the relationship
- * between net cost, VAT, commission and break-even; a second formula in this file
- * would be one refactor away from quietly disagreeing with the floor it is shown
- * next to. Missing inputs yield an absent margin rather than a zero, because a
- * margin of "unknown" and a margin of "nothing" are different facts.
- */
-const resolveMargin = async (
-  costs: CostsEconomics | undefined,
-  netCost: number | undefined,
-  commissionRate: number | undefined,
-  sellingPrice: number,
-): Promise<{
-  marginAmount?: number;
-  marginPct?: number;
-  costGross?: number;
-  commissionRate?: number;
-  commissionAmount?: number;
-}> => {
-  if (!costs || netCost === undefined || commissionRate === undefined) {
-    return {};
-  }
-  try {
-    const { netIncome, marginPct, grossCost } = await costs.computeEconomics({
-      commissionRate,
-      netCost,
-      sellingPrice,
-    });
-    return {
-      commissionAmount: round2(sellingPrice * commissionRate),
-      commissionRate,
-      costGross: grossCost,
-      marginAmount: netIncome,
-      marginPct,
-    };
-  } catch {
-    return {};
-  }
 };
 
 /** The Link module's minimal surface for creating a promotion<->config association. */
