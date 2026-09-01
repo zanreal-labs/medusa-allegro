@@ -97,6 +97,16 @@ export interface CheckoutFormView extends CheckoutFormFacts {
   lines: CheckoutFormLine[];
   shippingAddress?: OrderAddress;
   billingAddress?: OrderAddress;
+  /**
+   * The invoice recipient's tax id, kept OUT of `billingAddress.company`.
+   *
+   * Absent for a private purchase, for a form with no invoice block, and for a
+   * company whose tax id Allegro sent in a type this plugin does not accept (see
+   * `pickCompanyTaxId`). Stored on `order.metadata.nip`, which is where the inFakt
+   * plugin looks first; it is not part of the address because it is not part of
+   * anybody's name.
+   */
+  billingTaxId?: string;
   /** Earliest `boughtAt` across the lines: when the order was actually placed. */
   boughtAt?: string;
 }
@@ -184,22 +194,32 @@ const buildShippingAddress = (form: AllegroCheckoutForm): OrderAddress | undefin
 /**
  * The invoice recipient, as a billing address.
  *
- * Company name and tax id go into `company` together, because Medusa's order
- * address has no tax-id field and losing the NIP would make the order useless for
- * invoicing. A private purchase that named an invoice recipient uses that person's
- * name rather than the account holder's.
+ * ## The company name is the company name, and nothing else
+ *
+ * This used to write `${companyName} (${taxId})` into `company`, on the reasoning
+ * that Medusa's order address has no tax-id field and losing the NIP would make the
+ * order useless for invoicing. Losing it was indeed unacceptable; putting it inside a
+ * human-readable name was the wrong way to keep it. Two invoices went out reading
+ * `NZOZ "Familia" Monika Kwasniak ( )` because the invoicing plugin has to
+ * un-concatenate what this concatenated, and the strip left the brackets behind.
+ *
+ * A tax id is structured data. It travels on `order.metadata.nip` now - see
+ * `billingTaxId` on the view and the `nip` key in `order-upsert` - which is the key
+ * the inFakt plugin's default extractor reads first, and `company` carries the name
+ * Allegro sent, verbatim.
+ *
+ * A private purchase that named an invoice recipient uses that person's name rather
+ * than the account holder's.
  */
 const buildBillingAddress = (form: AllegroCheckoutForm): OrderAddress | undefined => {
   const invoice = form.invoice?.address;
   if (!invoice) {
     return undefined;
   }
-  const taxId = pickCompanyTaxId(invoice.company);
-  const companyName = invoice.company?.name;
   return orUndefined({
     address_1: invoice.street,
     city: invoice.city,
-    company: companyName && taxId ? `${companyName} (${taxId})` : (companyName ?? undefined),
+    company: invoice.company?.name?.trim() || undefined,
     country_code: invoice.countryCode?.toLowerCase(),
     first_name: invoice.naturalPerson?.firstName,
     last_name: invoice.naturalPerson?.lastName,
@@ -329,6 +349,9 @@ export const readCheckoutForm = (form: AllegroCheckoutForm): CheckoutFormRead =>
     view: {
       ...facts,
       billingAddress: buildBillingAddress(form) ?? shippingAddress,
+      // Read off the invoice block whether or not that block produced an address, so
+      // a tax id is never lost to the shipping-address fallback above.
+      billingTaxId: pickCompanyTaxId(form.invoice?.address?.company),
       boughtAt: earliestBoughtAt(form),
       // Non-null by construction: the `!facts.currency` check above already refused.
       currency: facts.currency as string,

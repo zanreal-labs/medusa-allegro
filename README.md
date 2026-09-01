@@ -1005,6 +1005,28 @@ sale happened on Allegro whatever Medusa's catalogue says, and an order nobody c
 is not safer than one that is visibly half-mapped. Totals and line prices come from
 Allegro verbatim, never recomputed.
 
+**The invoice recipient's tax id is structured data, not part of a name.** It is
+written to `order.metadata.nip`, which is the first key `@zanreal/medusa-infakt`'s
+default NIP extractor reads, and `billing_address.company` carries the company name
+Allegro sent and nothing else.
+
+This used to be `company: "${name} (${taxId})"`, on the reasoning that Medusa's order
+address has no tax-id field. That shortcut forced every downstream consumer to
+un-concatenate a human-readable field, and the invoicing plugin's strip removed the
+digits but not the brackets they sat in - two real invoices went out with the company
+name reading `Name ( )`. Orders created before the change still have `(NIP)` baked into
+`company`; the invoicing plugin still parses it, and the drain fills `metadata.nip` in
+on any later pass over the same form. That fill is **gap only** - a tax id already on
+the order is never overwritten, exactly like an address that is already there.
+
+The order metadata the drain writes, in full:
+
+| Key                         | What it is                                                             |
+| --------------------------- | ---------------------------------------------------------------------- |
+| `allegro_checkout_form_id`  | The link back to Allegro, and the key the drain adopts orders by.      |
+| `allegro_buyer_login`       | The Allegro account holder's login. Absent when the form carried none. |
+| `nip`                       | The invoice recipient's tax id. Absent for a private purchase.         |
+
 ### Fulfillment write-back
 
 A subscriber on `order.fulfillment_created` and `shipment.created` sets Allegro's
@@ -1469,6 +1491,8 @@ These are all load-bearing. Each one cost a production incident somewhere.
   integration ends up displaying a name the Allegro seller panel contradicts. This
   plugin puts `delivery.address` on the Medusa shipping address and `invoice.address`
   on the billing address, falling back to shipping rather than to the account holder.
+  The invoice company's tax id goes to `order.metadata.nip`, never into the company
+  name - see [the orders drain](#orders-the-event-journal-drain).
 - **The buyer block spells the postal code `postCode`**, not `zipCode` - alone among
   the addresses in a checkout form. Typing it as the common address shape silently
   drops it.

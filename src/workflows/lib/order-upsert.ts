@@ -22,7 +22,9 @@ import type { AmountInput } from "../../lib/sync/money";
 import { planOrderPayment, readPaymentFacts } from "../../lib/sync/order-reconcile";
 import { nameOrderCustomer } from "./order-customer";
 import { planOrderAddressRepair } from "../../lib/sync/order-address";
+import { planOrderTaxIdFill } from "../../lib/sync/order-tax-id";
 import { repairOrderAddresses } from "./order-address";
+import { fillOrderTaxId } from "./order-tax-id";
 import { emitOrderPlaced } from "./order-placed-event";
 import { readOrderPaymentState, registerOrderPayment } from "./order-payment";
 import { ensureOrderReservations } from "./order-reservations";
@@ -296,6 +298,11 @@ const createMedusaOrder = async (
           // plugin's tables.
           allegro_checkout_form_id: view.checkoutFormId,
           ...(view.buyerLogin ? { allegro_buyer_login: view.buyerLogin } : {}),
+          // The invoice recipient's tax id, as STRUCTURED data rather than folded
+          // into `billing_address.company`. `nip` is the first key the inFakt
+          // plugin's `defaultNipExtractor` reads, so this is the contract it
+          // already publishes, not a new one invented here.
+          ...(view.billingTaxId ? { nip: view.billingTaxId } : {}),
         },
         region_id: regionId,
         ...(options.salesChannelId ? { sales_channel_id: options.salesChannelId } : {}),
@@ -601,6 +608,15 @@ interface MedusaOrderSnapshot {
    */
   hasShippingAddress: boolean;
   hasBillingAddress: boolean;
+  /**
+   * The order's metadata, for the tax-id fill.
+   *
+   * Carried on this read for the same reason the customer columns and the address
+   * booleans are. The fill has to know whether the order already designates a tax id
+   * before it can decide to write one, and it is gap-only: the CONTENTS are read only
+   * to answer "is a tax id already here", never to compare it with Allegro's copy.
+   */
+  metadata?: Record<string, unknown> | null;
 }
 
 const readMedusaOrder = async (
@@ -621,6 +637,7 @@ const readMedusaOrder = async (
         "customer.first_name",
         "customer.last_name",
         "customer.company_name",
+        "metadata",
         "shipping_address.id",
         "billing_address.id",
       ],
@@ -636,6 +653,7 @@ const readMedusaOrder = async (
       ...(customer?.id ? { customer } : {}),
       hasBillingAddress: Boolean((order.billing_address as { id?: string } | null)?.id),
       hasShippingAddress: Boolean((order.shipping_address as { id?: string } | null)?.id),
+      metadata: (order.metadata as Record<string, unknown> | null) ?? null,
       status: (order.status as string | null) ?? undefined,
       // NOT cast to a scalar: `order.total` is a Medusa `BigNumber` instance, and the
       // scalar cast is what hid that. `parseAmount` reads the object directly.
@@ -953,6 +971,29 @@ export const applyCheckoutForm = async (
       ),
     );
     addressRepaired = outcome.repaired;
+  }
+
+  // Step 3f: the invoice recipient's tax id, on `order.metadata.nip`.
+  //
+  // Same shape and same reason as the two fills above, and run on EVERY pass for the
+  // same reason. Two orders need it: one created before the tax id stopped being
+  // concatenated into `billing_address.company`, and one whose billing address is
+  // filled in by step 3e - that fill writes a CLEAN company name, so without this the
+  // tax id would have nowhere left to live and a company sale would be invoiced as a
+  // consumer one.
+  //
+  // Gap only. A tax id already on the order is never touched; see `planOrderTaxIdFill`.
+  //
+  // Like the two fills above, a failure here deliberately does NOT set `lastError`: an
+  // order without this key is still invoiceable - the inFakt plugin also parses a NIP
+  // out of `billing_address.company` - so it is not a reason to hold the event cursor.
+  if (medusaOrderId && snapshot) {
+    await fillOrderTaxId(
+      container,
+      logger,
+      medusaOrderId,
+      planOrderTaxIdFill(view.billingTaxId, snapshot.metadata),
+    );
   }
 
   // Step 3b: reconcile the money. Read-only, and never a reason to withhold the order.
