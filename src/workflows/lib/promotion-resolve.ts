@@ -20,7 +20,7 @@ import type {
   PromotionMethod,
   ResolvedDiscount,
 } from "../../lib/promotions/preview";
-import { parseAmount } from "../../lib/sync/money";
+import { parseAmount, round2 } from "../../lib/sync/money";
 import { evaluateSyncEligibility } from "../../lib/sync/price-automation";
 import type { AutomationRuleNames, SyncSkipReason } from "../../lib/sync/price-automation";
 import { ALLEGRO_MODULE } from "../../modules/allegro";
@@ -236,6 +236,19 @@ export interface OfferPreview {
   marginAmount?: number;
   /** `netIncome / sellingPrice` as a fraction (0.42 = 42%). */
   marginPct?: number;
+  /**
+   * The gross purchase cost (net cost plus VAT) the margin is measured against.
+   *
+   * Shown because the margin was ALREADY commission-inclusive and nobody could
+   * tell: `computeEconomics` subtracts both the gross cost and the commission, but
+   * with neither input on screen the number was unfalsifiable. These three columns
+   * are evidence, not a change of maths.
+   */
+  costGross?: number;
+  /** Allegro's commission for this offer's category and highlight state, as a fraction. */
+  commissionRate?: number;
+  /** That rate applied to the current price, in money. */
+  commissionAmount?: number;
 }
 
 /** The full per-promotion preview. */
@@ -515,17 +528,29 @@ const resolveMargin = async (
   netCost: number | undefined,
   commissionRate: number | undefined,
   sellingPrice: number,
-): Promise<{ marginAmount?: number; marginPct?: number }> => {
+): Promise<{
+  marginAmount?: number;
+  marginPct?: number;
+  costGross?: number;
+  commissionRate?: number;
+  commissionAmount?: number;
+}> => {
   if (!costs || netCost === undefined || commissionRate === undefined) {
     return {};
   }
   try {
-    const { netIncome, marginPct } = await costs.computeEconomics({
+    const { netIncome, marginPct, grossCost } = await costs.computeEconomics({
       commissionRate,
       netCost,
       sellingPrice,
     });
-    return { marginAmount: netIncome, marginPct };
+    return {
+      commissionAmount: round2(sellingPrice * commissionRate),
+      commissionRate,
+      costGross: grossCost,
+      marginAmount: netIncome,
+      marginPct,
+    };
   } catch {
     return {};
   }

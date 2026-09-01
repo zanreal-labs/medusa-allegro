@@ -1,6 +1,6 @@
 import { defineWidgetConfig } from "@medusajs/admin-sdk";
 import type { DetailWidgetProps } from "@medusajs/framework/types";
-import { Alert, Badge, Container, Heading, Select, Switch, Table, Text, toast } from "@medusajs/ui";
+import { Alert, Badge, Container, Heading, Switch, Table, Text, toast } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
 import { sdk } from "../lib/sdk";
 import {
@@ -8,9 +8,10 @@ import {
   coverageBody,
   labelFor,
   movesHeadline,
+  commissionLabel,
+  floorOnlyLabel,
   marginLabel,
   PROMO_COPY,
-  raisesPriceLabel,
   THIN_MARGIN_PCT,
   SKIP_REASON_PL,
 } from "../lib/promotion-preview-copy";
@@ -54,8 +55,9 @@ interface OfferPreview {
   currentPrice?: number;
   marginAmount?: number;
   marginPct?: number;
-  overrideMarginPct?: number;
-  raisesPrice?: boolean;
+  costGross?: number;
+  commissionRate?: number;
+  commissionAmount?: number;
 }
 
 interface PromotionPreview {
@@ -116,26 +118,6 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
     [promotionId, preview?.discountBase, load],
   );
 
-  const setBase = useCallback(
-    async (value: string) => {
-      setSaving(true);
-      try {
-        const discount_base = value === "none" ? null : value;
-        await sdk.client.fetch(`/admin/allegro/promotions/${encodeURIComponent(promotionId)}/config`, {
-          body: { discount_base },
-          method: "POST",
-        });
-        toast.success(PROMO_COPY.saveOk);
-        await load();
-      } catch (caught) {
-        toast.error(caught instanceof Error ? caught.message : PROMO_COPY.saveError);
-      } finally {
-        setSaving(false);
-      }
-    },
-    [promotionId, load],
-  );
-
   return (
     <Container className="divide-y p-0">
       <div className="flex flex-col gap-1 px-6 py-4">
@@ -170,51 +152,15 @@ const AllegroPromotionWidget = ({ data }: DetailWidgetProps<{ id: string }>) => 
             </div>
           ) : null}
 
-          <div className="flex flex-col gap-2 px-6 py-4">
-            <div className="flex items-center gap-3">
-              <Text size="small" weight="plus">
-                {PROMO_COPY.discountBaseLabel}
-              </Text>
-              <div className="w-64">
-                <Select
-                  disabled={saving || preview.promotion.blockReasons.length > 0}
-                  value={preview.discountBase ?? "none"}
-                  onValueChange={(value) => void setBase(value)}
-                >
-                  <Select.Trigger>
-                    <Select.Value placeholder={PROMO_COPY.baseNone} />
-                  </Select.Trigger>
-                  <Select.Content>
-                    <Select.Item value="none">{PROMO_COPY.baseNone}</Select.Item>
-                    <Select.Item value="competitor">{PROMO_COPY.baseCompetitor}</Select.Item>
-                    <Select.Item value="srp">{PROMO_COPY.baseSrp}</Select.Item>
-                  </Select.Content>
-                </Select>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <Switch
-                checked={preview.enabled}
-                disabled={
-                  saving ||
-                  preview.discountBase !== "competitor" ||
-                  preview.promotion.blockReasons.length > 0
-                }
-                onCheckedChange={(next) => void setArmed(next)}
-              />
-              <Text size="small" weight="plus">
-                {PROMO_COPY.armLabel}
-              </Text>
-              {preview.discountBase === null ? (
-                <Text size="small" className="text-ui-fg-subtle">
-                  {PROMO_COPY.armNeedsBase}
-                </Text>
-              ) : preview.discountBase === "srp" ? (
-                <Text size="small" className="text-ui-fg-subtle">
-                  {PROMO_COPY.armNeedsCompetitor}
-                </Text>
-              ) : null}
-            </div>
+          <div className="flex items-center gap-3 px-6 py-4">
+            <Switch
+              checked={preview.enabled}
+              disabled={saving || preview.promotion.blockReasons.length > 0}
+              onCheckedChange={(next) => void setArmed(next)}
+            />
+            <Text size="small" weight="plus">
+              {PROMO_COPY.armLabel}
+            </Text>
           </div>
 
           <div className="px-6 py-4">
@@ -289,10 +235,10 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
         <Table.Row>
           <Table.HeaderCell>{PROMO_COPY.tableSku}</Table.HeaderCell>
           <Table.HeaderCell>{PROMO_COPY.tableCurrent}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableCost}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableCommission}</Table.HeaderCell>
           <Table.HeaderCell>{PROMO_COPY.tableMargin}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableSrp}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableSrpBase}</Table.HeaderCell>
-          <Table.HeaderCell>{PROMO_COPY.tableCompetitor}</Table.HeaderCell>
+          <Table.HeaderCell>{PROMO_COPY.tableFloorOnly}</Table.HeaderCell>
         </Table.Row>
       </Table.Header>
       <Table.Body>
@@ -309,41 +255,23 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
               )}
             </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
-              <MarginCell row={row} />
-            </Table.Cell>
-            <Table.Cell className="txt-compact-xsmall">
-              {row.srp} {row.currency}
-            </Table.Cell>
-            <Table.Cell className="txt-compact-xsmall">
-              {"skipped" in row.override ? (
-                <Badge color="red" size="2xsmall">
-                  {labelFor(SKIP_REASON_PL, row.override.skipped)}
-                </Badge>
+              {row.costGross === undefined ? (
+                <span className="text-ui-fg-muted">{PROMO_COPY.marginUnknown}</span>
               ) : (
-                <div className="flex flex-col gap-1">
-                  <span>
-                    <b>
-                      {row.override.price} {row.currency}
-                    </b>
-                    {row.overrideMarginPct === undefined ? null : (
-                      <span className="text-ui-fg-muted">
-                        {" "}
-                        ({Math.round(row.overrideMarginPct * 100)}%)
-                      </span>
-                    )}
-                    {row.override.clampedToFloor ? (
-                      <Badge color="orange" size="2xsmall" className="ml-1">
-                        {PROMO_COPY.clampedToFloor}
-                      </Badge>
-                    ) : null}
-                  </span>
-                  {row.raisesPrice && row.currentPrice !== undefined ? (
-                    <Badge color="red" size="2xsmall">
-                      {raisesPriceLabel(row.currentPrice, row.override.price, row.currency)}
-                    </Badge>
-                  ) : null}
-                </div>
+                <span>
+                  {row.costGross.toFixed(2)} {row.currency}
+                </span>
               )}
+            </Table.Cell>
+            <Table.Cell className="txt-compact-xsmall">
+              {row.commissionRate === undefined || row.commissionAmount === undefined ? (
+                <span className="text-ui-fg-muted">{PROMO_COPY.marginUnknown}</span>
+              ) : (
+                <span>{commissionLabel(row.commissionRate, row.commissionAmount, row.currency)}</span>
+              )}
+            </Table.Cell>
+            <Table.Cell className="txt-compact-xsmall">
+              <MarginCell row={row} />
             </Table.Cell>
             <Table.Cell className="txt-compact-xsmall">
               {"skipped" in row.ruleSwitch ? (
@@ -351,9 +279,7 @@ const PreviewTable = ({ preview }: { preview: PromotionPreview }) => (
                   {labelFor(SKIP_REASON_PL, row.ruleSwitch.skipped)}
                 </Badge>
               ) : (
-                <span>
-                  {row.breakEven} - {row.srp} {row.currency}
-                </span>
+                <span>{floorOnlyLabel(row.breakEven, row.currency)}</span>
               )}
             </Table.Cell>
           </Table.Row>

@@ -36,7 +36,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     discountBase = parsed;
   }
 
-  const result = await setPromotionDiscountBase(req.scope, id, discountBase, enabled);
+  // Arming implies the competitor base. With the SRP mode withdrawn from the UI -
+  // it raises prices on this catalogue rather than cutting them - there is exactly
+  // one executable mechanism, so making the operator pick it was a click that could
+  // only be answered one way. An explicit base in the body still wins, so the field
+  // stays usable if a second mechanism ever earns its place.
+  const effectiveBase = discountBase ?? (enabled === true ? "competitor" : null);
+  const result = await setPromotionDiscountBase(req.scope, id, effectiveBase, enabled);
   // Still no Allegro write on this request. Arming only records intent; the overlay
   // acts on the next price-sync tick, and only when its own global toggle is armed
   // too.

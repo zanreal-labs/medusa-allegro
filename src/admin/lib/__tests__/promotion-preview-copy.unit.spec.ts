@@ -6,7 +6,8 @@ import {
   movesHeadline,
   marginLabel,
   PROMO_COPY,
-  raisesPriceLabel,
+  commissionLabel,
+  floorOnlyLabel,
   THIN_MARGIN_PCT,
   SKIP_REASON_PL,
 } from "../promotion-preview-copy";
@@ -131,13 +132,20 @@ describe("no behavioural notes remain in the table copy", () => {
   });
 });
 
-describe("raisesPriceLabel", () => {
-  it("names both prices so the increase is unmissable", () => {
-    // The live case that forced this: offer at 155 while SRP-10% lands at 255.
-    expect(raisesPriceLabel(155, 255, "PLN")).toBe("Podniesie cenę z 155 do 255 PLN");
+describe("floorOnlyLabel", () => {
+  it("shows only the floor, because the landing price is unknowable from here", () => {
+    // Allegro applies the reduction against a reference price its API does not
+    // expose anywhere. The old render showed [floor, SRP] and read as competitor data.
+    expect(floorOnlyLabel(136, "PLN")).toBe("min. 136.00 PLN");
+  });
+});
+
+describe("commissionLabel", () => {
+  it("shows the rate that fed the break-even and what it costs at this price", () => {
+    expect(commissionLabel(0.095, 14.73, "PLN")).toBe("9.5% (14.73 PLN)");
   });
 
-  it("stays inside the one-line budget", () => {
-    expect(raisesPriceLabel(1555.55, 2555.55, "PLN").length).toBeLessThanOrEqual(70);
+  it("does not render a long float for an awkward rate", () => {
+    expect(commissionLabel(0.1234, 1, "PLN")).toBe("12.3% (1.00 PLN)");
   });
 });
