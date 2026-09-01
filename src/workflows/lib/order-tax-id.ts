@@ -1,7 +1,7 @@
 import type { IOrderModuleService, Logger, MedusaContainer } from "@medusajs/framework/types";
 import { Modules } from "@medusajs/framework/utils";
 import { describeError } from "../../lib/allegro/errors";
-import type { OrderTaxIdPlan } from "../../lib/sync/order-tax-id";
+import { hasTaxId, type OrderTaxIdPlan } from "../../lib/sync/order-tax-id";
 
 /**
  * Writing the invoice recipient's tax id onto an order that has none.
@@ -59,8 +59,13 @@ export const fillOrderTaxId = async (
     const [current] = await orders.listOrders({ id: orderId }, { select: ["id", "metadata"] });
     const metadata = (current?.metadata ?? {}) as Record<string, unknown>;
 
-    const existing = metadata.nip;
-    if (typeof existing === "string" && existing.trim().length > 0) {
+    // Every key the planner checks, not just `nip`. Checking one key here while
+    // `planOrderTaxIdFill` checks five meant an order that gained a `tax_id`
+    // between planning and writing got a second tax-id key written beside it -
+    // two tax ids on one order, with a precedence rule deciding which one the
+    // invoice carries. That is exactly the state the planner exists to prevent,
+    // and this is the guard that actually runs before the write.
+    if (hasTaxId(metadata)) {
       logger.warn(
         `[allegro-orders] refusing to write the invoice tax id onto Medusa order ${orderId}: it already carries one now, so this pass would overwrite rather than fill. Left alone.`,
       );

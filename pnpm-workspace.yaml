@@ -1,0 +1,2 @@
+minimumReleaseAgeExclude:
+  - '@zanreal/medusa-admin-kit@0.2.0'

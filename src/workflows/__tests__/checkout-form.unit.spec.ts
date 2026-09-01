@@ -162,3 +162,81 @@ describe("planOrderTaxIdFill", () => {
     });
   });
 });
+
+describe("a parcel locker is not a company", () => {
+  /**
+   * The pickup point's name was folded into `shipping_address.company` for the same
+   * reason the tax id was folded into `billing_address.company`: the field was free
+   * and the value had nowhere else to go. It is not a free field. When the checkout
+   * form carries no invoice block, `readCheckoutForm` uses the shipping address AS
+   * the billing address, and the invoicing plugin reads `company` both as a tax-id
+   * source and as evidence that a non-EU buyer is a business - which decides whether
+   * the sale is invoiced outside Polish VAT.
+   */
+  const pickupForm = (
+    pickupPoint: { id?: string; name?: string },
+    companyName?: string,
+  ): AllegroCheckoutForm => ({
+    ...form(),
+    delivery: {
+      address: {
+        city: "Warszawa",
+        ...(companyName ? { companyName } : {}),
+        countryCode: "PL",
+        firstName: "Monika",
+        lastName: "Kwasniak",
+        street: "Marszalkowska 12",
+        zipCode: "00-001",
+      },
+      pickupPoint,
+    },
+  });
+
+  it("keeps the locker name off the company field and on the address", () => {
+    const view = viewOf(pickupForm({ id: "WAW01M", name: "Paczkomat WAW01M" }));
+    expect(view.shippingAddress?.company).toBeUndefined();
+    expect(view.shippingAddress?.address_2).toBe("Paczkomat WAW01M");
+    expect(view.pickupPointId).toBe("WAW01M");
+  });
+
+  it("carries the locker through to the billing address without inventing a company", () => {
+    // No invoice block, so the billing address IS the shipping address. This is the
+    // path on which a locker name would have become the buyer's company name on an
+    // invoice, and a business signal to the VAT regime.
+    const view = viewOf(pickupForm({ id: "WAW01M", name: "Paczkomat WAW01M" }));
+    expect(view.billingAddress).toEqual(view.shippingAddress);
+    expect(view.billingAddress?.company).toBeUndefined();
+    expect(view.billingTaxId).toBeUndefined();
+  });
+
+  it("still lets a real company name through", () => {
+    const view = viewOf(pickupForm({ id: "WAW01M", name: "Paczkomat WAW01M" }, "ACME Sp. z o.o."));
+    expect(view.shippingAddress?.company).toBe("ACME Sp. z o.o.");
+    expect(view.shippingAddress?.address_2).toBe("Paczkomat WAW01M");
+  });
+
+  it("adds no address line and no id when the delivery is not to a pickup point", () => {
+    const view = viewOf({
+      ...form(),
+      delivery: {
+        address: {
+          city: "Warszawa",
+          countryCode: "PL",
+          firstName: "Monika",
+          lastName: "Kwasniak",
+          street: "Marszalkowska 12",
+          zipCode: "00-001",
+        },
+      },
+    });
+    expect(view.shippingAddress?.address_2).toBeUndefined();
+    expect(view.pickupPointId).toBeUndefined();
+  });
+
+  it("treats a blank point name and a blank company as absent, not as an empty string", () => {
+    const view = viewOf(pickupForm({ id: "  ", name: "  " }, "  "));
+    expect(view.shippingAddress?.address_2).toBeUndefined();
+    expect(view.shippingAddress?.company).toBeUndefined();
+    expect(view.pickupPointId).toBeUndefined();
+  });
+});
