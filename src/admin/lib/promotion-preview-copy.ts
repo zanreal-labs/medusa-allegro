@@ -58,9 +58,6 @@ export const PROMO_COPY = {
   // Kept short on purpose: this sits in a table cell, not a paragraph.
   clampedToFloor: "ograniczone progiem opłacalności",
   armLabel: "Uzbrojona",
-  armNeedsBase: "Najpierw wybierz, jak liczyć rabat.",
-  armNeedsCompetitor: "Uzbrojenie działa na razie tylko dla rabatu względem konkurencji.",
-  discountBaseLabel: "Jak liczyć rabat",
   emptyRows: "Żadna aukcja objęta tą promocją nie kwalifikuje się do zmiany ceny.",
   heading: "Podgląd cen na Allegro",
   loadError: "Nie udało się wczytać podglądu Allegro.",
@@ -75,12 +72,12 @@ export const PROMO_COPY = {
   marginLoss: "Sprzedaż ze stratą",
   marginThin: "Niska marża",
   marginUnknown: "brak danych",
-  tableCompetitor: "Po rabacie (konkurencja)",
+  tableCommission: "Prowizja",
+  tableCost: "Cena zakupu",
   tableCurrent: "Cena teraz",
-  tableMargin: "Marża teraz",
+  tableFloorOnly: "Po rabacie",
+  tableMargin: "Marża po prowizji",
   tableSku: "SKU",
-  tableSrp: "SRP",
-  tableSrpBase: "Po rabacie (od SRP)",
 } as const;
 
 /** "Zmieni N aukcji. Reszta katalogu zostaje bez zmian." */
@@ -103,6 +100,23 @@ export const coverageBody = (coverage: {
  * actually use. The percent is `netIncome / sellingPrice`, the same ratio the costs
  * plugin reports, rounded for display only.
  */
+/**
+ * "min. 136.00 PLN"
+ *
+ * The ONLY honest thing to render for the competitor mode. Allegro applies the
+ * reduction server-side against a reference price it does not expose anywhere in
+ * its API (verified: the per-offer automation resource returns the rule id and the
+ * range we wrote, nothing about the market), so the landing price is unknowable
+ * from here. What IS known is the floor the rule may never go below, so that is
+ * what is shown. The previous render implied competitor data we do not have.
+ */
+export const floorOnlyLabel = (floor: number, currency: string): string =>
+  `min. ${floor.toFixed(2)} ${currency}`;
+
+/** "9.5% (14.73 PLN)" - the rate that fed the break-even, and what it costs here. */
+export const commissionLabel = (rate: number, amount: number, currency: string): string =>
+  `${Math.round(rate * 1000) / 10}% (${amount.toFixed(2)} ${currency})`;
+
 export const marginLabel = (amount: number, pct: number | undefined, currency: string): string =>
   pct === undefined
     ? `${amount.toFixed(2)} ${currency}`
@@ -116,16 +130,6 @@ export const marginLabel = (amount: number, pct: number | undefined, currency: s
  */
 export const THIN_MARGIN_PCT = 0.05;
 
-/**
- * "Podniesie cenę z 155 do 255 PLN"
- *
- * The pathology that only live data could reveal: Allegro's automation has followed
- * competitors well below SRP, so an SRP-based discount can land ABOVE what the
- * auction currently sells for. That is a price rise wearing a promotion's clothes,
- * and it has to be loud before anybody arms that mode.
- */
-export const raisesPriceLabel = (from: number, to: number, currency: string): string =>
-  `Podniesie cenę z ${from} do ${to} ${currency}`;
 
 /**
  * Per-SKU skip reasons, keyed by the code the API returns.
