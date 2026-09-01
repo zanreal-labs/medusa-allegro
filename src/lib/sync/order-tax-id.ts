@@ -44,7 +44,7 @@ const TAX_ID_METADATA_KEYS = ["nip", "tax_id", "taxId", "vat_id", "vatId"] as co
  * order with a precedence rule deciding which one the invoice carries, which is the
  * kind of thing nobody finds until an invoice is wrong.
  */
-const hasTaxId = (metadata: Record<string, unknown> | null | undefined): boolean =>
+export const hasTaxId = (metadata: Record<string, unknown> | null | undefined): boolean =>
   TAX_ID_METADATA_KEYS.some((key) => {
     const value = metadata?.[key];
     return typeof value === "string" && value.trim().length > 0;

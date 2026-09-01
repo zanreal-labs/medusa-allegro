@@ -303,6 +303,9 @@ const createMedusaOrder = async (
           // plugin's `defaultNipExtractor` reads, so this is the contract it
           // already publishes, not a new one invented here.
           ...(view.billingTaxId ? { nip: view.billingTaxId } : {}),
+          // The pickup point's identity, as its id rather than as its name inside
+          // `shipping_address.company`. See `buildShippingAddress`.
+          ...(view.pickupPointId ? { allegro_pickup_point_id: view.pickupPointId } : {}),
         },
         region_id: regionId,
         ...(options.salesChannelId ? { sales_channel_id: options.salesChannelId } : {}),

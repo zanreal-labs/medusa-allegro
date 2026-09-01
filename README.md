@@ -1026,6 +1026,25 @@ The order metadata the drain writes, in full:
 | `allegro_checkout_form_id`  | The link back to Allegro, and the key the drain adopts orders by.      |
 | `allegro_buyer_login`       | The Allegro account holder's login. Absent when the form carried none. |
 | `nip`                       | The invoice recipient's tax id. Absent for a private purchase.         |
+| `allegro_pickup_point_id`   | The chosen pickup point's Allegro id. Absent for a courier delivery.   |
+
+**A parcel locker is not a company either.** For a pickup-point delivery the
+`delivery.address` block is the POINT's address, and a label with only a street and no
+point name is not deliverable - so the point's name has to travel with the address. It
+used to travel in `shipping_address.company`, on exactly the reasoning that put the tax
+id in `billing_address.company`: the field was free and the value had nowhere else to go.
+
+`company` is not a free field. `@zanreal/medusa-infakt` reads it twice - `nipFromCompanyField`
+scans it for a tax id, and the VAT regime treats a non-empty company name as evidence that a
+non-EU buyer is a **business**, which decides whether the sale is invoiced outside Polish
+VAT. And this is not only the shipping address: a form with no invoice block uses it as the
+billing address too, and the address repair writes that into `billing_address` on a later
+pass. A locker name in that field is a false business signal on a legal document.
+
+The point's name now goes on `shipping_address.address_2`, which is what a second address
+line is for and what the label needs, and the point's **id** - the actual key, previously
+discarded - goes on `order.metadata.allegro_pickup_point_id`. `company` carries a company
+name and nothing else.
 
 ### Fulfillment write-back
 
@@ -1492,7 +1511,9 @@ These are all load-bearing. Each one cost a production incident somewhere.
   plugin puts `delivery.address` on the Medusa shipping address and `invoice.address`
   on the billing address, falling back to shipping rather than to the account holder.
   The invoice company's tax id goes to `order.metadata.nip`, never into the company
-  name - see [the orders drain](#orders-the-event-journal-drain).
+  name, and a pickup point's name goes to `address_2` rather than to `company` - see
+  [the orders drain](#orders-the-event-journal-drain). `company` means "the buyer's
+  company" to everything downstream; anything else put there is read as one.
 - **The buyer block spells the postal code `postCode`**, not `zipCode` - alone among
   the addresses in a checkout form. Typing it as the common address shape silently
   drops it.

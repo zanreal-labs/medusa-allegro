@@ -60,6 +60,11 @@ export interface OrderAddress {
   last_name?: string;
   company?: string;
   address_1?: string;
+  /**
+   * The second address line. Carries a pickup point's name, which is a delivery
+   * designator rather than anybody's company - see `buildShippingAddress`.
+   */
+  address_2?: string;
   city?: string;
   postal_code?: string;
   country_code?: string;
@@ -107,6 +112,15 @@ export interface CheckoutFormView extends CheckoutFormFacts {
    * anybody's name.
    */
   billingTaxId?: string;
+  /**
+   * The pickup point's Allegro id, when the buyer chose one.
+   *
+   * The point's NAME goes on `shippingAddress.address_2` because the label needs
+   * it; this is the key that identifies the point, and it used to be thrown away
+   * because only the name had somewhere to live. Stored on
+   * `order.metadata.allegro_pickup_point_id`.
+   */
+  pickupPointId?: string;
   /** Earliest `boughtAt` across the lines: when the order was actually placed. */
   boughtAt?: string;
 }
@@ -170,19 +184,40 @@ const orUndefined = (address: OrderAddress): OrderAddress | undefined =>
  * The shipping recipient.
  *
  * From `delivery.address`, which is the buyer-entered recipient and what the seller
- * sees. For a pickup-point delivery the address block is the point's address, so
- * the point's name is folded into `company` - a label with only a street and no
- * point name is not deliverable.
+ * sees.
+ *
+ * ## A parcel locker is not a company
+ *
+ * For a pickup-point delivery the address block is the POINT's address, and a label
+ * with only a street and no point name is not deliverable - so the point's name has
+ * to travel with the address. It used to travel in `company`, on the same reasoning
+ * that put a tax id there: the field was free, and the value had nowhere else to go.
+ *
+ * `company` is not a free field. It is read as "the buyer's company name" by
+ * `@zanreal/medusa-infakt` - by `nipFromCompanyField`, which scans it for a tax id,
+ * and by the VAT regime, which treats a non-empty company name as evidence that a
+ * non-EU buyer is a BUSINESS and so invoices the sale outside Polish VAT. And this
+ * address is not only the shipping address: when the checkout form carries no
+ * invoice block, `readCheckoutForm` uses it as the billing address too, and
+ * `planOrderAddressRepair` writes that into `billing_address` on a later pass. A
+ * locker name in that field is a false business signal on a legal document.
+ *
+ * So the name goes to `address_2`, which is what a second address line is for, and
+ * the point's `id` - the actual key, which used to be discarded - goes to
+ * `order.metadata.allegro_pickup_point_id`. `company` carries a company name and
+ * nothing else, exactly as `buildBillingAddress` does below.
  */
 const buildShippingAddress = (form: AllegroCheckoutForm): OrderAddress | undefined => {
   const delivery = form.delivery?.address;
   if (!delivery) {
     return undefined;
   }
+  const pickupPointName = form.delivery?.pickupPoint?.name?.trim();
   return orUndefined({
     address_1: delivery.street,
+    ...(pickupPointName ? { address_2: pickupPointName } : {}),
     city: delivery.city,
-    company: delivery.companyName ?? form.delivery?.pickupPoint?.name,
+    company: delivery.companyName?.trim() || undefined,
     country_code: delivery.countryCode?.toLowerCase(),
     first_name: delivery.firstName,
     last_name: delivery.lastName,
@@ -358,6 +393,7 @@ export const readCheckoutForm = (form: AllegroCheckoutForm): CheckoutFormRead =>
       deliveryCost: money(form.delivery?.cost),
       deliveryMethod: form.delivery?.method?.name,
       email: form.buyer?.email,
+      pickupPointId: form.delivery?.pickupPoint?.id?.trim() || undefined,
       lines,
       paidAt: form.payment?.finishedAt,
       shippingAddress,
