@@ -3,10 +3,13 @@ import { StatusBadge, Text } from "@medusajs/ui";
 import { registerVariantColumn } from "@zanreal/medusa-admin-kit";
 import type { CatalogProduct } from "@zanreal/medusa-admin-kit";
 import i18next from "i18next";
+import { formatMarginLabel } from "../lib/format";
 import { createOfferBatcher } from "../lib/offer-batch";
 import type { OfferFetcher } from "../lib/offer-batch";
 import { sdk } from "../lib/sdk";
 import type { OffersResponse } from "../lib/types";
+import { classifyVariantMargin, isMarginGap } from "../lib/variant-margin";
+import type { VariantMargin } from "../lib/variant-margin";
 import {
   classifyVariantOffer,
   formatVariantOffer,
@@ -28,7 +31,7 @@ import type { VariantOffer, VariantOfferPrice } from "../lib/variant-offer";
  * reads the registry. See the admin-kit README's "contributor contract" for the
  * full explanation of why this is not optional.
  *
- * ## Two columns, not one
+ * ## Three columns, not one
  *
  * The price is a **separate** column from the offer status rather than a second
  * line inside it. The status column renders a badge whose text is a state name;
@@ -41,10 +44,22 @@ import type { VariantOffer, VariantOfferPrice } from "../lib/variant-offer";
  * three prices sit together and the badge that qualifies this one sits right
  * after it.
  *
+ * ## The margin column
+ *
+ * Priority 11 puts it immediately after the status badge, so the row reads
+ * price -> state -> what that price actually earns. It is the answer to "nie
+ * widac marzy od zakupu z uwzglednieniem prowizji allegro": measured on the
+ * live auction price, with the Allegro commission for this offer's category
+ * and promotion state already taken out, and never on the SRP.
+ *
+ * Every unresolvable figure names its missing input in amber rather than going
+ * blank - except an unmapped SKU, which stays quiet, because listing here is
+ * done by hand and most of the catalogue is legitimately not on Allegro.
+ *
  * ## One request per page, not one per cell
  *
- * Both columns need the same offer row, and `loadData` runs per row. Left
- * alone, that is `2 x pageSize` requests for one page. Both go through
+ * All three columns need the same offer row, and `loadData` runs per row. Left
+ * alone, that is `3 x pageSize` requests for one page. All of them go through
  * `offerBatcher` instead, which coalesces every SKU asked for within a tick
  * into a single `/admin/allegro/offers?skus=...` call. See `lib/offer-batch.ts`.
  */
@@ -59,7 +74,10 @@ import type { VariantOffer, VariantOfferPrice } from "../lib/variant-offer";
  */
 const fetchOffersBySkus: OfferFetcher = async (skus) => {
   const response = await sdk.client.fetch<OffersResponse>("/admin/allegro/offers", {
-    query: { limit: skus.length, skus },
+    // `economics=1` is what makes the margin column possible without a second
+    // request: the same offer row now carries the purchase cost, the commission
+    // and the resulting margin. All three columns still share this one call.
+    query: { economics: 1, limit: skus.length, skus },
   });
   return response.offers ?? [];
 };
@@ -75,6 +93,26 @@ const offerBatcher = createOfferBatcher(fetchOffersBySkus);
  * "component rendering" note.
  */
 const t = (key: string) => i18next.t(key, { ns: "allegro" });
+
+/** The amber label naming which input a margin is missing, or a quiet dash when unmapped. */
+const marginGapLabel = (margin: VariantMargin): string => {
+  switch (margin.state) {
+    case "no-price": {
+      return t("variantColumns.marginNoPrice");
+    }
+    case "no-cost": {
+      return t("variantColumns.marginNoCost");
+    }
+    case "no-commission": {
+      return t("variantColumns.marginNoCommission");
+    }
+    default: {
+      // Not listed on Allegro. Normal here - listing is manual - so it reads as
+      // quietly as the price column's own empty cell.
+      return "-";
+    }
+  }
+};
 
 /** A SKU-less variant cannot be matched to an offer; skip the network entirely. */
 const loadOfferRow = async (sku: string | null) => (sku ? offerBatcher.load(sku) : null);
@@ -161,6 +199,49 @@ registerVariantColumn<CatalogProduct, VariantOffer | null>({
   id: "allegro.offer_status",
   loadData: async (ctx) => classifyVariantOffer(await loadOfferRow(ctx.sku)),
   priority: 10,
+});
+
+registerVariantColumn<CatalogProduct, VariantMargin>({
+  cell: (_ctx, async) => {
+    if (!async || async.isLoading) {
+      return (
+        <Text className="text-ui-fg-muted" size="small">
+          {t("variantColumns.loadingCell")}
+        </Text>
+      );
+    }
+    if (async.error) {
+      return (
+        <Text className="text-ui-fg-error" size="small">
+          {t("variantColumns.marginError")}
+        </Text>
+      );
+    }
+    const margin = async.data ?? { state: "no-offer" as const };
+    if (margin.state !== "resolved") {
+      return (
+        <span className="flex w-full justify-end">
+          <Text
+            className={isMarginGap(margin) ? "text-ui-tag-orange-text" : "text-ui-fg-muted"}
+            size={isMarginGap(margin) ? "xsmall" : "small"}
+          >
+            {marginGapLabel(margin)}
+          </Text>
+        </span>
+      );
+    }
+    return (
+      <span className="flex w-full justify-end tabular-nums">
+        <Text className={margin.amount < 0 ? "text-ui-fg-error" : undefined} size="small">
+          {formatMarginLabel(margin.amount, margin.pct, margin.currency, i18next.language)}
+        </Text>
+      </span>
+    );
+  },
+  header: () => t("variantColumns.marginColumnHeader"),
+  id: "allegro.margin",
+  loadData: async (ctx) => classifyVariantMargin(await loadOfferRow(ctx.sku)),
+  priority: 11,
 });
 
 const RegisterAllegroVariantColumnsWidget = () => null;

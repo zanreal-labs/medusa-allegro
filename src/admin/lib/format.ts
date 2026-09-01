@@ -82,3 +82,71 @@ export const PUSH_RESULT_COLOR: Record<
   skipped: "orange",
   success: "green",
 };
+
+/**
+ * A margin as one compact label: `KWOTA (PROCENT)`, e.g. `"42,10 zł (27%)"`.
+ *
+ * The shape the owner asked for verbatim, and one helper rather than two call
+ * sites gluing strings because the amount and the percentage are two readings
+ * of the same fact - they have to round and localise together everywhere they
+ * appear (the Catalog column, the product card, the variant card).
+ *
+ * Deliberately without the anchor price. With margins sitting beside a price
+ * column the anchor is implied, and repeating it is exactly the "za dużo
+ * zbędnych informacji" this admin is being trimmed of.
+ *
+ * `Intl` formats the money so it follows the admin's own locale rather than
+ * this plugin inventing a symbol table, and falls back to `"12.34 PLN"` for a
+ * currency it will not accept. The percentage is a whole number on purpose: a
+ * trailing decimal reads as noise in a dense column.
+ */
+export const formatMarginLabel = (
+  amount: number | undefined,
+  fraction: number | undefined,
+  currency: string | null,
+  /** BCP 47 tag; defaults to the runtime's locale. */
+  locale?: string,
+): string => {
+  if (
+    amount === undefined ||
+    !Number.isFinite(amount) ||
+    fraction === undefined ||
+    !Number.isFinite(fraction)
+  ) {
+    return "-";
+  }
+  return `${formatMoney(amount, currency, locale)} (${formatPercentCompact(fraction, locale)})`;
+};
+
+/** Money in the admin's locale, falling back to `"12.34 XYZ"` for a currency `Intl` rejects. */
+export const formatMoney = (
+  amount: number,
+  currency: string | null,
+  locale?: string,
+): string => {
+  const code = (currency ?? "").trim().toUpperCase();
+  // `Intl` throws a RangeError on anything that is not a well-formed ISO 4217
+  // code, and an offer legitimately can carry no currency, so the throw is a
+  // normal path rather than an exceptional one.
+  if (/^[A-Z]{3}$/.test(code)) {
+    try {
+      return new Intl.NumberFormat(locale, { currency: code, style: "currency" }).format(amount);
+    } catch {
+      // Fall through to the plain rendering below.
+    }
+  }
+  const plain = amount.toFixed(2);
+  return code ? `${plain} ${code}` : plain;
+};
+
+/** A ratio as a whole-number percentage (`0.271` -> `"27%"`), in the admin's locale. */
+export const formatPercentCompact = (fraction: number, locale?: string): string => {
+  try {
+    return new Intl.NumberFormat(locale, {
+      maximumFractionDigits: 0,
+      style: "percent",
+    }).format(fraction);
+  } catch {
+    return `${Math.round(fraction * 100)}%`;
+  }
+};

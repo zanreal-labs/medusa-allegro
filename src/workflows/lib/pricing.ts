@@ -24,15 +24,29 @@ import type { CatalogVariant } from "./catalog";
  * `missing-break-even` / `missing-srp` are what surface it.
  */
 
-/** What the costs plugin exposes, duck-typed. */
-interface ProductCostsService {
+/**
+ * What the costs plugin exposes, duck-typed.
+ *
+ * `computeEconomics` answers two different questions depending on whether a
+ * `sellingPrice` is passed: without one it reports the break-even and the gross
+ * cost (what price sync needs), with one it also reports what that price
+ * actually leaves (`netIncome`, `marginPct`). Both callers are served by the one
+ * declaration so neither can drift into its own private idea of the contract.
+ */
+export interface ProductCostsService {
   getCostsBySkus: (
     skus: string[],
   ) => Promise<{ sku: string; unit_cost_net: number }[]>;
   computeEconomics: (input: {
     netCost?: number;
     commissionRate?: number;
-  }) => Promise<{ breakEvenPrice?: number; grossCost?: number }>;
+    sellingPrice?: number;
+  }) => Promise<{
+    breakEvenPrice?: number;
+    grossCost?: number;
+    marginPct?: number;
+    netIncome?: number;
+  }>;
 }
 
 /**
@@ -185,6 +199,100 @@ export const buildBreakEvenResolver = async (
     });
     return breakEvenPrice;
   };
+};
+
+/**
+ * Net purchase cost per SKU.
+ *
+ * A SOFT read, exactly as the break-even resolver treats the same module: an
+ * absent costs plugin or a failed read yields an empty map and simply no margin,
+ * never a broken caller and never a guessed cost.
+ *
+ * Lives here rather than beside any one caller because three of them now need
+ * it - the promotion preview, the offers route's economics and the catalogue
+ * column behind it - and a second copy is one refactor away from disagreeing
+ * with the break-even it is shown next to.
+ */
+export const loadNetCosts = async (
+  container: MedusaContainer,
+  costsModuleKey: string,
+  skus: readonly string[],
+): Promise<Map<string, number>> => {
+  const bySku = new Map<string, number>();
+  if (skus.length === 0) {
+    return bySku;
+  }
+  try {
+    const costs = resolveCostsService(container, costsModuleKey);
+    if (!costs) {
+      return bySku;
+    }
+    for (const row of await costs.getCostsBySkus([...skus])) {
+      const netCost = parseAmount(row.unit_cost_net);
+      if (netCost !== undefined) {
+        bySku.set(row.sku, netCost);
+      }
+    }
+  } catch {
+    return bySku;
+  }
+  return bySku;
+};
+
+/** What a given selling price leaves, once VAT and commission are taken out. */
+export interface ResolvedMargin {
+  /** `sellingPrice - commission - grossCost`, in money. */
+  marginAmount?: number;
+  /** `marginAmount / sellingPrice` as a fraction (0.42 = 42%). */
+  marginPct?: number;
+  /** The gross purchase cost the margin is measured against. */
+  costGross?: number;
+  /** Allegro's commission for this offer, as a fraction. Echoed back as evidence. */
+  commissionRate?: number;
+  /** That rate applied to the selling price, in money. */
+  commissionAmount?: number;
+}
+
+/**
+ * The margin a given selling price leaves, delegated to the costs plugin.
+ *
+ * Deliberately NOT reimplemented here. The plugin already owns the relationship
+ * between net cost, VAT, commission and break-even; a second formula in this
+ * file would be one refactor away from quietly disagreeing with the floor it is
+ * shown next to. Missing inputs yield an absent margin rather than a zero,
+ * because a margin of "unknown" and a margin of "nothing" are different facts.
+ *
+ * `commissionRate` and `commissionAmount` come back alongside the margin
+ * because the margin was ALREADY commission-inclusive and nobody could tell:
+ * `computeEconomics` subtracts both the gross cost and the commission, but with
+ * neither input on screen the number was unfalsifiable. They are evidence, not
+ * a change of maths.
+ */
+export const resolveMargin = async (
+  costs: ProductCostsService | undefined,
+  netCost: number | undefined,
+  commissionRate: number | undefined,
+  sellingPrice: number,
+): Promise<ResolvedMargin> => {
+  if (!costs || netCost === undefined || commissionRate === undefined) {
+    return {};
+  }
+  try {
+    const { netIncome, marginPct, grossCost } = await costs.computeEconomics({
+      commissionRate,
+      netCost,
+      sellingPrice,
+    });
+    return {
+      commissionAmount: round2(sellingPrice * commissionRate),
+      commissionRate,
+      costGross: grossCost,
+      marginAmount: netIncome,
+      marginPct,
+    };
+  } catch {
+    return {};
+  }
 };
 
 interface QueryGraph {

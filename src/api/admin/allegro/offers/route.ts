@@ -1,6 +1,8 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import { ALLEGRO_MODULE } from "../../../../modules/allegro";
 import type AllegroModuleService from "../../../../modules/allegro/service";
+import { resolveOfferEconomics } from "../../../../workflows/lib/offer-economics";
+import type { EconomicsOfferRow } from "../../../../workflows/lib/offer-economics";
 
 /**
  * GET /admin/allegro/offers
@@ -12,6 +14,12 @@ import type AllegroModuleService from "../../../../modules/allegro/service";
  * - `skus` - an exact set of SKUs (repeatable, `?skus=A&skus=B`), used by the
  *   product-detail widget to fetch just the offers for one product's variants.
  *   Takes precedence over `q`.
+ * - `economics=1` - enrich every returned row with what it earns at its live
+ *   price: purchase cost, Allegro commission and the resulting margin. Opt-in,
+ *   because it costs two extra bulk reads (the category-rate table and the
+ *   costs plugin) that the settings table and the product-detail widget do not
+ *   need. Without the flag the response is byte-identical to what it always
+ *   was.
  * - `q` - a SKU substring.
  * - `limit` / `offset` - pagination, capped so a catalogue-sized response cannot be
  *   requested by accident.
@@ -76,5 +84,26 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
     take: limit,
   });
 
-  res.json({ count, limit, offers, offset });
+  if (!isTruthyFlag(query.economics)) {
+    res.json({ count, limit, offers, offset });
+    return;
+  }
+
+  // Resolved for the whole page in two bulk reads, then attached per row. A
+  // row whose economics cannot be worked out still comes back - with the
+  // fields it could resolve and the rest absent - so a caller can say WHICH
+  // input is missing rather than rendering an undifferentiated blank.
+  const economicsBySku = await resolveOfferEconomics(
+    req.scope,
+    offers as unknown as EconomicsOfferRow[],
+  );
+  res.json({
+    count,
+    limit,
+    offers: (offers as Record<string, unknown>[]).map((offer) => ({
+      ...offer,
+      economics: economicsBySku.get(offer.sku as string) ?? {},
+    })),
+    offset,
+  });
 }

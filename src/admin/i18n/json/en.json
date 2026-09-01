@@ -304,6 +304,23 @@
     "statusError": "error",
     "notListed": "not listed",
     "priceColumnHeader": "Allegro",
-    "statusColumnHeader": "Allegro status"
+    "statusColumnHeader": "Allegro status",
+    "marginColumnHeader": "Allegro margin",
+    "marginError": "error",
+    "marginNoPrice": "no Allegro price",
+    "marginNoCost": "no purchase cost",
+    "marginNoCommission": "no commission rate"
+  },
+  "marginCard": {
+    "heading": "Allegro margin",
+    "loadError": "Failed to load Allegro margins",
+    "noSku": "no sku",
+    "columns": {
+      "variant": "Variant",
+      "sku": "SKU",
+      "price": "Allegro price",
+      "commission": "Commission",
+      "margin": "Allegro margin"
+    }
   }
 }
