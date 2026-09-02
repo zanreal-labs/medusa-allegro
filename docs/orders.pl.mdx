@@ -184,6 +184,73 @@ wstrzymanie każdego kolejnego zamówienia z powodu niedoręczonego powiadomieni
 byłoby dużo gorsze, a ponowienie i tak zastałoby zamówienie już utworzone i
 słusznie by go nie ogłosiło.
 
+## `allegro.order.billing_ready`, czyli moment, w którym da się wystawić fakturę
+
+Zamówienie z Allegro powstaje ze zrzutu formularza zakupowego zrobionego **zanim
+kupujący skończy go wypełniać**, więc bardzo często nie ma adresu do faktury. Dane
+kupującego dochodzą kilka minut później, przy kolejnym przebiegu drenażu. W tym
+czasie płatność się finalizuje, leci `payment.captured`, wtyczka fakturowa
+nasłuchująca tego zdarzenia próbuje zbudować fakturę na zamówieniu bez adresu, nie
+przechodzi własnej bramki kompletności i odkłada zamówienie do ręcznej obsługi. Z
+produkcji:
+
+```text
+12:32:22  zamówienie utworzone (kupujący jeszcze nie zapłacił i nie dokończył formularza)
+12:36:22  płatność zaksięgowana
+12:36:24  wtyczka fakturowa kolejkuje zamówienie po `payment.captured`
+12:36:25  „buyer address is incomplete (missing: street, city, postal_code)"
+12:36:41  drenaż zapisuje prawdziwy adres do faktury - 16 s za późno
+```
+
+Żadna z wtyczek nie była zepsuta. Strona fakturowa nasłuchiwała zdarzenia, które
+niesie *fakt*, na jaki reaguje, zamiast zdarzenia, które niesie *dane*, jakich
+potrzebuje - a takiego zdarzenia nie było, bo adres do faktury i NIP zapisywane są
+przez serwis modułu Order, a nie przez `updateOrderWorkflow` (powód:
+medusajs/medusa#16636), więc lądują bez `order.updated` i w ogóle bez zdarzenia.
+
+Dlatego drenaż to ogłasza: `allegro.order.billing_ready`, ładunek `{ id }`, z
+`EventPriority.CRITICAL` - ten sam kształt, co `order.placed`. Nazwę importuj z
+`@zanreal/medusa-allegro/workflows`, zamiast przepisywać string.
+
+**Emituje się na zboczu, nie na stanie.** Robi to dokładnie jedna z dwóch sytuacji:
+
+- przebieg tworzący, gdy zamówienie powstało *od razu* z użytecznym adresem do
+  faktury - inaczej zamówienie kupującego, który wypełnił formularz, zanim je
+  zobaczyliśmy, nie dostałoby zdarzenia nigdy, bo uzupełnianie adresu i NIP-u nie ma
+  wtedy już czego robić;
+- albo późniejszy przebieg, który faktycznie coś **zmienił** - uzupełnił adres lub
+  dopisał NIP - i zostawił adres do faktury kompletny.
+
+Oba sygnały dotyczą pojedynczego przebiegu, więc tyknięcia drenażu co ~20 s po obu
+stronach zmiany nie ogłaszają niczego. „Kompletny" znaczy: ulica, miasto i kod
+pocztowy - te trzy pola, których wymaga wystawienie faktury - wszystkie niepuste,
+czytane z wartości, jakie zamówienie faktycznie ma.
+
+**To informacja, że dane są. Nie polecenie „wystaw teraz fakturę".** Zdarzenie
+celowo nie jest bramkowane płatnością ani statusem zamówienia; subskrybent sam
+decyduje, czy zamówienie jest opłacone, anulowane albo już zafakturowane. Odczytanie
+go jako polecenia oznaczałoby faktury na anulowanych zamówieniach.
+
+**Nigdy nie jest powodem do zatrzymania kursora zdarzeń,** z tego samego powodu co
+`order.placed`: dane są już zapisane, a ponowienie zastałoby je kompletne i słusznie
+by nic nie wyemitowało. Zgubione ogłoszenie kosztuje ostrzeżenie i spada na ten
+mechanizm ponowień, który konsument i tak ma.
+
+### Adres do faktury wypełniony w połowie to luka, a nie adres
+
+Warto wiedzieć, bo po cichu psuł uzupełnianie adresów. Allegro potrafi zwrócić blok
+faktury, w którym jest tylko imię i kod kraju, a czytnik formularza zwraca adres,
+jeśli **którekolwiek** pole jest ustawione - więc zamówienie powstaje z wierszem
+`billing_address` bez ulicy, bez miasta i bez kodu pocztowego.
+
+Uzupełnianie pytało wcześniej „czy zamówienie ma wiersz adresu do faktury?", na co
+taki wiersz odpowiadał „tak" i to na zawsze. Trzy pola potrzebne fakturze nie były
+więc uzupełniane w żadnym przebiegu - dokładnie na tych zamówieniach, które
+potrzebowały tego najbardziej. Teraz pytanie brzmi „czy adres do faktury jest
+**użyteczny**" i dotyczy wartości pól, a adres częściowy jest uzupełniany tak samo
+jak brakujący: wypełniane są wyłącznie puste pola, więc wartość, którą wiersz już
+niósł (albo którą poprawił człowiek), nigdy nie zostaje nadpisana.
+
 ## Zwrotny zapis realizacji
 
 Subskrybent na zdarzeniach `order.fulfillment_created` i `shipment.created` ustawia

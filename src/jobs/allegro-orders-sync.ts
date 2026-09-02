@@ -6,12 +6,17 @@ import { drainAllegroOrders } from "../workflows/drain-allegro-orders";
 const JOB_NAME = "allegro-orders-sync";
 
 /**
- * The per-minute order event drain.
+ * The order event drain, on a ~20s interval.
  *
- * Per minute because a `BOUGHT` event that has not been applied is an order nobody
- * has been told about - no picking, no packing, no digital delivery. An idle minute
- * costs one journal request and writes nothing, so the cadence is cheap; a busy one
- * costs one journal request plus a bounded number of order refreshes.
+ * The comment here used to say "per minute", which it has not been since the schedule
+ * became interval-based: `DEFAULT_ORDERS_SYNC_INTERVAL_MS` below is 20 s, and Medusa's
+ * cron cannot express that. Worth correcting rather than leaving, because the number is
+ * the one an operator reasons about when an order looks late.
+ *
+ * That cadence because a `BOUGHT` event that has not been applied is an order nobody has
+ * been told about - no picking, no packing, no digital delivery. An idle tick costs one
+ * journal request and writes nothing, so the cadence is cheap; a busy one costs one
+ * journal request plus a bounded number of order refreshes.
  */
 export default async function allegroOrdersSyncJob(container: MedusaContainer): Promise<void> {
   const logger = container.resolve<Logger>(ContainerRegistrationKeys.LOGGER);

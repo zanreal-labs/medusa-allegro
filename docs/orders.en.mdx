@@ -176,6 +176,70 @@ the failure is a warning on the order and the drain moves on - stalling every la
 order behind an undelivered notification would be a much worse outcome, and the
 retry would find the order already created and correctly not announce it anyway.
 
+## `allegro.order.billing_ready`, when the order can finally be invoiced
+
+An Allegro order is created from a checkout-form snapshot taken **before the buyer
+has finished the form**, so it very often has no billing address. The buyer's
+details arrive minutes later, on a later drain pass. Meanwhile the payment
+finalises and `payment.captured` fires, an invoicing plugin subscribed to that
+event builds an invoice against an order with no address, fails its own
+completeness gate and parks the order for a human. Measured on one live order:
+
+```text
+12:32:22  order created (the buyer had not paid, and had not finished the form)
+12:36:22  payment captured
+12:36:24  the invoicing plugin queued the order off `payment.captured`
+12:36:25  "buyer address is incomplete (missing: street, city, postal_code)"
+12:36:41  the drain writes the real billing address - 16 s too late
+```
+
+Nothing was broken in either plugin. The invoicing side subscribed to the event
+that carries the fact it reacts to, rather than the event that carries the **data**
+it needs - and there was no such event, because the billing address and the tax id
+are written through the Order module service rather than `updateOrderWorkflow` (see
+medusajs/medusa#16636), so they land with no `order.updated` and no event at all.
+
+So the drain announces it: `allegro.order.billing_ready`, payload `{ id }`, at
+`EventPriority.CRITICAL`, the same shape `order.placed` carries. Import the name
+from `@zanreal/medusa-allegro/workflows` rather than retyping the string.
+
+**It fires on the edge, not on the state.** Exactly one of two things emits it:
+
+- the creating pass, when the order was created *already* carrying a usable billing
+  address - otherwise an order whose buyer had finished the form before we ever saw
+  it would never get the event, since there is then nothing left for the address or
+  tax-id fill to do; or
+- a later pass that actually **changed** something - it filled in an address or
+  wrote the tax id - *and* left the billing address complete.
+
+Both signals are per-pass, so the ~20s drain ticks on either side of the change
+announce nothing. Completeness means the three fields an invoice builder demands -
+street, city, postal code - all non-blank, read off the values the order holds.
+
+**It says the data is there. It does not say "invoice this now."** The event is
+deliberately not gated on payment or on order status; a subscriber decides for
+itself whether the order is paid, cancelled or already invoiced. Reading it as an
+instruction would fire invoices at cancelled orders.
+
+**It is never a reason to hold the event cursor,** for the same reason
+`order.placed` is not: the data is already written, and a retry would find it
+complete and correctly not emit. A lost announcement costs a warning and falls back
+to whatever retry the consumer already has.
+
+### A half-written billing address is a gap, not an address
+
+Worth knowing because it defeated the repair silently for months. Allegro will hand
+back an invoice block that carries only a name and a country code, and the checkout
+form reader returns an address if **any** field is set - so the order gets created
+with a `billing_address` row that has no street, no city and no postal code.
+
+The repair used to ask "does this order have a billing address row?", which that row
+answered yes to, forever. The three fields an invoice needs were therefore never
+filled in on any pass, on exactly the orders that most needed it. The question is now
+"is this order's billing address **usable**", asked of the field values, and a partial
+address is repaired like a missing one - filling only the blanks, so a value the row
+already carried (or that a human corrected) is never overwritten.
+
 ## Fulfillment write-back
 
 A subscriber on `order.fulfillment_created` and `shipment.created` sets Allegro's
