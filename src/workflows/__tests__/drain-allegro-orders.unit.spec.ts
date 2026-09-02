@@ -115,7 +115,24 @@ var coreFlows: {
    * reservation has to exist BEFORE it. Two independent recorders cannot express that.
    */
   callOrder: string[];
+  /**
+   * The addresses each Medusa order carries, by order id.
+   *
+   * Modelled rather than stubbed, because the whole billing-ready defect IS this table.
+   * `createOrderWorkflow` writes whatever the checkout form had at the time - which for
+   * an unfinished form is a name and a country and no street - and the drain's step 3e
+   * fills the rest in on a later pass through the Order module service. A fake that only
+   * answered "does an address exist" could express neither half.
+   */
+  addressesByOrderId: Record<
+    string,
+    { shipping_address?: Record<string, unknown>; billing_address?: Record<string, unknown> }
+  >;
+  /** `order.metadata`, as created and as the tax-id fill rewrites it. */
+  metadataByOrderId: Record<string, Record<string, unknown>>;
 } = {
+  addressesByOrderId: {},
+  metadataByOrderId: {},
   cancelled: [],
   completed: [],
   created: [],
@@ -230,6 +247,18 @@ jest.mock("@medusajs/medusa/core-flows", () => ({
       coreFlows.sequence += 1;
       coreFlows.created.push(input);
       const id = `order_${coreFlows.sequence}`;
+      // Verbatim, including a billing address that carries only a name and a country.
+      // `createMedusaOrder` passes `view.billingAddress` through with no completeness
+      // gate, and `orUndefined` returns an address when ANY field is truthy.
+      coreFlows.addressesByOrderId[id] = {
+        ...(input.billing_address
+          ? { billing_address: input.billing_address as Record<string, unknown> }
+          : {}),
+        ...(input.shipping_address
+          ? { shipping_address: input.shipping_address as Record<string, unknown> }
+          : {}),
+      };
+      coreFlows.metadataByOrderId[id] = (input.metadata as Record<string, unknown>) ?? {};
       // The status the order is CREATED with, verbatim. For a form first seen CANCELLED that
       // is already "canceled", which is exactly why cancelling it afterwards can never work.
       coreFlows.statusById[id] =
@@ -565,6 +594,49 @@ const setup = (input: {
           listInfaktInvoices: () => Promise.resolve(input.issuedInvoices ?? []),
         };
       }
+      if (key === "order") {
+        // The Order MODULE SERVICE, which is how steps 3e and 3f write - deliberately
+        // bypassing `updateOrderWorkflow`, whose validator cannot add an address to an
+        // order that has none (medusajs/medusa#16636). Left unregistered, every address
+        // and tax-id fill in this file silently took its never-fatal path and proved
+        // nothing.
+        return {
+          listOrders: (
+            filters: { id?: string },
+            config: { select?: string[] } = {},
+          ) => {
+            const id = filters.id as string;
+            if (!coreFlows.addressesByOrderId[id] && !coreFlows.metadataByOrderId[id]) {
+              return Promise.resolve([]);
+            }
+            return Promise.resolve([
+              {
+                id,
+                ...(config.select?.includes("metadata")
+                  ? { metadata: coreFlows.metadataByOrderId[id] ?? {} }
+                  : {}),
+                ...coreFlows.addressesByOrderId[id],
+              },
+            ]);
+          },
+          updateOrders: (rows: (Record<string, unknown> & { id: string })[]) => {
+            for (const row of rows) {
+              const held = coreFlows.addressesByOrderId[row.id] ?? {};
+              if (row.billing_address) {
+                held.billing_address = row.billing_address as Record<string, unknown>;
+              }
+              if (row.shipping_address) {
+                held.shipping_address = row.shipping_address as Record<string, unknown>;
+              }
+              coreFlows.addressesByOrderId[row.id] = held;
+              if (row.metadata) {
+                coreFlows.metadataByOrderId[row.id] = row.metadata as Record<string, unknown>;
+              }
+            }
+            return Promise.resolve(rows);
+          },
+        };
+      }
       if (key === "payment") {
         // Resolvable unless the test says otherwise. A store whose payment module is
         // absent is a real configuration, so it gets its own switch rather than being
@@ -669,6 +741,12 @@ const setup = (input: {
                       ...(input.medusaOrderItems?.[byId]
                         ? { items: input.medusaOrderItems[byId] }
                         : {}),
+                      // What the order ACTUALLY holds, which is what decides whether a
+                      // billing address is complete or is a name and a country.
+                      billing_address: null,
+                      shipping_address: null,
+                      metadata: coreFlows.metadataByOrderId[byId] ?? null,
+                      ...coreFlows.addressesByOrderId[byId],
                       ...seeded,
                     },
                   ],
@@ -730,6 +808,8 @@ beforeEach(() => {
   coreFlows.reservations.length = 0;
   coreFlows.reserveError = undefined;
   coreFlows.callOrder.length = 0;
+  coreFlows.addressesByOrderId = {};
+  coreFlows.metadataByOrderId = {};
 });
 
 describe("drainAllegroOrders: bootstrap", () => {
@@ -976,6 +1056,10 @@ describe("drainAllegroOrders: never duplicating a Medusa order", () => {
   });
 });
 
+/** Just the messages of one event name, so one announcement can be counted alone. */
+const named = (emitted: unknown[], name: string): unknown[] =>
+  emitted.filter((message) => (message as { name?: string }).name === name);
+
 describe("drainAllegroOrders: announcing the order", () => {
   const withCursor = (over: Parameters<typeof setup>[0] = {}) =>
     setup({
@@ -996,7 +1080,7 @@ describe("drainAllegroOrders: announcing the order", () => {
     await drainAllegroOrders(context.container as never);
 
     // Core's name, core's payload, core's priority - nothing this plugin invented.
-    expect(context.emitted).toEqual([
+    expect(named(context.emitted, "order.placed")).toEqual([
       { data: { id: "order_1" }, name: "order.placed", options: { priority: 10 } },
     ]);
   });
@@ -1015,7 +1099,7 @@ describe("drainAllegroOrders: announcing the order", () => {
     await drainAllegroOrders(context.container as never);
 
     expect(coreFlows.created).toHaveLength(1);
-    expect(context.emitted).toHaveLength(1);
+    expect(named(context.emitted, "order.placed")).toHaveLength(1);
   });
 
   it("announces an order whose status action failed, exactly once", async () => {
@@ -1034,7 +1118,7 @@ describe("drainAllegroOrders: announcing the order", () => {
     await drainAllegroOrders(context.container as never);
 
     expect(coreFlows.created).toHaveLength(1);
-    expect(context.emitted).toHaveLength(1);
+    expect(named(context.emitted, "order.placed")).toHaveLength(1);
   });
 
   it("creates the order anyway when the event bus is unavailable", async () => {
@@ -1054,6 +1138,191 @@ describe("drainAllegroOrders: announcing the order", () => {
     expect(context.table.rows[0]?.synced_at).toBeInstanceOf(Date);
     expect(context.table.rows[0]?.last_error).toBeFalsy();
     expect(context.logs.join("\n")).toContain("could not emit `order.placed`");
+  });
+});
+
+/**
+ * The event that says an Allegro order can finally be invoiced.
+ *
+ * The defect, measured on order `order_01M1H1PA8BHJMKFPBZWA78F5XQ` (display 52): the
+ * order is created from a checkout-form snapshot taken before the buyer finished the
+ * form, so it has no billing address. `payment.captured` fires four minutes later when
+ * the buyer pays, the invoicing plugin builds an invoice against an address-less order,
+ * fails its own completeness gate and parks it - and 16 seconds after that the drain
+ * writes the real billing address, with no event of any kind, because steps 3e and 3f
+ * write through the Order module service rather than `updateOrderWorkflow`.
+ *
+ * What is worth testing is the EDGE: the event has to fire on the one pass that made the
+ * billing data complete, and on none of the ~20s passes on either side of it.
+ */
+describe("drainAllegroOrders: announcing that the billing data is complete", () => {
+  const BILLING_READY = "allegro.order.billing_ready";
+
+  const withCursor = (over: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      states: [{ cursor: "e0", provider: "orders", status: "ok" }],
+      ...over,
+    });
+
+  /** A form the buyer has NOT finished: no delivery address, so no address at all. */
+  const unfinished = (over: Partial<AllegroCheckoutForm> = {}): AllegroCheckoutForm =>
+    form({
+      delivery: { cost: { amount: "12.99", currency: "PLN" }, method: { name: "Kurier" } },
+      id: "f1",
+      ...over,
+    });
+
+  const FINISHED_DELIVERY = {
+    cost: { amount: "12.99", currency: "PLN" },
+    method: { name: "Kurier" },
+  };
+
+  const REAL_ADDRESS = {
+    city: "Zielonka",
+    countryCode: "PL",
+    firstName: "Jan",
+    lastName: "Kowalski",
+    street: "Jagiellońska 4",
+    zipCode: "05-220",
+  };
+
+  it("fires at CREATION when the form was already complete", async () => {
+    // Otherwise an order whose buyer finished the form before we ever saw it would never
+    // get the event at all - steps 3e and 3f both correctly find nothing to do on the
+    // creating pass - and its invoice would wait for somebody's fallback.
+    const context = withCursor({ forms: [form({ id: "f1" })], pages: [[event("e1", "f1")]] });
+
+    await drainAllegroOrders(context.container as never);
+
+    expect(named(context.emitted, BILLING_READY)).toEqual([
+      { data: { id: "order_1" }, name: BILLING_READY, options: { priority: 10 } },
+    ]);
+  });
+
+  it("fires exactly once, on the pass that completes the billing address", async () => {
+    // The whole point. Not on the pass that created the address-less order, once on the
+    // pass that filled it in, and never again on the ~20s passes after it.
+    const pending = unfinished();
+    const context = withCursor({
+      forms: [pending],
+      pages: [[event("e1", "f1")], [event("e2", "f1")], [event("e3", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+    expect(named(context.emitted, BILLING_READY)).toHaveLength(0);
+
+    // The buyer finishes the form; Allegro's copy now carries the address.
+    pending.delivery = { ...FINISHED_DELIVERY, address: REAL_ADDRESS };
+    await drainAllegroOrders(context.container as never);
+
+    expect(named(context.emitted, BILLING_READY)).toEqual([
+      { data: { id: "order_1" }, name: BILLING_READY, options: { priority: 10 } },
+    ]);
+
+    // A third pass changes nothing, so it announces nothing. Without the edge, every
+    // tick for the life of the order would re-announce it.
+    await drainAllegroOrders(context.container as never);
+    expect(named(context.emitted, BILLING_READY)).toHaveLength(1);
+  });
+
+  it("does not fire on a pass that changed nothing", async () => {
+    const pending = unfinished();
+    const context = withCursor({
+      forms: [pending],
+      pages: [[event("e1", "f1")], [event("e2", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.created).toHaveLength(1);
+    expect(named(context.emitted, BILLING_READY)).toHaveLength(0);
+  });
+
+  it("does not fire when the pass changed something but the address is still incomplete", async () => {
+    // A tax id arriving without a street is not an invoiceable order. Announcing here
+    // would hand the invoicing plugin the same address-less order it already parked, and
+    // the second refusal looks exactly like the first.
+    const pending = unfinished();
+    const context = withCursor({
+      forms: [pending],
+      pages: [[event("e1", "f1")], [event("e2", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    // The invoice block arrives with a company tax id and a half-typed address.
+    pending.invoice = {
+      address: {
+        company: { ids: [{ type: "PL_NIP", value: "5252445767" }], name: "ZanReal" },
+        countryCode: "PL",
+      },
+    };
+    await drainAllegroOrders(context.container as never);
+
+    // The tax id DID land - so this pass changed something - and the event still holds.
+    expect(coreFlows.metadataByOrderId.order_1?.nip).toBe("5252445767");
+    expect(named(context.emitted, BILLING_READY)).toHaveLength(0);
+  });
+
+  it("repairs a PARTIAL billing address written at creation, and then announces", async () => {
+    // The trap that defeats the whole fix. `orUndefined` returns an address when ANY
+    // field is truthy and `createMedusaOrder` passes it through ungated, so a form that
+    // had only reached the buyer's name and country creates a billing address row with
+    // no street, city or postal code. Reading only `billing_address.id` then meant
+    // `planOrderAddressRepair` short-circuited with "the order already has both
+    // addresses" on every later pass, and those three fields were NEVER filled in.
+    const pending = unfinished({
+      invoice: { address: { countryCode: "PL", naturalPerson: { firstName: "Jan" } } },
+    });
+    const context = withCursor({
+      forms: [pending],
+      pages: [[event("e1", "f1")], [event("e2", "f1")]],
+    });
+
+    await drainAllegroOrders(context.container as never);
+
+    // Created carrying half an address, and correctly not announced.
+    expect(coreFlows.created[0]?.billing_address).toMatchObject({ first_name: "Jan" });
+    expect(named(context.emitted, BILLING_READY)).toHaveLength(0);
+
+    pending.invoice = {
+      address: {
+        city: "Zielonka",
+        countryCode: "PL",
+        naturalPerson: { firstName: "Jan" },
+        street: "Jagiellońska 4",
+        zipCode: "05-220",
+      },
+    };
+    await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.addressesByOrderId.order_1?.billing_address).toMatchObject({
+      address_1: "Jagiellońska 4",
+      city: "Zielonka",
+      // Gap only: the name the row already carried survives the fill.
+      first_name: "Jan",
+      postal_code: "05-220",
+    });
+    expect(named(context.emitted, BILLING_READY)).toHaveLength(1);
+  });
+
+  it("never fails the pass when the emit itself cannot happen", async () => {
+    // A missed announcement must never hold the Allegro event cursor: that would stall
+    // every LATER order behind a notification the retry could not re-send anyway, since
+    // the next pass finds the billing data already complete and correctly does not emit.
+    const context = withCursor({
+      forms: [form({ id: "f1" })],
+      noEventBus: true,
+      pages: [[event("e1", "f1")]],
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(result.failed).toBe(0);
+    expect(context.table.rows[0]?.synced_at).toBeInstanceOf(Date);
+    expect(context.table.rows[0]?.last_error).toBeFalsy();
+    expect(context.logs.join("\n")).toContain(BILLING_READY);
   });
 });
 

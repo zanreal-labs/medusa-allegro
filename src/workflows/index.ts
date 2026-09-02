@@ -46,6 +46,18 @@ export type {
   ImportOrdersWindowInput,
   ImportOrdersWindowResult,
 } from "./import-allegro-orders-window";
+/**
+ * The billing-data event, exported so a host subscriber can name it rather than
+ * retyping the string.
+ *
+ * `order.placed` needs no export - it is core's own name, and a subscriber already has
+ * it from `OrderWorkflowEvents`. This one is this plugin's, so the constant is the
+ * contract.
+ */
+export {
+  ORDER_BILLING_READY_EVENT,
+  orderBillingReadyMessage,
+} from "./lib/order-billing-ready-event";
 export { pushAllegroFulfillment } from "./push-allegro-fulfillment";
 export type { PushFulfillmentResult } from "./push-allegro-fulfillment";
 export {

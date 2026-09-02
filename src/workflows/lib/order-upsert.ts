@@ -21,15 +21,20 @@ import { parseAmount } from "../../lib/sync/money";
 import type { AmountInput } from "../../lib/sync/money";
 import { planOrderPayment, readPaymentFacts } from "../../lib/sync/order-reconcile";
 import { nameOrderCustomer } from "./order-customer";
-import { planOrderAddressRepair } from "../../lib/sync/order-address";
+import {
+  isUsableAddress,
+  planOrderAddressRepair,
+  readAddressFields,
+} from "../../lib/sync/order-address";
 import { planOrderTaxIdFill } from "../../lib/sync/order-tax-id";
 import { repairOrderAddresses } from "./order-address";
 import { fillOrderTaxId } from "./order-tax-id";
+import { emitOrderBillingReady } from "./order-billing-ready-event";
 import { emitOrderPlaced } from "./order-placed-event";
 import { readOrderPaymentState, registerOrderPayment } from "./order-payment";
 import { ensureOrderReservations } from "./order-reservations";
 import { readCheckoutForm } from "./checkout-form";
-import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
+import type { CheckoutFormLine, CheckoutFormView, OrderAddress } from "./checkout-form";
 
 /**
  * Applying one Allegro checkout form to Medusa.
@@ -46,6 +51,8 @@ import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
  *    operation.
  * 4. Stamp `synced_at` LAST.
  * 5. Emit `order.placed`, but only for an order this pass actually created.
+ * 6. Emit `allegro.order.billing_ready`, but only on the pass that MADE the order's
+ *    billing data complete - which is almost never the pass that created it.
  *
  * A crash anywhere before step 4 leaves the row looking unfinished, so the next
  * pass repairs it. Stamping earlier would let a half-applied form read as done -
@@ -59,6 +66,15 @@ import type { CheckoutFormLine, CheckoutFormView } from "./checkout-form";
  * anything, and every `order.placed` consumer in the store was structurally deaf to
  * marketplace sales while looking perfectly healthy. Step 5 emits the event core would
  * have emitted, with core's payload. See `lib/order-placed-event`.
+ *
+ * ## And nothing at all announces the billing data arriving
+ *
+ * The billing address and the tax id are written in steps 3e and 3f through the Order
+ * MODULE SERVICE, deliberately bypassing `updateOrderWorkflow` - so they emit no event
+ * either, not even `order.updated`. An invoicing plugin subscribed to `payment.captured`
+ * therefore reaches an Allegro order minutes before its billing address does, fails its
+ * completeness gate and parks the order. Step 6 announces the moment the data actually
+ * lands. See `lib/order-billing-ready-event`.
  *
  * ## Unmatched lines do not lose the sale
  *
@@ -258,6 +274,15 @@ export interface ApplyFormResult {
    * `emitOrderPlaced`.
    */
   orderPlacedEmitted?: boolean;
+  /**
+   * True when this pass emitted `allegro.order.billing_ready` for the order.
+   *
+   * Reported separately from `addressRepaired` because they are different facts: a
+   * repair that filled a shipping address changed something without making the order
+   * invoiceable, and a tax-id fill on an already-addressed order made it invoiceable
+   * without repairing an address. See `emitOrderBillingReady`.
+   */
+  billingReadyEmitted?: boolean;
 }
 
 /**
@@ -585,6 +610,29 @@ const toMinorUnits = (value: number): number => Math.round(value * 100);
  * as good as a post-action one for the money comparison, and the alternative was two round
  * trips per form.
  */
+const ADDRESS_FIELD_SELECTION = [
+  "shipping_address.id",
+  "shipping_address.first_name",
+  "shipping_address.last_name",
+  "shipping_address.company",
+  "shipping_address.address_1",
+  "shipping_address.address_2",
+  "shipping_address.city",
+  "shipping_address.postal_code",
+  "shipping_address.country_code",
+  "shipping_address.phone",
+  "billing_address.id",
+  "billing_address.first_name",
+  "billing_address.last_name",
+  "billing_address.company",
+  "billing_address.address_1",
+  "billing_address.address_2",
+  "billing_address.city",
+  "billing_address.postal_code",
+  "billing_address.country_code",
+  "billing_address.phone",
+] as const;
+
 interface MedusaOrderSnapshot {
   status?: string;
   total?: number;
@@ -599,18 +647,24 @@ interface MedusaOrderSnapshot {
    */
   customer?: CustomerNameRow;
   /**
-   * Whether the order already has each address, for the address fill.
+   * The order's addresses as they stand, for the address fill.
    *
    * Carried on this read for the same reason the customer columns are: the fill has
-   * to know which addresses are already set before it can decide to write either,
-   * and a second `query.graph` per form to learn two booleans would not be free.
+   * to know what the order already holds before it can decide to write anything, and
+   * a second `query.graph` per form would not be free.
    *
-   * Only their PRESENCE is read, never their contents. The decision is "is this
-   * absent", never "does this differ" - an address already on the order is left
-   * alone even when Allegro's copy differs, because a human may have corrected it.
+   * The FIELDS, not two booleans about whether a row exists. Reading only the
+   * presence of a row was a latch: an order created from an unfinished checkout form
+   * carries a billing address with a name and a country and no street, city or postal
+   * code, and "it has a billing address" then suppressed the repair forever on exactly
+   * the orders that needed it. See `planOrderAddressRepair`.
+   *
+   * Their contents are read to answer "is this complete" and "which fields are blank",
+   * never "does this differ from Allegro's copy". A field that already has a value is
+   * left alone even when Allegro disagrees, because a human may have corrected it.
    */
-  hasShippingAddress: boolean;
-  hasBillingAddress: boolean;
+  shippingAddress?: OrderAddress;
+  billingAddress?: OrderAddress;
   /**
    * The order's metadata, for the tax-id fill.
    *
@@ -641,8 +695,10 @@ const readMedusaOrder = async (
         "customer.last_name",
         "customer.company_name",
         "metadata",
-        "shipping_address.id",
-        "billing_address.id",
+        // Every field an address fill can write, on both sides. Asking for the ids
+        // alone was what made a partial address indistinguishable from a complete
+        // one, and the merge that fills only the blanks needs the current values.
+        ...ADDRESS_FIELD_SELECTION,
       ],
       filters: { id: medusaOrderId },
     });
@@ -654,8 +710,12 @@ const readMedusaOrder = async (
     return {
       currency: (order.currency_code as string | null)?.trim().toLowerCase() || undefined,
       ...(customer?.id ? { customer } : {}),
-      hasBillingAddress: Boolean((order.billing_address as { id?: string } | null)?.id),
-      hasShippingAddress: Boolean((order.shipping_address as { id?: string } | null)?.id),
+      billingAddress: readAddressFields(
+        order.billing_address as Record<string, unknown> | null | undefined,
+      ),
+      shippingAddress: readAddressFields(
+        order.shipping_address as Record<string, unknown> | null | undefined,
+      ),
       metadata: (order.metadata as Record<string, unknown> | null) ?? null,
       status: (order.status as string | null) ?? undefined,
       // NOT cast to a scalar: `order.total` is a Medusa `BigNumber` instance, and the
@@ -960,20 +1020,25 @@ export const applyCheckoutForm = async (
   // missing address is not a reason to hold the event cursor and stall every later
   // order behind it.
   let addressRepaired = false;
+  // The billing address the order carries once this pass has landed. It starts as
+  // whatever the order already held and moves only if this pass wrote a new one, which
+  // is what step 6 tests for completeness.
+  let billingAddressNow = snapshot?.billingAddress;
   if (medusaOrderId && snapshot) {
-    const outcome = await repairOrderAddresses(
-      container,
-      logger,
-      medusaOrderId,
-      planOrderAddressRepair(
-        { billingAddress: view.billingAddress, shippingAddress: view.shippingAddress },
-        {
-          hasBillingAddress: snapshot.hasBillingAddress,
-          hasShippingAddress: snapshot.hasShippingAddress,
-        },
-      ),
+    const plan = planOrderAddressRepair(
+      { billingAddress: view.billingAddress, shippingAddress: view.shippingAddress },
+      { billingAddress: snapshot.billingAddress, shippingAddress: snapshot.shippingAddress },
     );
+    const outcome = await repairOrderAddresses(container, logger, medusaOrderId, plan);
     addressRepaired = outcome.repaired;
+    if (outcome.repaired && plan.kind === "write" && plan.patch.billing_address) {
+      // The planned patch rather than a re-read. `repairOrderAddresses` merges it once
+      // more under the order's freshest values before writing, and that merge can only
+      // KEEP fields that were already non-blank - so an address the planner judged
+      // usable is still usable after it, and a second query per form would learn
+      // nothing this does not already know.
+      billingAddressNow = plan.patch.billing_address;
+    }
   }
 
   // Step 3f: the invoice recipient's tax id, on `order.metadata.nip`.
@@ -990,13 +1055,15 @@ export const applyCheckoutForm = async (
   // Like the two fills above, a failure here deliberately does NOT set `lastError`: an
   // order without this key is still invoiceable - the inFakt plugin also parses a NIP
   // out of `billing_address.company` - so it is not a reason to hold the event cursor.
+  let taxIdFilled = false;
   if (medusaOrderId && snapshot) {
-    await fillOrderTaxId(
+    const outcome = await fillOrderTaxId(
       container,
       logger,
       medusaOrderId,
       planOrderTaxIdFill(view.billingTaxId, snapshot.metadata),
     );
+    taxIdFilled = outcome.filled;
   }
 
   // Step 3b: reconcile the money. Read-only, and never a reason to withhold the order.
@@ -1069,6 +1136,43 @@ export const applyCheckoutForm = async (
     orderPlacedEmitted = await emitOrderPlaced(container, logger, medusaOrderId);
   }
 
+  // Step 6: `allegro.order.billing_ready`, the moment the order can actually be invoiced.
+  //
+  // Nothing else announces it. Steps 3e and 3f write through the Order module service to
+  // step around medusajs/medusa#16636, so the billing address and the tax id land with no
+  // `order.updated` and no event of any kind - while `payment.captured` has already fired
+  // minutes earlier and sent the invoicing plugin at an order with no address.
+  //
+  // TWO ARMS, and exactly one of them is ever evaluated, which is the whole
+  // fire-once-per-pass argument:
+  //
+  // - The order was CREATED this pass, already carrying a usable billing address. Without
+  //   this arm, an order whose form was complete from the start would never get the event
+  //   at all: steps 3e and 3f both correctly find nothing to do on the creating pass -
+  //   the address is already there and `createMedusaOrder` already wrote `metadata.nip` -
+  //   so the edge below never fires for it, and its invoice would wait for a fallback.
+  //
+  // - Otherwise, this pass CHANGED something (`repaired` or `filled`) and the billing data
+  //   is now complete. The edge is what keeps the event off all ~20s passes in between:
+  //   both signals are per-pass, set only by a write that actually happened, so a form
+  //   re-applied by a redelivered event, a forced refresh or the reconciliation sweep
+  //   changes nothing and announces nothing.
+  //
+  // Completeness is tested against the FIELD VALUES with `isUsableAddress` - the invoice
+  // builder's own three - never against the presence of an address row, which is the
+  // reading that let a name-and-country-only address pass as complete.
+  //
+  // Never gated on payment or status. This says the DATA is there, not "invoice this now";
+  // a subscriber decides for itself whether an order is paid, cancelled or already
+  // invoiced. See `emitOrderBillingReady`.
+  let billingReadyEmitted = false;
+  const billingReady = created
+    ? isUsableAddress(view.billingAddress)
+    : (addressRepaired || taxIdFilled) && isUsableAddress(billingAddressNow);
+  if (billingReady && medusaOrderId) {
+    billingReadyEmitted = await emitOrderBillingReady(container, logger, medusaOrderId);
+  }
+
   if (lastError) {
     // Thrown so the cursor holds and the form is retried. A form whose order could
     // not be created is exactly the case the quarantine machinery exists for: it
@@ -1083,6 +1187,7 @@ export const applyCheckoutForm = async (
     conflicts,
     created,
     addressRepaired,
+    billingReadyEmitted,
     customerNamed,
     medusaOrderId,
     orderPlacedEmitted,

@@ -1,7 +1,13 @@
 import type { IOrderModuleService, Logger, MedusaContainer } from "@medusajs/framework/types";
 import { Modules } from "@medusajs/framework/utils";
 import { describeError } from "../../lib/allegro/errors";
+import {
+  fillAddressGaps,
+  isUsableAddress,
+  readAddressFields,
+} from "../../lib/sync/order-address";
 import type { OrderAddressPlan } from "../../lib/sync/order-address";
+import type { OrderAddress } from "./checkout-form";
 
 /**
  * Writing an address onto an order that was created without one.
@@ -40,11 +46,22 @@ import type { OrderAddressPlan } from "../../lib/sync/order-address";
  *
  * AND WHAT IT DOES NOT GIVE UP: the validation being stepped around is redundant
  * with a stronger check this code already enforces. The workflow refuses to change
- * a country code; this refuses to touch a present address AT ALL, reading only
- * whether one exists and never comparing contents. So the guard could only ever
- * fire on the case already made impossible here, or on the case it gets wrong.
- * The safety bar is not lowered - see the re-check below, which keeps that true
- * regardless of what any caller passes.
+ * a country code; this refuses to change ANY field that already has a value, and
+ * only ever fills blanks. So the guard could only ever fire on the case already
+ * made impossible here, or on the case it gets wrong. The safety bar is not
+ * lowered - see the re-check below, which keeps that true regardless of what any
+ * caller passes.
+ *
+ * ## The re-check is per FIELD, because a partial address is a gap
+ *
+ * It used to refuse whenever an address row existed at all. That read as strictness
+ * and was in fact the bug: an order created from an unfinished checkout form carries a
+ * billing address row with a name and a country and no street, city or postal code -
+ * see `planOrderAddressRepair` - and refusing on the row's existence meant those three
+ * fields were never filled in, on any pass. So the refusal is now "this side is already
+ * a USABLE address", and what gets written is Allegro's copy merged UNDER whatever the
+ * order currently holds, recomputed against the freshest read rather than against the
+ * caller's plan.
  *
  * ## Never fatal
  *
@@ -60,6 +77,9 @@ import type { OrderAddressPlan } from "../../lib/sync/order-address";
  * line goes to a log the whole team reads and the values are a customer's home
  * address.
  */
+
+/** The two sides of an order's address, so the write loop cannot miss one. */
+const ADDRESS_SIDES = ["shipping_address", "billing_address"] as const;
 
 /** What one attempt to fill the order's addresses did. */
 export interface RepairAddressResult {
@@ -100,22 +120,41 @@ export const repairOrderAddresses = async (
       { id: orderId },
       { relations: ["shipping_address", "billing_address"], select: ["id"] },
     );
-    const wouldOverwrite =
-      (plan.patch.shipping_address && current?.shipping_address) ||
-      (plan.patch.billing_address && current?.billing_address);
-    if (wouldOverwrite) {
-      logger.warn(
-        `[allegro-orders] refusing to fill ${plan.fields.join(", ")} on Medusa order ${orderId}: it already has an address now, so this pass would overwrite rather than fill. Left alone.`,
+
+    const patch: { shipping_address?: OrderAddress; billing_address?: OrderAddress } = {};
+    const filled: string[] = [];
+    const refused: string[] = [];
+    for (const side of ADDRESS_SIDES) {
+      const planned = plan.patch[side];
+      if (!planned) {
+        continue;
+      }
+      const held = readAddressFields(
+        (current as unknown as Record<string, Record<string, unknown> | null>)?.[side],
       );
+      if (isUsableAddress(held)) {
+        refused.push(side);
+        continue;
+      }
+      patch[side] = fillAddressGaps(held, planned);
+      filled.push(side);
+    }
+
+    if (refused.length > 0) {
+      logger.warn(
+        `[allegro-orders] refusing to fill ${refused.join(", ")} on Medusa order ${orderId}: it already carries a complete address there now, so this pass would overwrite rather than fill. Left alone.`,
+      );
+    }
+    if (filled.length === 0) {
       return {
         repaired: false,
-        skipped: "the order gained an address between planning and writing",
+        skipped: "the order gained a complete address between planning and writing",
       };
     }
 
-    await orders.updateOrders([{ id: orderId, ...plan.patch }]);
+    await orders.updateOrders([{ id: orderId, ...patch }]);
     logger.info(
-      `[allegro-orders] filled ${plan.fields.join(", ")} on Medusa order ${orderId} from the Allegro checkout form, which had no address when the order was created. Only absent addresses were written; anything already set was left alone.`,
+      `[allegro-orders] filled ${filled.join(", ")} on Medusa order ${orderId} from the Allegro checkout form, which had no usable address there when the order was created. Only blank fields were written; anything already set was left alone.`,
     );
     return { repaired: true };
   } catch (error) {
