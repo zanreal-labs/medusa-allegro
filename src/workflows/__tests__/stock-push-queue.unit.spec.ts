@@ -251,6 +251,27 @@ const fakeContainer = (id: string) => {
   };
 };
 
+/** A push result carrying only the counters these assertions care about. */
+const pushResult = (over: Record<string, unknown>) => ({
+  alreadyInSync: 0,
+  ambiguous: 0,
+  commands: 0,
+  complete: false,
+  conflicted: 0,
+  eligible: 0,
+  failed: 0,
+  mismatched: 0,
+  pending: 0,
+  skippedInactive: 0,
+  skippedNoInventory: 0,
+  skippedNoListingStock: 0,
+  skippedUnlinked: 0,
+  skippedUnmatched: 0,
+  synced: 0,
+  unresolved: 0,
+  ...over,
+})
+
 describe("enqueueStockPush", () => {
   beforeEach(() => {
     resetStockPushQueue();
@@ -263,27 +284,6 @@ describe("enqueueStockPush", () => {
   afterEach(() => {
     jest.useRealTimers();
     resetStockPushQueue();
-  });
-
-  /** A push result carrying only the counters these assertions care about. */
-  const pushResult = (over: Record<string, unknown>) => ({
-    alreadyInSync: 0,
-    ambiguous: 0,
-    commands: 0,
-    complete: false,
-    conflicted: 0,
-    eligible: 0,
-    failed: 0,
-    mismatched: 0,
-    pending: 0,
-    skippedInactive: 0,
-    skippedNoInventory: 0,
-    skippedNoListingStock: 0,
-    skippedUnlinked: 0,
-    skippedUnmatched: 0,
-    synced: 0,
-    unresolved: 0,
-    ...over,
   });
 
   it("raises NO alert when the run only had findings", async () => {
@@ -355,6 +355,113 @@ describe("enqueueStockPush", () => {
     expect(targetedPush.mock.calls[0]?.[0]).toBe(second);
     // Both events' SKUs, coalesced into the one push.
     expect(targetedPush.mock.calls[0]?.[1]).toEqual(["SKU-1", "SKU-2"]);
+  });
+});
+
+/**
+ * Idempotency: a re-delivered event and a restarted worker.
+ *
+ * Both are ordinary in this stack rather than hypothetical. The event bus may deliver
+ * `marken.stock.changed` more than once, the supplier poll runs every minute and can
+ * name the same SKU on consecutive ticks, and every deploy restarts the worker that
+ * holds the buffer. None of the three may produce a second WRITE.
+ *
+ * The property that makes that true is not a dedupe table, and deliberately so. The
+ * event is a HINT about what to re-read, never a quantity: `pushTargetedAllegroStock`
+ * reads Medusa's available quantity and Allegro's live offer for itself and plans from
+ * the difference. So a redundant delivery costs a read and plans nothing - `mismatched`
+ * is zero, `buildStockCommandChunks` produces no chunk, and no command is submitted.
+ * The planner half of that is proven in `lib/sync/__tests__/stock-plan.unit.spec.ts`
+ * ("a second push over an already-synced catalogue writes nothing"); what is proven
+ * here is the queue half, and that the redundant push is not reported as a failure.
+ */
+describe("the stock push is idempotent under redelivery and restart", () => {
+  beforeEach(() => {
+    resetStockPushQueue();
+    targetedPush.mockReset();
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    resetStockPushQueue();
+  });
+
+  it("collapses a redelivered event into the batch it duplicates", async () => {
+    const container = fakeContainer("redelivered-in-window");
+    targetedPush.mockResolvedValue({ skipped: "test" } as never);
+
+    // The same announcement, delivered twice inside the debounce window - a retrying
+    // event bus, or the supplier naming the same SKU on two consecutive minutes.
+    enqueueStockPush(container as never, ["SKU-1", "SKU-2"]);
+    enqueueStockPush(container as never, ["SKU-1", "SKU-2"]);
+
+    await jest.advanceTimersByTimeAsync(5000);
+
+    // One push, each SKU once. The buffer is a Set, so the duplicate adds nothing -
+    // and it does not restart the debounce either, or a redelivery storm would starve
+    // the very batch it duplicates (see `StockDirtyBuffer.mark`).
+    expect(targetedPush).toHaveBeenCalledTimes(1);
+    expect(targetedPush.mock.calls[0]?.[1]).toEqual(["SKU-1", "SKU-2"]);
+  });
+
+  it("writes no command when a redelivery arrives after the first push landed", async () => {
+    const container = fakeContainer("redelivered-after-flush");
+
+    // The first push does real work: one offer was behind, and Allegro confirmed it.
+    targetedPush.mockResolvedValueOnce(
+      pushResult({ eligible: 1, mismatched: 1, commands: 1, complete: true, synced: 1 }) as never,
+    );
+    // The second sees the world it just created. This is the mock standing in for the
+    // planner's actual answer, which `stock-plan.unit.spec.ts` proves: an offer already
+    // carrying the desired quantity is `alreadyInSync`, contributes no change, and so
+    // produces no chunk and no command.
+    targetedPush.mockResolvedValueOnce(
+      pushResult({ eligible: 1, alreadyInSync: 1, commands: 0, complete: true }) as never,
+    );
+
+    enqueueStockPush(container as never, ["SKU-1"]);
+    await jest.advanceTimersByTimeAsync(5000);
+    enqueueStockPush(container as never, ["SKU-1"]);
+    await jest.advanceTimersByTimeAsync(5000);
+
+    expect(targetedPush).toHaveBeenCalledTimes(2);
+    const [, second] = targetedPush.mock.results.map((r) => r.value);
+    expect((await second).commands).toBe(0);
+
+    // And the no-op is not reported as trouble. A redundant push is the SYSTEM WORKING
+    // - it is what makes redelivery safe - so alerting on it would page somebody every
+    // time the supplier re-reported a SKU it had already moved.
+    const log = container.logs.join("\n");
+    expect(log).not.toContain("the immediate quantity push for");
+    expect(log).toContain("alreadyInSync=1");
+  });
+
+  it("does not replay a batch that was still buffered when the worker restarted", async () => {
+    const before = fakeContainer("before-restart");
+    enqueueStockPush(before as never, ["SKU-1"]);
+
+    // The worker dies with SKU-1 still in the debounce window. The buffer is per-process
+    // and in memory by design, so it goes with it - `resetStockPushQueue` is exactly
+    // that boundary.
+    //
+    // This assertion found a real defect the first time it ran: the reset only dropped
+    // the module reference, and the discarded queue's armed timer fired anyway and
+    // pushed SKU-1 into the new process's world. `StockPushQueue.cancel` now disarms
+    // it, which is what a dead process does for free and what this test models.
+    resetStockPushQueue();
+    targetedPush.mockResolvedValue({ skipped: "test" } as never);
+
+    const after = fakeContainer("after-restart");
+    enqueueStockPush(after as never, ["SKU-2"]);
+    await jest.advanceTimersByTimeAsync(5000);
+
+    // The new process pushes only what IT was told. SKU-1 is neither pushed twice nor
+    // silently carried across - it is simply left to the */15 reconciliation, which is
+    // the bounded cost the in-memory buffer was chosen for. Anything else would mean a
+    // restart could re-issue a write whose quantity is now stale.
+    expect(targetedPush).toHaveBeenCalledTimes(1);
+    expect(targetedPush.mock.calls[0]?.[1]).toEqual(["SKU-2"]);
   });
 });
 

@@ -106,6 +106,33 @@ export class StockPushQueue {
   }
 
   /**
+   * Disarm this queue: cancel the pending flush and drop what it was holding.
+   *
+   * Exists because discarding the module-level reference is NOT enough to stop a
+   * queue. An armed `setTimeout` keeps its closure - and therefore the queue - alive,
+   * so a discarded instance still fires, still resolves the live container, and still
+   * pushes SKUs the replacement queue knows nothing about. In a test that is
+   * cross-test pollution; anywhere else it is a write nobody asked for.
+   *
+   * Dropping the pending SKUs rather than handing them over is deliberate and is the
+   * same bounded cost the in-memory buffer already accepts: the scheduled reconciliation
+   * reads the whole catalogue and repairs them. Re-issuing them later would mean
+   * pushing a quantity read before whatever caused the reset.
+   *
+   * A flush already in flight is left to finish - it holds the STOCK claim and is
+   * mid-conversation with Allegro, and aborting it there would leave offers written
+   * and unstamped. It re-arms into a buffer this call has emptied, so it stops after
+   * itself.
+   */
+  cancel(): void {
+    if (this.timer !== null) {
+      this.deps.clearTimer(this.timer);
+      this.timer = null;
+    }
+    this.buffer.drain();
+  }
+
+  /**
    * Re-arm the timer for `waitMs`.
    *
    * The existing timer is always cleared first: a later mark can only ever make the
@@ -335,8 +362,16 @@ export const enqueueStockPush = (
   queue.add(skus);
 };
 
-/** Reset the process-wide queue and its container. Tests only. */
+/**
+ * Reset the process-wide queue and its container. Tests only.
+ *
+ * The existing queue is CANCELLED rather than merely dereferenced. See
+ * `StockPushQueue.cancel`: an armed timer outlives the reference that armed it, so
+ * dropping the variable alone left a discarded queue to fire against whatever
+ * container was live at the time.
+ */
 export const resetStockPushQueue = (): void => {
+  queue?.cancel();
   activeContainer = undefined;
   queue = undefined;
 };

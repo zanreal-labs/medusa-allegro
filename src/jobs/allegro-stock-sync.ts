@@ -20,12 +20,35 @@ const JOB_NAME = "allegro-stock-sync";
  * missed event costs at most one cycle of staleness rather than a permanently wrong
  * quantity.
  *
- * There IS an event path now (`subscribers/allegro-stock-dirty` ->
- * `workflows/lib/stock-push-queue`), and it changes nothing about the above. It makes
- * the common case fast - a sale updates its own SKUs within seconds instead of within
- * the cycle - and this run remains the thing that makes the catalogue right. Anything
- * the events missed, dropped on a restart, or could not read is repaired here, so the
- * guarantee this job provides is exactly what it was before the fast path existed.
+ * ## This is the BACKSTOP now, not the mechanism
+ *
+ * Two event paths carry the normal case, and both write through the same debounced
+ * queue and the same targeted push: `subscribers/allegro-stock-dirty` for stock WE
+ * consume (order and reservation lifecycle, which covers an Allegro sale too - see the
+ * subscriber), and `subscribers/allegro-supplier-stock` for stock the SUPPLIER moves
+ * (`marken.stock.changed`, naming only the SKUs whose Medusa inventory actually moved).
+ * Between them, a quantity normally reaches Allegro seconds after it changes, carrying
+ * only the SKUs that changed.
+ *
+ * That is precisely why this run must stay, and naming what it now exists for is worth
+ * a paragraph, because "the sweep is still there" is otherwise indistinguishable from
+ * "the sweep is load-bearing". It repairs, specifically:
+ *
+ * - An event that was never delivered, or a supplier payload this plugin refused as
+ *   malformed across the two plugins' version boundary.
+ * - SKUs still sitting in the in-memory debounce buffer when the worker restarted. A
+ *   deploy drops them by design; nothing persists them, and this is what recovers them.
+ * - A targeted push that found the STOCK claim held - a reconciliation or another push
+ *   was mid-flight - and skipped. The queue does not re-queue a skipped batch, so those
+ *   SKUs wait for this run.
+ * - Offers named past `MAX_SUPPLIER_SKUS`, truncated out of a bulk supplier movement.
+ * - An offer whose individual read failed, or whose command Allegro never confirmed.
+ * - Any drift with no event behind it at all: an offer edited in Allegro's own UI, a
+ *   mapping row repaired by hand, a quantity changed by a migration.
+ *
+ * What it is NOT is the thing that makes stock fresh. If a normal supplier change or a
+ * normal sale only reaches Allegro when this next fires, that is a defect in the event
+ * path, not this loop doing its job.
  */
 export default async function allegroStockSyncJob(container: MedusaContainer): Promise<void> {
   const logger = container.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
