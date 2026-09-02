@@ -400,6 +400,63 @@ describe("isStockCoverageComplete", () => {
   });
 });
 
+/**
+ * The planner half of the idempotency proof.
+ *
+ * A re-delivered `marken.stock.changed`, a supplier poll naming the same SKU on two
+ * consecutive minutes, and a worker that restarted mid-batch all end in the same place:
+ * the same SKUs pushed twice. That must cost a read and nothing else.
+ *
+ * It does, and not because anything remembers the first push. The event is a hint about
+ * what to re-read and never a quantity, so the second plan is computed from the world
+ * the first one left behind: every offer now carries the desired figure, every one lands
+ * in `alreadyInSync`, no change is emitted, and `buildStockCommandChunks` therefore
+ * produces no chunk for `submitCommands` to send. Zero commands is the assertion that
+ * matters - `mismatched: 0` alone would still permit an empty command to be submitted.
+ *
+ * The queue half - that a redelivery inside the debounce window collapses, and that a
+ * restart replays nothing - is in `workflows/__tests__/stock-push-queue.unit.spec.ts`.
+ */
+describe("a second push over an already-synced catalogue writes nothing", () => {
+  it("plans, applies, re-plans, and emits no command the second time", () => {
+    const variants: VariantStock[] = [
+      { quantity: 9, sku: "SKU-1" },
+      { quantity: 0, sku: "SKU-2" },
+    ];
+    // Both offers are behind: one has stock to raise, one sold out and must go to zero.
+    const before = [linked("o1", "SKU-1"), linked("o2", "SKU-2")];
+
+    const first = planStockSync(variants, before, authorize(...before));
+    expect(first.mismatched).toBe(2);
+    expect(buildStockCommandChunks(first.changes)).toHaveLength(2);
+
+    // Allegro now holds what the first run wrote. Applied to the listing rather than
+    // asserted about, so the second plan is computed from a real world state and not
+    // from a hand-written expectation of one.
+    const desiredByOffer = new Map(first.changes.map((change) => [change.offerId, change.desired]));
+    const after = before.map((live) => ({
+      ...live,
+      stock: { available: desiredByOffer.get(live.id) ?? live.stock?.available },
+    }));
+
+    const second = planStockSync(variants, after, authorize(...after));
+    expect(second).toMatchObject({ alreadyInSync: 2, eligible: 2, mismatched: 0 });
+    expect(second.changes).toEqual([]);
+    // The one that actually bounds the blast radius: no chunk means no command, so a
+    // redundant push spends reads and zero writes against Allegro's budget.
+    expect(buildStockCommandChunks(second.changes)).toEqual([]);
+  });
+
+  it("still writes a zero it has not yet written, so idempotency is not staleness", () => {
+    // The mirror of the case above, and the reason it is stated: "the second push does
+    // nothing" must hold because the quantities AGREE, never because a second push is
+    // suppressed. An offer still carrying the old figure is pushed again.
+    const plan = planOne({ quantity: 0, sku: "SKU-1" }, linked("o1", "SKU-1", { stock: { available: 5 } }));
+    expect(plan.changes).toEqual([{ desired: 0, offerId: "o1" }]);
+    expect(buildStockCommandChunks(plan.changes)).toHaveLength(1);
+  });
+});
+
 describe("buildStockCommandChunks", () => {
   it("groups by target quantity", () => {
     // Forced by the API: one command sets ONE fixed value across every offer it
