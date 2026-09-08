@@ -12,8 +12,9 @@ is judged on what it does to offers and orders, not on which files moved.
 
 ## [Unreleased]
 
-Everything below is on `main` and has not been published. Install it as a pinned git
-dependency if you need it before the next release.
+Nothing yet.
+
+## [1.0.0] - 2026-09-08
 
 ### Added
 
@@ -81,5 +82,6 @@ First public release. MIT, published from CI with npm provenance.
   installing the plugin cannot by itself change anything on Allegro.
 - **Admin UI in English and Polish.**
 
-[Unreleased]: https://github.com/zanreal-labs/medusa-allegro/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/zanreal-labs/medusa-allegro/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/zanreal-labs/medusa-allegro/releases/tag/v1.0.0
 [0.1.0]: https://github.com/zanreal-labs/medusa-allegro/releases/tag/v0.1.0
