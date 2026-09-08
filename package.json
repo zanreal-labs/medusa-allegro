@@ -8,6 +8,7 @@
     "medusa",
     "medusa-plugin",
     "medusa-plugin-integration",
+    "medusa-plugin-other",
     "medusa-v2",
     "plugin",
     "poland"
@@ -27,7 +28,8 @@
     "provenance": true
   },
   "files": [
-    ".medusa/server"
+    ".medusa/server",
+    "CHANGELOG.md"
   ],
   "dependencies": {
     "@zanreal/medusa-admin-kit": "^0.2.0"

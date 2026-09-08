@@ -57,8 +57,20 @@ importing history. See [Runtime toggles](#runtime-toggles) and
 
 ## Install
 
-**This package is not on npm yet.** It installs as a git dependency, pinned to a
-commit:
+`@zanreal/medusa-allegro` is on npm:
+
+```bash
+npm install @zanreal/medusa-allegro
+```
+
+That resolves to a prebuilt tarball - the published package already contains the
+`.medusa/server` output its `exports` point at, so nothing needs to compile on
+install. It pulls `@zanreal/medusa-admin-kit` from the registry too, for the
+Catalog columns it contributes.
+
+`main` keeps moving after a release ships (see [Releasing](#releasing)), so if you
+need a fix or feature that has landed on `main` but not yet been released, install
+it as a git dependency instead, pinned to a commit:
 
 ```jsonc
 // package.json
@@ -69,13 +81,13 @@ commit:
 }
 ```
 
-Pin the commit you tested against. There is no published tag yet, so `#main` would
-move under you on the next push.
+Pin the commit you tested against. `#main` would move under you on the next push.
 
-The package compiles itself on install - `prepare` runs `medusa plugin:build`,
-which turns the checked-out source into the `.medusa/server` output its `exports`
-point at. pnpm 10 and newer refuse to run that script for a dependency they do not
-already trust, so a fresh install needs it allowed once in your own project:
+Installed that way, the package compiles itself on install - `prepare` runs `medusa
+plugin:build`, which turns the checked-out source into the `.medusa/server` output
+its `exports` point at. pnpm 10 and newer refuse to run that script for a
+dependency they do not already trust, so a fresh install needs it allowed once in
+your own project:
 
 ```yaml
 # pnpm-workspace.yaml
@@ -1657,21 +1669,22 @@ npm carrying no provenance, and a published version cannot be replaced
 afterwards, only deprecated. `publishConfig.provenance` in `package.json` makes
 that local publish fail rather than quietly succeed without it.
 
-Nothing has been published yet. `@zanreal/medusa-allegro` is not on the
-registry, so the pinned git dependency in [Install](#install) is still the only
-way to consume it; the first GitHub Release is what changes that.
+`@zanreal/medusa-allegro` is on the registry. `main` runs ahead of what npm
+resolves to, so the pinned git dependency in [Install](#install) is the way to
+consume work that has not been released yet, and every entry under
+[Unreleased](./CHANGELOG.md) is exactly that work.
 
-This package depends on `@zanreal/medusa-admin-kit` through a `github:` spec,
-and a published tarball carries that dependency exactly as written: anyone
-installing from npm would still need git and access to GitHub to resolve it.
-Publishing `@zanreal/medusa-admin-kit` first and switching this dependency to a
-registry range is what removes that, and it is a decision for the release owner,
-not for this workflow.
+This package depends on `@zanreal/medusa-admin-kit` as a registry range
+(`^0.2.0`), so a published tarball resolves entirely from npm. It used to carry a
+`github:` spec, which meant anyone installing from npm still needed git and access
+to GitHub; publishing admin-kit is what removed that.
 
 To cut a release:
 
-1. Bump `version` in `package.json` on `main`.
-2. Publish a GitHub Release whose tag is `v<version>`, exactly.
+1. Move the `## [Unreleased]` entries in [CHANGELOG.md](./CHANGELOG.md) under a
+   heading for the new version, dated.
+2. Bump `version` in `package.json` on `main`.
+3. Publish a GitHub Release whose tag is `v<version>`, exactly.
 
 The workflow refuses to publish when the tag disagrees with `package.json`, or
 when that version is already on the registry. A release marked as a prerelease
