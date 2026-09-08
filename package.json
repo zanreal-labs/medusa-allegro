@@ -1,6 +1,6 @@
 {
   "name": "@zanreal/medusa-allegro",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Medusa v2 plugin integrating Allegro, the Polish marketplace: OAuth connection, encrypted token storage, offer/SKU mapping and price-automation audit models.",
   "keywords": [
     "allegro",
@@ -8,6 +8,7 @@
     "medusa",
     "medusa-plugin",
     "medusa-plugin-integration",
+    "medusa-plugin-other",
     "medusa-v2",
     "plugin",
     "poland"
@@ -27,7 +28,8 @@
     "provenance": true
   },
   "files": [
-    ".medusa/server"
+    ".medusa/server",
+    "CHANGELOG.md"
   ],
   "dependencies": {
     "@zanreal/medusa-admin-kit": "^0.2.0"
