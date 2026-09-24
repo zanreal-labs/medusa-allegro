@@ -619,6 +619,36 @@ export interface OfferPriceAutomationState {
   status?: NonNullable<AllegroOffer["publication"]>["status"];
 }
 
+/** A money amount as Allegro serialises it: a decimal string plus an ISO-4217 code. */
+export interface AllegroAmount {
+  amount?: string;
+  currency?: string;
+}
+
+/**
+ * One rule assignment on an offer, as `GET /sale/price-automation/offers/{offerId}/rules`
+ * returns it. `configuration` is the same `AutomaticPricingOfferRuleConfiguration`
+ * the assignment command writes, so the `priceRange` read here is the range this
+ * plugin (or the seller panel) last attached - verified against the production
+ * account on 2026-09-24, to the grosz (medusa-allegro#37).
+ */
+export interface OfferPriceAutomationRuleAssignment {
+  marketplace?: { id?: string };
+  rule?: { id?: string };
+  configuration?: {
+    priceRange?: {
+      type?: string;
+      minPrice?: AllegroAmount;
+      maxPrice?: AllegroAmount;
+    };
+  };
+  updatedAt?: string;
+}
+
+export interface OfferPriceAutomationRules {
+  rules?: OfferPriceAutomationRuleAssignment[];
+}
+
 // ---------- Offer price-automation commands (write) ----------
 
 /**

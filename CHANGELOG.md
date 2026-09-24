@@ -12,7 +12,22 @@ is judged on what it does to offers and orders, not on which files moved.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The price loop now checks the range actually on the offer, not its own record of what it
+  sent.** A floor or ceiling edited in the Allegro seller panel used to be invisible: the loop
+  compared the desired range against the last push in its audit, found them equal, and left the
+  offer alone indefinitely - possibly below break-even. It now reads the attached range from
+  `GET /sale/price-automation/offers/{offerId}/rules`, notices the edit, logs it by offer, and
+  puts the break-even floor back. The plugin was built believing that range was write-only; it is
+  not (#37).
+- An offer whose rule was attached by hand already carrying the right range is no longer
+  re-pushed just because the audit had no record of it.
+- The read costs one request per offer, only for offers already on the right rule, paced at
+  4/second against Allegro's 5/second limit. If it fails, the loop falls back to the audit
+  exactly as before, so an Allegro hiccup degrades a run to the old behaviour rather than
+  re-pushing the whole catalogue. An expired token still aborts the run with the reconnect
+  message.
 
 ## [1.0.0] - 2026-09-08
 
