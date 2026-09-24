@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@zanreal/medusa-admin-kit':
-        specifier: ^0.2.1
-        version: 0.2.1(@medusajs/admin-sdk@2.21.1)(@medusajs/admin-shared@2.21.1)(@medusajs/framework@2.21.1(@medusajs/cli@2.21.1(@types/node@20.19.43))(@types/node@20.19.43)(ioredis@5.11.1)(vite@7.3.6(@types/node@20.19.43)(jiti@2.7.0)(yaml@2.9.1))(zod@4.2.0))(@medusajs/icons@2.21.1(react@18.3.1))(@medusajs/js-sdk@2.21.1)(@medusajs/ui@4.2.5(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3))(react-dom@18.3.1(react@18.3.1))(react-i18next@13.5.0(i18next@23.7.11)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)
+        specifier: ^0.3.0
+        version: 0.3.0(@medusajs/admin-sdk@2.21.1)(@medusajs/admin-shared@2.21.1)(@medusajs/framework@2.21.1(@medusajs/cli@2.21.1(@types/node@20.19.43))(@types/node@20.19.43)(ioredis@5.11.1)(vite@7.3.6(@types/node@20.19.43)(jiti@2.7.0)(yaml@2.9.1))(zod@4.2.0))(@medusajs/icons@2.21.1(react@18.3.1))(@medusajs/js-sdk@2.21.1)(@medusajs/ui@4.2.5(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3))(react-dom@18.3.1(react@18.3.1))(react-i18next@13.5.0(i18next@23.7.11)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)
     devDependencies:
       '@medusajs/admin-sdk':
         specifier: 2.21.1
@@ -3178,16 +3178,16 @@ packages:
     resolution: {integrity: sha512-Nst5JdK47VIl9UcGwtv2Rcgyn5lWtZ0/mhRQ4G8NN2isxpq2TO30iqHzmwoJycjWuyUfg3GFXqP/gFHXeV57IA==}
     engines: {node: '>=16.0.0'}
 
-  '@zanreal/medusa-admin-kit@0.2.1':
-    resolution: {integrity: sha512-HkJ1Mk5KbKvYC4JSwstdASShociimIjUcNJmO5+uO44d91tnkmW8C913QluPOTtzRinXs6fWF/wB2XQ4lgl0TA==}
+  '@zanreal/medusa-admin-kit@0.3.0':
+    resolution: {integrity: sha512-8tEANapYBE6FpvbrcOaW+To12SO//hvcCAEWKs+O/Ps5RP0Yw0R3/Etq19Sppb0FCKTSgMrxmZalYtJXbwDcig==}
     engines: {node: '>=22.13'}
     peerDependencies:
-      '@medusajs/admin-sdk': 2.18.0
-      '@medusajs/admin-shared': 2.18.0
-      '@medusajs/framework': 2.18.0
-      '@medusajs/icons': 2.18.0
-      '@medusajs/js-sdk': 2.18.0
-      '@medusajs/ui': 4.2.0
+      '@medusajs/admin-sdk': 2.21.1
+      '@medusajs/admin-shared': 2.21.1
+      '@medusajs/framework': 2.21.1
+      '@medusajs/icons': 2.21.1
+      '@medusajs/js-sdk': 2.21.1
+      '@medusajs/ui': 4.2.5
       react: ^18.2.0
       react-dom: ^18.2.0
       react-i18next: ^13.5.0
@@ -10205,7 +10205,7 @@ snapshots:
     dependencies:
       tslib: 2.8.1
 
-  '@zanreal/medusa-admin-kit@0.2.1(@medusajs/admin-sdk@2.21.1)(@medusajs/admin-shared@2.21.1)(@medusajs/framework@2.21.1(@medusajs/cli@2.21.1(@types/node@20.19.43))(@types/node@20.19.43)(ioredis@5.11.1)(vite@7.3.6(@types/node@20.19.43)(jiti@2.7.0)(yaml@2.9.1))(zod@4.2.0))(@medusajs/icons@2.21.1(react@18.3.1))(@medusajs/js-sdk@2.21.1)(@medusajs/ui@4.2.5(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3))(react-dom@18.3.1(react@18.3.1))(react-i18next@13.5.0(i18next@23.7.11)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)':
+  '@zanreal/medusa-admin-kit@0.3.0(@medusajs/admin-sdk@2.21.1)(@medusajs/admin-shared@2.21.1)(@medusajs/framework@2.21.1(@medusajs/cli@2.21.1(@types/node@20.19.43))(@types/node@20.19.43)(ioredis@5.11.1)(vite@7.3.6(@types/node@20.19.43)(jiti@2.7.0)(yaml@2.9.1))(zod@4.2.0))(@medusajs/icons@2.21.1(react@18.3.1))(@medusajs/js-sdk@2.21.1)(@medusajs/ui@4.2.5(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3))(react-dom@18.3.1(react@18.3.1))(react-i18next@13.5.0(i18next@23.7.11)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)':
     dependencies:
       '@medusajs/admin-sdk': 2.21.1
       '@medusajs/admin-shared': 2.21.1
