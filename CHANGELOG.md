@@ -14,6 +14,14 @@ is judged on what it does to offers and orders, not on which files moved.
 
 ### Changed
 
+- **Built and tested against Medusa 2.21.1** (was 2.18.0), with the admin toolchain Medusa 2.19
+  requires: Vite 7 and, where used, React Router 7. `react-i18next` and `i18next` deliberately stay
+  on the majors the Medusa dashboard itself ships (13 and 23): admin extensions share the host's
+  i18n instance, and a second major would give them one of their own. Install alongside Medusa
+  2.21.1; Node ^20.19 or ^22.12 is required from Medusa 2.19 on.
+
+### Changed
+
 - **The price loop now checks the range actually on the offer, not its own record of what it
   sent.** A floor or ceiling edited in the Allegro seller panel used to be invisible: the loop
   compared the desired range against the last push in its audit, found them equal, and left the
