@@ -11,6 +11,8 @@ import {
   resolveExpectedRuleIds,
   resolvePriceMode,
   SYNC_SKIP_LABEL,
+  needsAttachedBounds,
+  readAttachedBounds,
 } from "../price-automation";
 import type { AutomationRuleNames, SyncSkipReason } from "../price-automation";
 import { roundAutomationFloor } from "../money";
@@ -425,9 +427,9 @@ describe("decideSyncAction", () => {
     ).toEqual({ act: true, expectedRule: "Store", kind: "switch" });
   });
 
-  it("re-pushes bounds when no successful push is on record", () => {
-    // Allegro does not expose an attached rule's price range, so "the rule matches
-    // and we have never recorded bounds" means the range is unknown, not correct.
+  it("re-pushes bounds when the offer carries no range we can vouch for", () => {
+    // Neither the live read nor the audit fallback produced a range, so "the rule
+    // matches" says nothing about the floor: unknown is not correct.
     expect(
       decideSyncAction({
         attachedRuleId: "r-std",
@@ -445,24 +447,40 @@ describe("decideSyncAction", () => {
         attachedRuleId: "r-std",
         attachedRuleName: "Store",
         desiredBounds,
-        lastPushedBounds: { ceiling: 100, floor: 39 },
+        attachedBounds: { ceiling: 100, floor: 39 },
         promoted: false,
         rules: RULES,
       }),
     ).toEqual({ act: true, expectedRule: "Store", kind: "bounds" });
   });
 
-  it("does nothing when the rule matches and the recorded bounds match", () => {
+  it("does nothing when the rule matches and the attached bounds match", () => {
     expect(
       decideSyncAction({
         attachedRuleId: "r-std",
         attachedRuleName: "Store",
         desiredBounds,
-        lastPushedBounds: { ceiling: 100, floor: 41 },
+        attachedBounds: { ceiling: 100, floor: 41 },
         promoted: false,
         rules: RULES,
       }),
     ).toEqual({ act: false });
+  });
+
+  it("re-pushes when the range was changed outside the plugin", () => {
+    // The case the live read exists for (medusa-allegro#37). Our audit says 41-100
+    // went out; the seller panel has since moved the floor to 30. Planned against
+    // the audit, this offer would be left alone below break-even indefinitely.
+    expect(
+      decideSyncAction({
+        attachedRuleId: "r-std",
+        attachedRuleName: "Store",
+        desiredBounds,
+        attachedBounds: { ceiling: 100, floor: 30 },
+        promoted: false,
+        rules: RULES,
+      }),
+    ).toEqual({ act: true, expectedRule: "Store", kind: "bounds" });
   });
 
   it("prefers a switch over a bounds push when both apply", () => {
@@ -473,11 +491,76 @@ describe("decideSyncAction", () => {
         attachedRuleId: "r-std",
         attachedRuleName: "Store",
         desiredBounds,
-        lastPushedBounds: { ceiling: 100, floor: 39 },
+        attachedBounds: { ceiling: 100, floor: 39 },
         promoted: true,
         rules: RULES,
       }),
     ).toEqual({ act: true, expectedRule: "Store Sale", kind: "switch" });
+  });
+});
+
+describe("needsAttachedBounds", () => {
+  it("is true only when the expected rule is already attached", () => {
+    const base = { promoted: false, rules: RULES };
+    expect(needsAttachedBounds({ ...base, attachedRuleId: "r-std", attachedRuleName: "Store" })).toBe(true);
+    // No rule, or the wrong one: the offer is acted on whatever range it carries,
+    // so spending a rate-limited read on it buys nothing.
+    expect(needsAttachedBounds({ ...base })).toBe(false);
+    expect(needsAttachedBounds({ ...base, attachedRuleId: "r-sale", attachedRuleName: "Store Sale" })).toBe(false);
+    expect(needsAttachedBounds({ ...base, attachedRuleId: "r-gone" })).toBe(false);
+  });
+});
+
+describe("readAttachedBounds", () => {
+  /** Shape verbatim from the production probe recorded on medusa-allegro#37. */
+  const response = {
+    rules: [
+      {
+        configuration: {
+          priceRange: {
+            maxPrice: { amount: "129.15", currency: "PLN" },
+            minPrice: { amount: "94.00", currency: "PLN" },
+            type: "MARKETPLACE_CURRENCY",
+          },
+        },
+        marketplace: { id: "allegro-pl" },
+        rule: { id: "6a0ec3e34e512cb980f2c45d" },
+        updatedAt: "2026-09-04T13:15:06.545Z",
+      },
+    ],
+  };
+
+  it("reads the range attached to the given rule on the given marketplace", () => {
+    expect(readAttachedBounds(response, "allegro-pl", "6a0ec3e34e512cb980f2c45d", "PLN")).toEqual({
+      ceiling: 129.15,
+      floor: 94,
+    });
+  });
+
+  it("returns undefined for another marketplace or another rule", () => {
+    expect(readAttachedBounds(response, "allegro-cz", "6a0ec3e34e512cb980f2c45d", "PLN")).toBeUndefined();
+    // The rule changed between the listing and this read: the range belongs to
+    // a rule the loop is not reasoning about.
+    expect(readAttachedBounds(response, "allegro-pl", "someone-else", "PLN")).toBeUndefined();
+  });
+
+  it("returns undefined for a range in another currency than the offer's", () => {
+    expect(readAttachedBounds(response, "allegro-pl", "6a0ec3e34e512cb980f2c45d", "EUR")).toBeUndefined();
+  });
+
+  it("returns undefined when the assignment carries no range, or a malformed one", () => {
+    const noRange = { rules: [{ ...response.rules[0], configuration: {} }] };
+    expect(readAttachedBounds(noRange, "allegro-pl", "6a0ec3e34e512cb980f2c45d", "PLN")).toBeUndefined();
+    const bad = {
+      rules: [
+        {
+          ...response.rules[0],
+          configuration: { priceRange: { maxPrice: { amount: "abc", currency: "PLN" }, minPrice: { amount: "94.00", currency: "PLN" } } },
+        },
+      ],
+    };
+    expect(readAttachedBounds(bad, "allegro-pl", "6a0ec3e34e512cb980f2c45d", "PLN")).toBeUndefined();
+    expect(readAttachedBounds(undefined, "allegro-pl", "x", "PLN")).toBeUndefined();
   });
 });
 

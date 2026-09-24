@@ -330,13 +330,72 @@ export interface SyncDecisionInput {
   /** The bounds this run wants on the offer. */
   desiredBounds: SyncBounds;
   /**
-   * Bounds recorded on the LAST SUCCESSFUL push for this offer
-   * (`allegro_price_push.bound_floor` / `bound_ceiling`). Undefined when no
-   * successful bounds-carrying push is on record.
+   * The `[floor, ceiling]` actually attached to the offer's rule right now,
+   * read from `GET /sale/price-automation/offers/{offerId}/rules`; when that
+   * read fails, the bounds on the last successful push instead. Undefined when
+   * neither source has a range for this offer.
    */
-  lastPushedBounds?: SyncBounds;
+  attachedBounds?: SyncBounds;
   rules: AutomationRuleNames;
 }
+
+/**
+ * Whether `decideSyncAction` will need the attached bounds to reach a verdict
+ * for this offer - i.e. whether the right rule is already attached. Exposed so
+ * the caller spends a rate-limited per-offer read only where the answer can
+ * change the outcome: an offer with no rule, or the wrong one, is acted on
+ * whatever range it carries.
+ */
+export const needsAttachedBounds = (input: {
+  attachedRuleId?: string;
+  attachedRuleName?: string;
+  promoted: boolean;
+  rules: AutomationRuleNames;
+}): boolean =>
+  Boolean(input.attachedRuleId) &&
+  input.attachedRuleName === expectedRuleForPromoted(input.promoted, input.rules);
+
+/**
+ * The `[floor, ceiling]` attached to `ruleId` on `marketplaceId`, out of a
+ * `GET /sale/price-automation/offers/{offerId}/rules` response.
+ *
+ * Undefined, not a guess, whenever the response cannot vouch for a range:
+ * no assignment for that marketplace, an assignment for a different rule (the
+ * rule changed between the listing and this read), a missing or malformed
+ * amount, or a range in another currency than the offer's. Undefined makes
+ * the caller treat the offer as carrying no range and re-assert the desired
+ * one, which is idempotent - the safe direction for a price floor.
+ */
+export const readAttachedBounds = (
+  response: { rules?: Array<{
+    marketplace?: { id?: string };
+    rule?: { id?: string };
+    configuration?: { priceRange?: {
+      minPrice?: { amount?: string; currency?: string };
+      maxPrice?: { amount?: string; currency?: string };
+    } };
+  }> } | undefined,
+  marketplaceId: string,
+  ruleId: string,
+  currency?: string,
+): SyncBounds | undefined => {
+  const assignment = response?.rules?.find(
+    (entry) => entry.marketplace?.id === marketplaceId && entry.rule?.id === ruleId,
+  );
+  const range = assignment?.configuration?.priceRange;
+  const floor = Number.parseFloat(range?.minPrice?.amount ?? "");
+  const ceiling = Number.parseFloat(range?.maxPrice?.amount ?? "");
+  if (!(Number.isFinite(floor) && Number.isFinite(ceiling))) {
+    return undefined;
+  }
+  if (
+    currency &&
+    (range?.minPrice?.currency !== currency || range?.maxPrice?.currency !== currency)
+  ) {
+    return undefined;
+  }
+  return { ceiling, floor };
+};
 
 export type SyncDecision =
   | { act: false }
@@ -345,11 +404,11 @@ export type SyncDecision =
 /**
  * Whether the loop should issue a command for this offer, and why.
  *
- * Allegro exposes an offer's attached rule id but NOT the price range attached
- * to it: `configuration.priceRange` is writable through the command and readable
- * nowhere. The audit trail is therefore the only bounds memory there is, which
- * is why `lastPushedBounds` comes from the last successful push row rather than
- * from the offer.
+ * `attachedBounds` is the range read off the offer itself. This used to come
+ * from the plugin's own audit trail, on the belief that Allegro's range was
+ * write-only; it is not (medusa-allegro#37), and comparing against the offer
+ * is what makes a range changed in the seller panel visible - an audit-derived
+ * comparison would have called that offer correct forever.
  *
  * The triggers:
  *
@@ -358,13 +417,12 @@ export type SyncDecision =
  *   promotion flip lands here, and so does an attached id that resolves to no
  *   name on the account: re-asserting the expected rule is idempotent, so
  *   treating an unresolvable id as a switch is both safe and self-healing.
- * - `bounds` - the rule already matches, but either no successful
- *   bounds-carrying push is on record (attached outside this plugin, or before
- *   the bounds columns existed) or the desired bounds have drifted from the
- *   recorded ones because the cost or the SRP moved.
+ * - `bounds` - the rule already matches, but the offer carries no range, or a
+ *   range other than the desired one - because the cost or the SRP moved, or
+ *   because somebody edited it in the seller panel.
  *
- * Only an offer on the right rule whose last successful push carries exactly the
- * desired bounds is left alone. The per-run change cap, not this function, is
+ * Only an offer on the right rule already carrying exactly the desired bounds
+ * is left alone. The per-run change cap, not this function, is
  * what bounds how many of these land per tick.
  */
 export const decideSyncAction = (input: SyncDecisionInput): SyncDecision => {
@@ -375,7 +433,7 @@ export const decideSyncAction = (input: SyncDecisionInput): SyncDecision => {
   if (input.attachedRuleName !== expectedRule) {
     return { act: true, expectedRule, kind: "switch" };
   }
-  if (!(input.lastPushedBounds && boundsEqual(input.lastPushedBounds, input.desiredBounds))) {
+  if (!(input.attachedBounds && boundsEqual(input.attachedBounds, input.desiredBounds))) {
     return { act: true, expectedRule, kind: "bounds" };
   }
   return { act: false };

@@ -3,17 +3,18 @@ import { model } from "@medusajs/framework/utils";
 /**
  * Append-only audit trail of price-automation decisions.
  *
- * This table is the ONLY memory of the price range the plugin pushed. Allegro's
- * API does not expose the `[min, max]` range attached to a rule on an offer:
- * you can write `configuration.priceRange` with the rule-assignment command, and
- * you can read back which rule is attached, but the bounds are write-only. So
- * without this table there is no way to answer "what floor is this offer
- * currently pinned to, and who set it" - not from Allegro, not from anywhere.
+ * This table answers "who set this range, when, and from what". What range an
+ * offer carries RIGHT NOW is Allegro's to answer, and it does:
+ * `GET /sale/price-automation/offers/{offerId}/rules` returns the attached
+ * `configuration.priceRange`. The plugin was first built believing that range
+ * was write-only and this table its only memory; that was wrong
+ * (medusa-allegro#37), and the price loop now plans against the live read. This
+ * table stays the provenance, and the fallback bounds when a live read fails.
  *
  * Consequences, worth stating because they are easy to break:
  *
  * - Never update or delete a row. Correcting a mistake means appending the
- *   correction; rewriting history destroys the only bounds record there is.
+ *   correction; an audit trail that can be rewritten is not one.
  * - Rows are written for observations too, not just writes. `result: "observed"`
  *   records a state the plugin saw without touching, which is what makes a
  *   read-only monitoring wave still worth running.
@@ -39,11 +40,11 @@ const AllegroPricePush = model.define("allegro_price_push", {
    *
    * Separate columns from `bound_floor` / `bound_ceiling` rather than reusing
    * them, because the two are different facts and one of them is load-bearing:
-   * `fetchLastSuccessfulBounds` reads the bounds off success rows as the ONLY
-   * memory of the price range attached to a rule. A fixed price written into
-   * those columns would be read back as a rule range that was never attached, and
-   * the offer would then be left alone by a later automation-rule run that should
-   * have re-attached it.
+   * `fetchLastSuccessfulBounds` reads the bounds off success rows as the
+   * fallback memory of the price range attached to a rule. A fixed price written
+   * into those columns would be read back as a rule range that was never
+   * attached, and on a run whose live read failed the offer would be left alone
+   * when it should have been re-attached.
    */
   price_amount: model.text().nullable(),
   price_currency: model.text().nullable(),

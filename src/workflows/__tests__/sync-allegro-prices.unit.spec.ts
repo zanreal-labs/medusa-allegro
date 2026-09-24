@@ -60,12 +60,22 @@ interface CommandScript {
   >;
 }
 
+/**
+ * What `GET /sale/price-automation/offers/{offerId}/rules` returns per offer: a
+ * range on the offer's attached rule, or an error. An offer with no entry makes
+ * the read fail, which sends the loop to its audit fallback - the pre-#37
+ * behaviour every older test in this file was written against.
+ */
+type AttachedRangeScript = Record<string, { floor: string; ceiling: string; currency?: string } | Error>;
+
 const fakeClient = (input: {
   offers?: AllegroOffer[];
   rules?: PriceAutomationRule[];
   rulesError?: Error;
   script?: CommandScript;
+  attachedRanges?: AttachedRangeScript;
 }) => {
+  const rangeReads: string[] = [];
   const commands: {
     offerId: string;
     ruleId: string;
@@ -134,6 +144,34 @@ const fakeClient = (input: {
         (input.offers ?? []).find((offer) => offer.id === offerId) ??
           offerFixture({ id: offerId }),
       ),
+    getOfferPriceAutomationRules: (offerId: string) => {
+      rangeReads.push(offerId);
+      const scripted = input.attachedRanges?.[offerId];
+      if (!scripted) {
+        return Promise.reject(new Error(`no attached range scripted for ${offerId}`));
+      }
+      if (scripted instanceof Error) {
+        return Promise.reject(scripted);
+      }
+      const offer = (input.offers ?? []).find((candidate) => candidate.id === offerId);
+      const currency = scripted.currency ?? "PLN";
+      return Promise.resolve({
+        rules: [
+          {
+            configuration: {
+              priceRange: {
+                maxPrice: { amount: scripted.ceiling, currency },
+                minPrice: { amount: scripted.floor, currency },
+                type: "MARKETPLACE_CURRENCY",
+              },
+            },
+            marketplace: { id: "allegro-pl" },
+            rule: { id: offer?.sellingMode?.priceAutomation?.rule?.id },
+          },
+        ],
+      });
+    },
+    rangeReads,
     getOfferPriceAutomationCommandTasks: () =>
       Promise.resolve({
         tasks: [{ message: "rejected by Allegro", status: "FAIL" as const }],
@@ -252,8 +290,10 @@ const setup = (input: {
   noCosts?: boolean;
   /** Simulates the claim being taken over mid-run: every heartbeat reports it lost. */
   claimLost?: boolean;
+  attachedRanges?: AttachedRangeScript;
 }) => {
   const client = fakeClient({
+    attachedRanges: input.attachedRanges,
     offers: input.live,
     rules: input.rules,
     rulesError: input.rulesError,
@@ -598,8 +638,8 @@ describe("syncAllegroPrices: the write decision", () => {
   });
 
   it("re-pushes bounds when the rule matches but no successful push is on record", async () => {
-    // Allegro does not expose an attached rule's range, so "no bounds recorded"
-    // means the range is unknown, not correct.
+    // No range scripted, so the live read fails and the audit fallback has
+    // nothing either: the range is unknown, not correct.
     const { client } = await runWith({
       live: [
         offerFixture({
@@ -675,6 +715,80 @@ describe("syncAllegroPrices: the write decision", () => {
       ],
     });
     expect(client.commands).toHaveLength(1);
+  });
+
+  describe("the live attached range (medusa-allegro#37)", () => {
+    const onStandardRule = () =>
+      offerFixture({
+        id: "o1",
+        sellingMode: {
+          price: { amount: "199.99", currency: "PLN" },
+          priceAutomation: { rule: { id: "rule-standard" } },
+        },
+      });
+    const recordedMatch = {
+      bound_ceiling: "500.00",
+      bound_floor: "137.00",
+      id: "algpush_1",
+      offer_id: "o1",
+      pushed_at: new Date("2026-06-01T00:00:00.000Z"),
+      result: "success" as const,
+      sku: "SKU-1",
+    };
+
+    it("re-pushes when the offer's range was changed outside the plugin, even though the audit says it matches", async () => {
+      // The whole point of reading the offer. The audit says 137-500 went out and
+      // that is what this run wants, so an audit-driven loop would call the offer
+      // correct forever - while the seller panel has it pinned at 90.
+      const { client, logs } = await runWith({
+        attachedRanges: { o1: { ceiling: "500.00", floor: "90.00" } },
+        live: [onStandardRule()],
+        pushes: [recordedMatch],
+      });
+      expect(client.commands).toEqual([
+        expect.objectContaining({ max: "500.00", min: "137.00", offerId: "o1" }),
+      ]);
+      expect(logs.some((line) => line.includes("changed outside this plugin"))).toBe(true);
+    });
+
+    it("leaves alone an offer already carrying the desired range, with no push on record", async () => {
+      // The bootstrapping gap: attached by hand (or before the bounds columns),
+      // so the audit knows nothing - but the offer is already right. Reading it
+      // spares a pointless write.
+      const { client } = await runWith({
+        attachedRanges: { o1: { ceiling: "500.00", floor: "137.00" } },
+        live: [onStandardRule()],
+      });
+      expect(client.commands).toEqual([]);
+    });
+
+    it("falls back to the recorded bounds when the read fails, instead of re-pushing everything", async () => {
+      const { client, logs } = await runWith({
+        attachedRanges: { o1: new Error("503 from Allegro") },
+        live: [onStandardRule()],
+        pushes: [recordedMatch],
+      });
+      expect(client.commands).toEqual([]);
+      expect(logs.some((line) => line.includes("falling back to the last recorded push"))).toBe(true);
+    });
+
+    it("re-pushes when the read succeeds but the rule carries a range in another currency", async () => {
+      const { client } = await runWith({
+        attachedRanges: { o1: { ceiling: "500.00", currency: "EUR", floor: "137.00" } },
+        live: [onStandardRule()],
+        pushes: [recordedMatch],
+      });
+      expect(client.commands).toHaveLength(1);
+    });
+
+    it("spends no read on an offer whose rule is wrong or missing - it is acted on regardless", async () => {
+      const { client } = await runWith({
+        attachedRanges: { o1: { ceiling: "500.00", floor: "137.00" } },
+        live: [offerFixture({ id: "o1" })],
+      });
+      expect(client.rangeReads).toEqual([]);
+      expect(client.commands).toHaveLength(1);
+    });
   });
 
   it("switches the rule on a promotion flip", async () => {

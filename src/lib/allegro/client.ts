@@ -25,6 +25,7 @@ import type {
   NewCheckoutFormInvoice,
   OfferFeePreviewResponse,
   OfferPriceAutomationCommandReport,
+  OfferPriceAutomationRules,
   OfferPriceAutomationState,
   OfferPriceAutomationTaskCount,
   OfferPriceAutomationTaskReport,
@@ -313,15 +314,36 @@ export class AllegroClient {
   /**
    * The price-automation rule attached to a single offer.
    *
-   * Allegro exposes the attached rule on the offer itself under
-   * `sellingMode.priceAutomation.rule` (there is no dedicated per-offer
-   * automation resource), so this reads `GET /sale/product-offers/{offerId}`
-   * and distils the relevant fields. Resolve `rule.id` against
+   * Reads `GET /sale/product-offers/{offerId}`, which carries the attached rule
+   * under `sellingMode.priceAutomation.rule`, and distils the relevant fields.
+   * That field names the rule but not the price range attached with it; for the
+   * range, see `getOfferPriceAutomationRules`. Resolve `rule.id` against
    * `listPriceAutomationRules()` for the rule name. The monitor normally reads
    * this state in bulk off `listOffers`, which carries the same field; this
    * per-offer helper covers targeted re-checks (e.g. a shadow-preview refresh).
    * Docs: developer.allegro.pl/news/get-sale-offers-dodalismy-informacje-o-regulach-cenowych-oraz-parametry-wyszukiwania-g0a2ZwyZVsB
    */
+  /**
+   * GET /sale/price-automation/offers/{offerId}/rules - every rule assigned to
+   * one offer, per marketplace, WITH the configuration it was assigned with.
+   *
+   * This is the resource that makes an attached `[min, max]` price range
+   * readable. The plugin was originally built believing the range was
+   * write-only; it is not, and this read is what lets the price loop compare
+   * the desired bounds against what is actually on the offer rather than
+   * against its own record of what it last sent (medusa-allegro#37).
+   *
+   * Per-offer and rate limited by Allegro to 5 requests/second, so callers
+   * sweeping a catalogue have to pace themselves - see the price sync's
+   * `createBoundsReader`.
+   */
+  async getOfferPriceAutomationRules(offerId: string): Promise<OfferPriceAutomationRules> {
+    return this.request(
+      "GET",
+      `/sale/price-automation/offers/${encodeURIComponent(offerId)}/rules`,
+    );
+  }
+
   async getOfferPriceAutomation(offerId: string): Promise<OfferPriceAutomationState> {
     const offer = await this.getOffer(offerId);
     return {

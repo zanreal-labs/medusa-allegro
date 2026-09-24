@@ -26,11 +26,14 @@ import { formatAmount, parseAmount } from "../lib/sync/money";
 import { modeNeedsAutomationRules, modeWrites } from "../lib/pricing-mode";
 import type { PricingMode } from "../lib/pricing-mode";
 import {
+  boundsEqual,
   decideFixedPriceAction,
   decideSyncAction,
   emptySkipCounts,
   evaluateSyncEligibility,
+  needsAttachedBounds,
   promotionStateLabel,
+  readAttachedBounds,
   resolveExpectedRuleIds,
   resolvePriceMode,
   SYNC_SKIP_LABEL,
@@ -81,11 +84,11 @@ import { warnOnUnscopedCatalogue } from "./lib/scope-warnings";
  *   one a disarmed writer produces, and it needs no automation rules configured.
  * - **`automation_rule`** keeps every eligible offer on the rule its promotion
  *   state calls for, attaching the rule where it is missing, switching it on a
- *   promotion flip, and re-asserting the bounds whenever they drift from the last
- *   successfully pushed ones. Allegro's engine picks the number inside the range.
- *   Allegro does not expose an attached rule's price range, so
- *   `allegro_price_push` is the only bounds memory there is (see
- *   `fetchLastSuccessfulBounds` and `decideSyncAction`).
+ *   promotion flip, and re-asserting the bounds whenever the range on the offer
+ *   differs from the desired one. Allegro's engine picks the number inside the
+ *   range. The range on the offer is read live, per offer, where the rule
+ *   already matches (see `createBoundsReader`); `allegro_price_push` is the
+ *   fallback when that read fails.
  * - **`fixed_price`** sets each offer's Buy Now price to the price the variant
  *   already carries in Medusa, removing any attached rule first because a rule
  *   would recalculate straight over it. The bounds still gate the write: a Medusa
@@ -249,9 +252,12 @@ const BOUNDS_MAX_PAGES = 50;
  * Bounds memory: the `[floor, ceiling]` recorded on the LAST SUCCESSFUL push per
  * offer, read back from this plugin's own audit.
  *
- * The offer API does not expose an attached rule's price range - it is writable
- * and unreadable - so this audit is the only record of what bounds landed. Two
- * consequences the scan has to honour:
+ * No longer the primary source. This scan was written when the attached range was
+ * believed write-only; it is readable per offer (medusa-allegro#37), and the loop
+ * now compares against that live read - see `createBoundsReader`. What this map is
+ * for now is the FALLBACK when a live read fails, which keeps a transient Allegro
+ * error from re-pushing the whole catalogue, plus the "changed outside this plugin"
+ * log line, which needs to know what we last sent. Two rules the scan still honours:
  *
  * - Rows are read newest-first and only the FIRST success per offer counts. A
  *   latest success that carries no bounds still claims the slot, so it reads as "no
@@ -315,6 +321,93 @@ const fetchLastSuccessfulBounds = async (
     `[allegro-prices] the bounds-memory scan hit its page cap (${BOUNDS_MAX_PAGES} x ${BOUNDS_PAGE_SIZE} rows) without exhausting allegro_price_push. Offers whose last successful push is older than that read as having no recorded bounds and will be re-pushed once. Prune the audit table or add an index to keep this scan bounded.`,
   );
   return bounds;
+};
+
+/** Reads the range attached to one offer's rule. See `createBoundsReader`. */
+type BoundsReader = (
+  offerId: string,
+  ruleId: string,
+  currency: string,
+) => Promise<SyncBounds | undefined>;
+
+/**
+ * Minimum gap between two live bounds reads. Allegro limits
+ * `/sale/price-automation/offers/{offerId}/rules` to 5 requests/second; 250 ms
+ * is 4/s, leaving headroom for anything else the account is doing. At that pace
+ * an hourly run covers ~14k offers on the right rule, and a store that outgrows
+ * it sees the run take longer, not fail.
+ */
+const BOUNDS_READ_INTERVAL_MS = 250;
+
+/**
+ * The attached-range reader the price loop plans against.
+ *
+ * Reads the offer itself - `GET /sale/price-automation/offers/{offerId}/rules` -
+ * because that is the truth: a range edited in the seller panel is visible
+ * there and invisible in this plugin's audit trail, which is why the loop used
+ * to leave such an offer alone forever. When the read FAILS, it falls back to
+ * the bounds on the last successful push (`fetchLastSuccessfulBounds`), which
+ * is exactly what the loop decided on before this reader existed: a transient
+ * Allegro error degrades the run to its old behaviour instead of re-pushing the
+ * whole catalogue. A read that SUCCEEDS but shows no usable range is taken at
+ * its word - the offer carries no range we can vouch for, and re-asserting the
+ * desired one is idempotent.
+ *
+ * Paced for the endpoint's per-second limit. The planning loop is sequential,
+ * so a single "not before" timestamp is enough.
+ */
+const createBoundsReader = (
+  client: AllegroClient,
+  marketplaceId: string,
+  recorded: Map<string, SyncBounds>,
+  logger: Logger,
+): BoundsReader => {
+  let notBefore = 0;
+  let failures = 0;
+  return async (offerId, ruleId, currency) => {
+    const wait = notBefore - Date.now();
+    if (wait > 0) {
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+    notBefore = Date.now() + BOUNDS_READ_INTERVAL_MS;
+
+    let live: SyncBounds | undefined;
+    try {
+      live = readAttachedBounds(
+        await client.getOfferPriceAutomationRules(offerId),
+        marketplaceId,
+        ruleId,
+        currency,
+      );
+    } catch (error) {
+      // A dead token is not a flaky read: every write this run is about to make
+      // would fail the same way, and the run already has one place that turns
+      // that into "reconnect Allegro". Swallowing it here would bury it.
+      if (error instanceof AllegroAuthError) {
+        throw error;
+      }
+      failures += 1;
+      // The first failure carries the reason; after that a running count keeps
+      // an outage from writing one warning per offer.
+      if (failures === 1 || failures % 50 === 0) {
+        logger.warn(
+          `[allegro-prices] could not read the attached price range for offer ${offerId} (${failures} failed read(s) this run); falling back to the last recorded push. ${describeError(error)}`,
+        );
+      }
+      return recorded.get(offerId);
+    }
+
+    const last = recorded.get(offerId);
+    if (live && last && !boundsEqual(live, last)) {
+      // The one case this reader exists to catch: the offer carries a range this
+      // plugin did not put there. Named, because an operator deserves to know
+      // their seller-panel edit is about to be corrected back.
+      logger.info(
+        `[allegro-prices] offer ${offerId} carries ${formatAmount(live.floor)}-${formatAmount(live.ceiling)} ${currency}, not the ${formatAmount(last.floor)}-${formatAmount(last.ceiling)} last pushed; the range was changed outside this plugin.`,
+      );
+    }
+    return live;
+  };
 };
 
 /** Best-effort per-offer fail reason from the command's task report. */
@@ -706,6 +799,11 @@ interface PlanningInputs {
   /** The Medusa price per SKU per currency; the number fixed-price mode pushes. */
   variantPrices: Map<string, Map<string, number>>;
   lastBounds: Map<string, SyncBounds>;
+  /**
+   * The range actually attached to an offer's rule, read live and paced. See
+   * `createBoundsReader`.
+   */
+  readBounds: BoundsReader;
 }
 
 /** The bounds and promotion state one offer resolved to, in any mode. */
@@ -823,11 +921,23 @@ const planOffer = async (
   const effectiveIds = promo?.ids ?? inputs.expectedIds;
 
   const rule = observedRule(offer, inputs);
+  // The live range is one rate-limited request per offer, so it is read only
+  // when it can change the verdict: an offer with no rule, or the wrong one, is
+  // acted on whatever range it carries.
+  const attachedBounds =
+    rule.id && needsAttachedBounds({
+      attachedRuleId: rule.id,
+      attachedRuleName: rule.name,
+      promoted,
+      rules: effectiveRules,
+    })
+      ? await inputs.readBounds(offer.id, rule.id, currency)
+      : undefined;
   const decision = decideSyncAction({
+    attachedBounds,
     attachedRuleId: rule.id,
     attachedRuleName: rule.name,
     desiredBounds: { ceiling, floor },
-    lastPushedBounds: inputs.lastBounds.get(offer.id),
     promoted,
     rules: effectiveRules,
   });
@@ -991,6 +1101,7 @@ const resolvePlanningInputs = async (
       categoryRates: buildCategoryRates(rateRows),
       ...(expectedIds ? { expectedIds } : {}),
       lastBounds,
+      readBounds: createBoundsReader(client, options.marketplaceId, lastBounds, logger),
       ruleNames,
       ...(promoRulesBySku ? { promoRulesBySku } : {}),
       ...(rules ? { rules } : {}),
