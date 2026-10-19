@@ -55,7 +55,7 @@ export interface AllegroMarginCardProps {
 }
 
 export const AllegroMarginCard = ({ productId, variantId }: AllegroMarginCardProps) => {
-  const { i18n, t } = useTranslation();
+  const { i18n, t } = useTranslation("allegro");
   const [rows, setRows] = useState<MarginRow[]>([]);
   const [loading, setLoading] = useState(true);
 
