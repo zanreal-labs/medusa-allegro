@@ -1,3 +1,4 @@
 minimumReleaseAgeExclude:
   - '@zanreal/medusa-admin-kit@0.2.0'
   - '@zanreal/medusa-admin-kit@0.3.1'
+  - '@zanreal/medusa-admin-kit@0.4.0'
