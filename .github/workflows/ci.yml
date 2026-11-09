@@ -20,8 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 20 is the floor declared in package.json engines; 22 is current LTS.
-        node: [20, 22]
+        # 22.22 is the floor declared in package.json engines (Medusa 2.22 dropped Node 20).
+        node: [22]
 
     steps:
       - uses: actions/checkout@v4
