@@ -32,7 +32,7 @@
     "CHANGELOG.md"
   ],
   "dependencies": {
-    "@zanreal/medusa-admin-kit": "^0.3.1"
+    "@zanreal/medusa-admin-kit": "^0.4.0"
   },
   "exports": {
     "./package.json": "./package.json",
@@ -100,15 +100,5 @@
   },
   "engines": {
     "node": ">=22.22.0"
-  },
-  "overrides": {
-    "@zanreal/medusa-admin-kit": {
-      "@medusajs/ui": "4.2.8",
-      "@medusajs/icons": "2.22.1",
-      "@medusajs/js-sdk": "2.22.1",
-      "@medusajs/admin-sdk": "2.22.1",
-      "@medusajs/framework": "2.22.1",
-      "@medusajs/admin-shared": "2.22.1"
-    }
   }
 }
