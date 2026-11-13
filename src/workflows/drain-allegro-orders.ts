@@ -48,10 +48,17 @@ export interface OrdersSyncResult extends OrdersSyncSummary {
   invoiceAttachFailures: number;
   /** Open orders the reconciliation sweep re-read from Allegro this run. */
   reconciled: number;
-  /** Of those, the ones that needed repairing - each is an order event that was lost. */
+  /** Of those, the ones that needed repairing, whether or not an event was lost. */
   reconcileRepaired: number;
-  /** Payments the reconciliation recorded that the event path had missed. */
+  /** Payments the reconciliation recorded before the event path did. */
   reconcilePayments: number;
+  /**
+   * Of `reconcileRepaired`, the ones that only beat a lagging event journal to a fresh
+   * change. Not findings; the rest are each an order event that was lost.
+   */
+  reconcileAheadOfJournal: number;
+  /** Of `reconcilePayments`, the ones also counted in `reconcileAheadOfJournal`. */
+  reconcilePaymentsAheadOfJournal: number;
   /**
    * Customers the sweep gave a name they were missing.
    *
@@ -87,9 +94,11 @@ export const emptyOrdersSyncResult = (): OrdersSyncResult => ({
   fulfillmentsPushed: 0,
   invoiceAttachFailures: 0,
   invoicesAttached: 0,
+  reconcileAheadOfJournal: 0,
   reconciled: 0,
   reconcileCustomersNamed: 0,
   reconcilePayments: 0,
+  reconcilePaymentsAheadOfJournal: 0,
   reconcileRepaired: 0,
   reconcileReservations: 0,
   withLineConflicts: 0,
@@ -128,15 +137,16 @@ const buildOrdersError = (result: OrdersSyncResult): string | null => {
       `${result.withLineConflicts} order(s) have a line whose sygnatura matches no Medusa variant; they were created with custom line items, so those lines carry no inventory or cost linkage`,
     );
   }
-  if (result.reconcileRepaired > 0) {
+  const lostRepairs = result.reconcileRepaired - result.reconcileAheadOfJournal;
+  if (lostRepairs > 0) {
     // A finding, not a failure: the order is now correct. What needs an operator's eye is
     // that it took the safety net to get there, because the event journal is what should
-    // have. A run of these means the drain is losing events.
+    // have. A run of these means the drain is losing events. Repairs that only beat the
+    // lagging journal to a fresh change are left out; their events are still on the way.
+    const lostPayments = result.reconcilePayments - result.reconcilePaymentsAheadOfJournal;
     parts.push(
-      `${result.reconcileRepaired} open order(s) were repaired by the reconciliation sweep rather than by the event journal${
-        result.reconcilePayments > 0
-          ? `, including ${result.reconcilePayments} whose payment had never been recorded`
-          : ""
+      `${lostRepairs} open order(s) were repaired by the reconciliation sweep rather than by the event journal${
+        lostPayments > 0 ? `, including ${lostPayments} whose payment had never been recorded` : ""
       }; each is an order event that was lost or never arrived`,
     );
   }
@@ -279,6 +289,8 @@ export const drainAllegroOrders = async (container: MedusaContainer): Promise<Or
       result.reconcileCustomersNamed = reconciled.customersNamed;
       result.reconcilePayments = reconciled.paymentsRegistered;
       result.reconcileRepaired = reconciled.repaired;
+      result.reconcileAheadOfJournal = reconciled.repairedAheadOfJournal;
+      result.reconcilePaymentsAheadOfJournal = reconciled.paymentsAheadOfJournal;
       result.reconcileReservations = reconciled.reservationsCreated;
       result.fulfillmentPushFailures = reconciled.fulfillmentPushFailures;
       result.fulfillmentsPushed = reconciled.fulfillmentsPushed;
