@@ -3007,6 +3007,51 @@ describe("drainAllegroOrders: the reconciliation sweep", () => {
     ).toBe(true);
   });
 
+  it("reports a payment the buyer finished moments ago as ahead of the journal, not as lost", async () => {
+    // The 2026-11-09 and 2026-11-12 orders: the unpaid sweep runs seconds after the buyer
+    // pays, before Allegro's lagging journal has delivered the event. The payment is still
+    // recorded at once; only the reading of it changes.
+    const context = quiet({
+      forms: [
+        form({
+          id: "f1",
+          payment: {
+            finishedAt: new Date(Date.now() - 20_000).toISOString(),
+            paidAmount: { amount: "412.97", currency: "PLN" },
+            type: "ONLINE",
+          },
+        }),
+      ],
+      medusaOrderTotals: { order_1: { currency_code: "pln", total: 412.97 } },
+      orders: [
+        {
+          checkout_form_id: "f1",
+          derived_status: "new",
+          id: "algorder_1",
+          medusa_order_id: "order_1",
+        },
+      ],
+      paymentCollections: { order_1: [] },
+    });
+
+    const result = await drainAllegroOrders(context.container as never);
+
+    expect(coreFlows.markedPaid).toEqual([
+      { order_id: "order_1", payment_collection_id: "paycol_1" },
+    ]);
+    expect(result.reconcilePayments).toBe(1);
+    expect(result.reconcileRepaired).toBe(1);
+    expect(result.reconcileAheadOfJournal).toBe(1);
+    expect(result.reconcilePaymentsAheadOfJournal).toBe(1);
+    expect(result.error ?? null).toBeNull();
+    expect(context.logs.some((line) => line.includes("lost or never arrived"))).toBe(false);
+    expect(
+      context.logs.some(
+        (line) => line.startsWith("info: ") && line.includes("ahead of the event journal"),
+      ),
+    ).toBe(true);
+  });
+
   it("leaves a fully paid, still-open order alone", async () => {
     const context = quiet({
       forms: [paidForm("f1")],

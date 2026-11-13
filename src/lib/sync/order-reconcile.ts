@@ -304,6 +304,71 @@ export const readPaymentFacts = (form: AllegroCheckoutForm): AllegroPaymentFacts
   })(),
 });
 
+/**
+ * How recently the checkout form must have changed for a sweep repair to read as the
+ * sweep getting there BEFORE the event journal, rather than the journal losing an event.
+ *
+ * Allegro's order event journal lags behind checkout-form state. Both production orders
+ * of 2026-11-09 and 2026-11-12 showed it: the unpaid sweep recorded the payment seconds
+ * after the buyer paid, and the matching event reached the drain between 3 s and about a
+ * minute later. Fifteen minutes is that lag with ample headroom; a repair of anything
+ * older still reads as a lost event.
+ */
+export const JOURNAL_LAG_GRACE_MS = 900_000;
+
+/** What one sweep apply changed, as `isRepairAheadOfJournal` reads it. */
+export interface ReconcileRepair {
+  created?: boolean;
+  paymentRegistered?: boolean;
+  statusChanged?: boolean;
+}
+
+/** The newest `boughtAt` across the form's lines, or `undefined` when none carries one. */
+const newestBoughtAt = (form: AllegroCheckoutForm): string | undefined => {
+  let newest: { at: string; ms: number } | undefined;
+  for (const line of form.lineItems ?? []) {
+    const ms = line.boughtAt ? Date.parse(line.boughtAt) : Number.NaN;
+    if (line.boughtAt && Number.isFinite(ms) && (!newest || ms > newest.ms)) {
+      newest = { at: line.boughtAt, ms };
+    }
+  }
+  return newest?.at;
+};
+
+/**
+ * Whether a sweep repair only beat the event journal to a change Allegro made moments ago.
+ *
+ * Each repaired fact is dated by the most specific timestamp the form carries for it:
+ * `payment.finishedAt` for a recorded payment, the newest line's `boughtAt` for a created
+ * order, `updatedAt` for a status move. EVERY repaired fact must be inside the window; a
+ * missing or unparseable timestamp is not, so the doubt resolves to the WARN that a lost
+ * event deserves rather than to silence.
+ */
+export const isRepairAheadOfJournal = (
+  form: AllegroCheckoutForm,
+  repair: ReconcileRepair,
+  now: number,
+  graceMs: number = JOURNAL_LAG_GRACE_MS,
+): boolean => {
+  const stamps: (string | undefined)[] = [];
+  if (repair.paymentRegistered) {
+    stamps.push(form.payment?.finishedAt);
+  }
+  if (repair.created) {
+    stamps.push(newestBoughtAt(form) ?? form.updatedAt);
+  }
+  if (repair.statusChanged) {
+    stamps.push(form.updatedAt);
+  }
+  return (
+    stamps.length > 0 &&
+    stamps.every((stamp) => {
+      const ms = stamp ? Date.parse(stamp) : Number.NaN;
+      return Number.isFinite(ms) && now - ms < graceMs;
+    })
+  );
+};
+
 /** What the sweep decided to do about an order's payment. */
 export type PaymentPlan =
   | { kind: "skip"; reason: string }

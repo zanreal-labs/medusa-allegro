@@ -48,6 +48,12 @@ export default async function allegroOrdersSyncJob(container: MedusaContainer): 
     }${
       result.reconcileRepaired > 0 ? `, reconcileRepaired: ${result.reconcileRepaired}` : ""
     }${
+      // Of those, the repairs that only beat the lagging event journal; see
+      // `JOURNAL_LAG_GRACE_MS`. Not findings, so they are named apart.
+      result.reconcileAheadOfJournal > 0
+        ? `, aheadOfJournal: ${result.reconcileAheadOfJournal}`
+        : ""
+    }${
       result.reconcilePayments > 0 ? `, paymentsRecorded: ${result.reconcilePayments}` : ""
     }${
       result.reconcileReservations > 0

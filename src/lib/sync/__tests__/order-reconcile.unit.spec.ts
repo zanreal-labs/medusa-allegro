@@ -6,6 +6,8 @@ import {
   DEFAULT_RECONCILE_CADENCE,
   dueReconcileTiers,
   isFullyPaid,
+  isRepairAheadOfJournal,
+  JOURNAL_LAG_GRACE_MS,
   planOrderPayment,
   readPaymentFacts,
   readReconcileMarks,
@@ -280,6 +282,72 @@ describe("planOrderPayment", () => {
     const plan = planOrderPayment({ ...facts, amount: undefined }, unpaid(), "pln");
     expect(plan).toMatchObject({ amount: 206, kind: "register" });
     expect(plan.kind === "register" && plan.shortfall).toBeUndefined();
+  });
+});
+
+describe("isRepairAheadOfJournal", () => {
+  const now = Date.parse("2026-11-09T10:05:26.000Z");
+  const lagging: AllegroCheckoutForm = {
+    id: "form-1",
+    lineItems: [
+      { boughtAt: "2026-11-09T10:03:00.000Z" },
+      { boughtAt: "2026-11-09T10:04:10.000Z" },
+    ],
+    payment: { finishedAt: "2026-11-09T10:05:02.934Z", type: "ONLINE" },
+    updatedAt: "2026-11-09T10:05:03.000Z",
+  };
+
+  it("reads a payment recorded seconds after the buyer paid as the journal lagging", () => {
+    // The 2026-11-09 order: the sweep recorded the payment 23 s after the buyer paid and
+    // the event reached the drain 3 s after that. Nothing was lost.
+    expect(
+      isRepairAheadOfJournal(lagging, { paymentRegistered: true, statusChanged: true }, now),
+    ).toBe(true);
+  });
+
+  it("reads a payment finished outside the window as a lost event", () => {
+    expect(
+      isRepairAheadOfJournal(
+        lagging,
+        { paymentRegistered: true },
+        Date.parse("2026-11-09T10:05:02.934Z") + JOURNAL_LAG_GRACE_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it("dates each fact by its own timestamp, so one stale fact keeps the warning", () => {
+    // A fresh status move does not excuse a payment that finished an hour ago.
+    expect(
+      isRepairAheadOfJournal(
+        { ...lagging, payment: { finishedAt: "2026-11-09T09:00:00.000Z" } },
+        { paymentRegistered: true, statusChanged: true },
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("dates a created order by its newest line", () => {
+    expect(isRepairAheadOfJournal(lagging, { created: true }, now)).toBe(true);
+    expect(
+      isRepairAheadOfJournal(
+        { ...lagging, lineItems: [{ boughtAt: "2026-11-09T09:00:00.000Z" }] },
+        { created: true },
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("treats a missing or unparseable timestamp as a lost event rather than as lag", () => {
+    expect(
+      isRepairAheadOfJournal({ ...lagging, payment: {} }, { paymentRegistered: true }, now),
+    ).toBe(false);
+    expect(
+      isRepairAheadOfJournal({ ...lagging, updatedAt: "not a date" }, { statusChanged: true }, now),
+    ).toBe(false);
+  });
+
+  it("calls nothing ahead of the journal when nothing was repaired", () => {
+    expect(isRepairAheadOfJournal(lagging, {}, now)).toBe(false);
   });
 });
 

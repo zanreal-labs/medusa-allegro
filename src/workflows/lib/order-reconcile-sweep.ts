@@ -6,6 +6,7 @@ import {
   classifyReconcileTier,
   decideSentPush,
   dueReconcileTiers,
+  isRepairAheadOfJournal,
   resolveReconcileCadence,
   selectReconcileBatch,
 } from "../../lib/sync/order-reconcile";
@@ -68,8 +69,19 @@ export interface ReconcileSweepResult {
   checked: number;
   /** Rows whose re-read changed something: a payment, a status, or a first order. */
   repaired: number;
-  /** Payments recorded this sweep. Each one is an event the drain lost. */
+  /** Payments recorded this sweep, including those counted in `paymentsAheadOfJournal`. */
   paymentsRegistered: number;
+  /**
+   * Of `repaired`, the ones made to a checkout form that changed inside
+   * `JOURNAL_LAG_GRACE_MS`.
+   *
+   * Still repairs, and still counted in `repaired`, but not evidence of a lost event:
+   * Allegro's journal lags behind checkout-form state, so a sweep that runs seconds after
+   * the buyer pays gets there first and the event follows. Only the rest are findings.
+   */
+  repairedAheadOfJournal: number;
+  /** Of `paymentsRegistered`, the ones also counted in `repairedAheadOfJournal`. */
+  paymentsAheadOfJournal: number;
   /**
    * Customers given a name they were missing.
    *
@@ -131,8 +143,10 @@ const emptySweep = (marks: ReconcileMarks): ReconcileSweepResult => ({
   fulfillmentPushFailures: 0,
   fulfillmentsPushed: 0,
   marks,
+  paymentsAheadOfJournal: 0,
   paymentsRegistered: 0,
   repaired: 0,
+  repairedAheadOfJournal: 0,
   reservationsCreated: 0,
   tiers: [],
 });
@@ -363,22 +377,36 @@ export const sweepOpenAllegroOrders = async (
       }
       if (applied.created || applied.paymentRegistered || applied.statusChanged) {
         result.repaired += 1;
-        // WARN, and this is the line the whole loop exists to produce. The event drain
-        // should have applied this already; that it had not means an event was lost or
-        // never arrived, and a silent repair would hide a broken journal indefinitely.
-        logger.warn(
-          `[allegro-orders] reconciliation repaired checkout form ${row.checkout_form_id} (${tier} tier, Medusa order ${
-            applied.medusaOrderId ?? "none"
-          }): ${
-            [
-              applied.created ? "created the missing Medusa order" : "",
-              applied.paymentRegistered ? "recorded the buyer's payment" : "",
-              applied.statusChanged ? "moved the status" : "",
-            ]
-              .filter(Boolean)
-              .join(", ")
-          }. The event drain had not applied this, so an order event was lost or never arrived.`,
-        );
+        const facts = [
+          applied.created ? "created the missing Medusa order" : "",
+          applied.paymentRegistered ? "recorded the buyer's payment" : "",
+          applied.statusChanged ? "moved the status" : "",
+        ]
+          .filter(Boolean)
+          .join(", ");
+        if (isRepairAheadOfJournal(form, applied, now)) {
+          // INFO, and not a finding. The form changed moments ago and the journal lags
+          // behind checkout-form state, so the event is still on its way; the drain will
+          // apply it, find nothing left to do, and write nothing.
+          result.repairedAheadOfJournal += 1;
+          if (applied.paymentRegistered) {
+            result.paymentsAheadOfJournal += 1;
+          }
+          logger.info(
+            `[allegro-orders] reconciliation applied checkout form ${row.checkout_form_id} (${tier} tier, Medusa order ${
+              applied.medusaOrderId ?? "none"
+            }) ahead of the event journal, which lags behind checkout-form state: ${facts}.`,
+          );
+        } else {
+          // WARN, and this is the line the whole loop exists to produce. The event drain
+          // should have applied this long ago; that it had not means an event was lost or
+          // never arrived, and a silent repair would hide a broken journal indefinitely.
+          logger.warn(
+            `[allegro-orders] reconciliation repaired checkout form ${row.checkout_form_id} (${tier} tier, Medusa order ${
+              applied.medusaOrderId ?? "none"
+            }): ${facts}. The event drain had not applied this, so an order event was lost or never arrived.`,
+          );
+        }
       }
 
       // The fulfillment write-back's retry path. AFTER the apply, deliberately: the
