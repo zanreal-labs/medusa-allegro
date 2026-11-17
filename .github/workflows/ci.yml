@@ -20,8 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 22.22 is the floor declared in package.json engines (Medusa 2.22 dropped Node 20).
-        node: [22]
+        # CI runs on Node 26; package.json engines keeps the 22.22 floor (Medusa 2.22 dropped Node 20).
+        node: [26]
 
     steps:
       - uses: actions/checkout@v4
@@ -77,7 +77,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 26
           cache: npm
 
       - name: Install

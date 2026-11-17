@@ -45,7 +45,7 @@ jobs:
       # and a publish needs one Node, so this takes the current LTS.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 26
           cache: npm
           # Writes the .npmrc that points at npmjs.org and reads NODE_AUTH_TOKEN.
           # Needed even under trusted publishing: the registry host is what npm
