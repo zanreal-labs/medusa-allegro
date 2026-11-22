@@ -3,9 +3,7 @@
   "extends": [
     "config:recommended",
     ":semanticCommits",
-    ":dependencyDashboard",
-    ":prHourlyLimit2",
-    ":prConcurrentLimit2"
+    ":dependencyDashboard"
   ],
   "timezone": "Europe/Warsaw",
   "schedule": [
@@ -14,7 +12,10 @@
   "labels": [
     "dependencies"
   ],
+  "prConcurrentLimit": 10,
+  "prHourlyLimit": 0,
   "osvVulnerabilityAlerts": true,
+  "platformAutomerge": false,
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": [
@@ -23,23 +24,92 @@
   },
   "packageRules": [
     {
-      "description": "Group all patch and minor updates into one weekly PR",
+      "description": "Non-major devDependencies: one weekly PR, merged by Renovate itself once every CI check on it is green. Renovate checks the result before merging (platformAutomerge is off), so a red or still-running CI never merges.",
+      "matchDepTypes": [
+        "devDependencies"
+      ],
       "matchUpdateTypes": [
         "minor",
         "patch"
       ],
-      "groupName": "all non-major dependencies",
-      "groupSlug": "all-minor-patch"
+      "groupName": "dev dependencies (non-major)",
+      "groupSlug": "dev-non-major",
+      "automerge": true,
+      "automergeType": "pr"
     },
     {
-      "description": "Majors get separate PRs, created only after approval in the Dependency Dashboard",
+      "description": "Non-major runtime and peer dependencies: one weekly PR, merged by hand. A peer range is what a host app installs against, so it is never automerged.",
+      "matchDepTypes": [
+        "dependencies",
+        "peerDependencies",
+        "optionalDependencies"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "dependencies (non-major)",
+      "groupSlug": "deps-non-major"
+    },
+    {
+      "description": "GitHub Actions: one weekly PR for non-major bumps, merged by hand.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "GitHub Actions (non-major)",
+      "groupSlug": "actions-non-major"
+    },
+    {
+      "description": "Medusa ships every @medusajs package in lockstep and the host app pins the same set, so devDependencies and peerDependencies move together in one PR. rangeStrategy bump rewrites the peer pin too, instead of widening it. Never automerged: it changes what host apps must run.",
+      "matchPackageNames": [
+        "@medusajs/**"
+      ],
+      "groupName": "Medusa",
+      "groupSlug": "medusa",
+      "rangeStrategy": "bump",
+      "automerge": false
+    },
+    {
+      "description": "Majors: a separate PR per package (Medusa majors as their own group), never automerged.",
       "matchUpdateTypes": [
         "major"
       ],
-      "dependencyDashboardApproval": true,
+      "automerge": false,
       "addLabels": [
         "major"
       ]
+    },
+    {
+      "description": "Admin extensions render inside the Medusa dashboard's React, i18next and router instances and are bundled by Medusa's Vite, so these majors follow the versions @medusajs/dashboard uses. They are created only on request from the Dependency Dashboard, normally as part of a Medusa upgrade.",
+      "matchPackageNames": [
+        "react",
+        "react-dom",
+        "@types/react",
+        "@types/react-dom",
+        "react-i18next",
+        "i18next",
+        "react-router-dom",
+        "@tanstack/react-table",
+        "vite"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "@types/node tracks the OLDEST Node the package supports (engines), or code could compile against APIs that runtime does not have.",
+      "matchPackageNames": [
+        "@types/node"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true
     }
   ],
   "vulnerabilityAlerts": {

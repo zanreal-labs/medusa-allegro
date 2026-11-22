@@ -1,0 +1,67 @@
+name: Renovate
+
+# Self-hosted Renovate, run by GitHub Actions under the zanek-ai GitHub App.
+#
+# Why not the Renovate GitHub App: we want Renovate to act as our own app, so its
+# commits and PRs are ours, and so the PRs it opens trigger ci.yml. A PR pushed
+# with the workflow's GITHUB_TOKEN would not start any workflow at all, which is
+# why the token here is minted from the app instead.
+#
+# What Renovate does is decided by renovate.json, not here. This file only says
+# when it runs and with which identity.
+#
+# Needs, in the repository or the organization:
+#   - variable ZANEK_AI_CLIENT_ID   the zanek-ai app's Client ID
+#   - secret   ZANEK_AI_PRIVATE_KEY a private key (.pem) of the zanek-ai app
+
+on:
+  schedule:
+    # Mondays 01:17 and 03:17 UTC - inside renovate.json's "before 6am on Monday"
+    # (Europe/Warsaw) window, summer time or not. This is when update PRs open.
+    - cron: "17 1,3 * * 1"
+    # Every day: merges the automerge-eligible PRs whose CI has gone green since,
+    # rebases stale branches, refreshes the Dependency Dashboard and acts on its
+    # checkboxes. Outside the schedule window it does not open new update PRs.
+    - cron: "47 6 * * *"
+  workflow_dispatch:
+    inputs:
+      log-level:
+        description: Renovate log level
+        type: choice
+        options: [info, debug]
+        default: info
+
+# Two Renovate runs on the same repository would race each other on the same
+# branches. Queue instead of cancelling, so a run that is mid-push finishes.
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Mint a zanek-ai token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.ZANEK_AI_CLIENT_ID }}
+          private-key: ${{ secrets.ZANEK_AI_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Renovate
+        uses: renovatebot/github-action@v46.3.14
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+        env:
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          # renovate.json is already on main; never open an onboarding PR, and
+          # do nothing at all on a branch where it has gone missing.
+          RENOVATE_ONBOARDING: "false"
+          RENOVATE_REQUIRE_CONFIG: required
+          LOG_LEVEL: ${{ inputs.log-level || 'info' }}
