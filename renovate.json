@@ -16,6 +16,7 @@
   "prHourlyLimit": 0,
   "osvVulnerabilityAlerts": true,
   "platformAutomerge": false,
+  "minimumReleaseAge": "1 day",
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": [
