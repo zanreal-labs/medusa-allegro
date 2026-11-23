@@ -83,34 +83,6 @@
       "addLabels": [
         "major"
       ]
-    },
-    {
-      "description": "Admin extensions render inside the Medusa dashboard's React, i18next and router instances and are bundled by Medusa's Vite, so these majors follow the versions @medusajs/dashboard uses. They are created only on request from the Dependency Dashboard, normally as part of a Medusa upgrade.",
-      "matchPackageNames": [
-        "react",
-        "react-dom",
-        "@types/react",
-        "@types/react-dom",
-        "react-i18next",
-        "i18next",
-        "react-router-dom",
-        "@tanstack/react-table",
-        "vite"
-      ],
-      "matchUpdateTypes": [
-        "major"
-      ],
-      "dependencyDashboardApproval": true
-    },
-    {
-      "description": "@types/node tracks the OLDEST Node the package supports (engines), or code could compile against APIs that runtime does not have.",
-      "matchPackageNames": [
-        "@types/node"
-      ],
-      "matchUpdateTypes": [
-        "major"
-      ],
-      "dependencyDashboardApproval": true
     }
   ],
   "vulnerabilityAlerts": {
