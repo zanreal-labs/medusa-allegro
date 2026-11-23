@@ -17,6 +17,10 @@
   "osvVulnerabilityAlerts": true,
   "platformAutomerge": false,
   "minimumReleaseAge": "1 day",
+  "statusCheckWhen": {
+    "minimumReleaseAge": "never",
+    "artifactError": "never"
+  },
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": [
