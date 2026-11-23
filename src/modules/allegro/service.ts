@@ -143,6 +143,7 @@ export interface AllegroSettingsRow {
   id: string;
   pricing_mode: string | null;
   price_sync_enabled: boolean;
+  promotion_overlay_enabled: boolean;
   stock_sync_enabled: boolean;
   orders_sync_enabled: boolean;
   fulfillment_writeback_enabled: boolean;
