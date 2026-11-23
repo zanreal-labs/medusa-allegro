@@ -43,7 +43,7 @@ jobs:
       # so it uses the same lockfile and the same client. ci.yml also runs the
       # verify job on Node 20 and 22; 20 is only the floor declared in engines,
       # and a publish needs one Node, so this takes the current LTS.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 26
           cache: npm
