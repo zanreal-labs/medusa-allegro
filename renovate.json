@@ -46,6 +46,35 @@
       "rangeStrategy": "bump"
     },
     {
+      "description": "Hold TypeScript below 7: Medusa 2.23 builds through ts-node and the TypeScript compiler API, which TypeScript 7 (native Go compiler) no longer ships.",
+      "matchPackageNames": [
+        "typescript"
+      ],
+      "allowedVersions": "<7"
+    },
+    {
+      "description": "Hold pnpm below 12: pnpm 12 fails to install these repos in CI.",
+      "matchPackageNames": [
+        "pnpm"
+      ],
+      "allowedVersions": "<12"
+    },
+    {
+      "description": "@types/node tracks the oldest Node in engines (>=22.22), so code cannot compile against APIs that runtime lacks.",
+      "matchPackageNames": [
+        "@types/node"
+      ],
+      "allowedVersions": "22.x"
+    },
+    {
+      "description": "Medusa stays on 2.23.x until a planned upgrade (@medusajs/ui is versioned separately).",
+      "matchPackageNames": [
+        "@medusajs/**",
+        "!@medusajs/ui"
+      ],
+      "allowedVersions": "~2.23.0"
+    },
+    {
       "description": "Mark the weekly PR when it contains a major update, so it gets a closer review.",
       "matchUpdateTypes": [
         "major"
