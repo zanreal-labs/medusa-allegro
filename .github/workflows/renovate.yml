@@ -30,6 +30,10 @@ on:
         type: choice
         options: [info, debug]
         default: info
+      ignore-schedule:
+        description: Open update PRs now instead of waiting for the Monday window
+        type: boolean
+        default: false
 
 # Two Renovate runs on the same repository would race each other on the same
 # branches. Queue instead of cancelling, so a run that is mid-push finishes.
@@ -65,3 +69,6 @@ jobs:
           RENOVATE_ONBOARDING: "false"
           RENOVATE_REQUIRE_CONFIG: required
           LOG_LEVEL: ${{ inputs.log-level || 'info' }}
+          # Manual "ignore-schedule" run: override renovate.json's schedules for
+          # this run only. minimumReleaseAge and every other rule still apply.
+          RENOVATE_FORCE: ${{ inputs.ignore-schedule && '{"schedule":["at any time"],"lockFileMaintenance":{"schedule":["at any time"]}}' || '{}' }}
