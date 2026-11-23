@@ -24,7 +24,7 @@ jobs:
         node: [26]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -71,7 +71,7 @@ jobs:
     steps:
       # fetch-depth: 0 because the snapshot check below diffs across the pushed
       # commit range, which a shallow clone cannot see.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

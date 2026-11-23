@@ -36,7 +36,7 @@ jobs:
     steps:
       # A release event checks out the release tag, which is what the guard below
       # compares against package.json.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # This repository is on npm, not pnpm - there is a package-lock.json and
       # ci.yml runs `npm ci`. A release must install exactly what CI installed,
